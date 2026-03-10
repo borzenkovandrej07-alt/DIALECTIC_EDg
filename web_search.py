@@ -131,11 +131,11 @@ async def fetch_realtime_prices() -> dict:
 
         # Акции через Yahoo Finance
         async def get_stocks():
-            tickers = ["SPY", "QQQ", "GLD", "^VIX", "DX-Y.NYB", "CL=F", "GC=F"]
+            tickers = ["SPY", "QQQ", "GLD", "^VIX", "DX-Y.NYB", "CL=F"]
             name_map = {
                 "SPY": "SPY", "QQQ": "QQQ", "GLD": "GLD",
                 "^VIX": "VIX", "DX-Y.NYB": "DXY",
-                "CL=F": "OIL_WTI", "GC=F": "GOLD"
+                "CL=F": "OIL_WTI",
             }
             for ticker in tickers:
                 try:
@@ -149,10 +149,16 @@ async def fetch_realtime_prices() -> dict:
                             prev = meta.get("previousClose", price) or price
                             change = ((price - prev) / prev * 100) if prev else 0
                             key = name_map.get(ticker, ticker)
+                            # GLD = ETF, 1 акция = ~0.1 унции золота
+                            # Умножаем на 10 чтобы получить цену за унцию
+                            actual_price = price * 10 if ticker == "GLD" and key == "GLD" else price
+                            if ticker == "GLD":
+                                key = "GOLD"
+                                actual_price = round(price * 10, 2)
                             prices[key] = {
-                                "price": price,
+                                "price": actual_price,
                                 "change_24h": change,
-                                "source": "Yahoo Finance (15min delay)"
+                                "source": "Yahoo Finance GLD*10 (15min delay)"
                             }
                     await asyncio.sleep(0.15)
                 except Exception:
