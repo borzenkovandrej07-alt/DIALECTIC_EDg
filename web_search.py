@@ -131,28 +131,66 @@ async def fetch_realtime_prices() -> dict:
 
         # Золото через прямой API (metals-api бесплатно)
         async def get_gold():
+            """
+            Пробуем несколько источников по порядку.
+            GLD ETF = ~1/10 цены золота, поэтому умножаем на 10 как последний резерв.
+            Реальная цена золота сейчас ~$2900-3200 за унцию.
+            """
+            # Источник 1: GC=F фьючерс COMEX через Yahoo (нужны правильные заголовки)
             try:
-                # GC=F = фьючерс золота COMEX, цена в USD за тройскую унцию
-                url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+                yf_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                    "Referer": "https://finance.yahoo.com/",
+                }
+                url = "https://query2.finance.yahoo.com/v8/finance/chart/GC=F"
+                async with session.get(url, params={"interval": "1d", "range": "5d"},
+                                       headers=yf_headers, timeout=TIMEOUT) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        meta = data["chart"]["result"][0]["meta"]
+                        price = meta.get("regularMarketPrice", 0)
+                        prev = meta.get("chartPreviousClose", price) or price
+                        change = ((price - prev) / prev * 100) if prev else 0
+                        # Золото $1800-$4000 — реальный диапазон
+                        if 1800 < price < 4000:
+                            prices["GOLD"] = {
+                                "price": round(price, 2),
+                                "change_24h": round(change, 2),
+                                "source": "Yahoo Finance (live)"
+                            }
+                            logger.info(f"✅ Золото GC=F: ${price}")
+                            return
+                        else:
+                            logger.warning(f"GC=F вернул подозрительную цену: ${price}")
+            except Exception as e:
+                logger.debug(f"GC=F error: {e}")
+
+            # Источник 2: GLD ETF * 10 (приблизительно, ~1% погрешность)
+            try:
+                url = "https://query1.finance.yahoo.com/v8/finance/chart/GLD"
                 async with session.get(url, params={"interval": "1d", "range": "2d"},
                                        timeout=TIMEOUT) as r:
                     if r.status == 200:
                         data = await r.json()
                         meta = data["chart"]["result"][0]["meta"]
-                        price = meta.get("regularMarketPrice", 0)
-                        prev = meta.get("previousClose", price) or price
-                        change = ((price - prev) / prev * 100) if prev else 0
-                        # Санитарная проверка: золото должно быть $1500-$4000
-                        if 1500 < price < 4000:
+                        gld_price = meta.get("regularMarketPrice", 0)
+                        prev = meta.get("chartPreviousClose", gld_price) or gld_price
+                        change = ((gld_price - prev) / prev * 100) if prev else 0
+                        # GLD торгуется ~$270-320 (это ~$2700-3200 золота)
+                        if 200 < gld_price < 400:
+                            gold_approx = round(gld_price * 10, 2)
                             prices["GOLD"] = {
-                                "price": round(price, 2),
+                                "price": gold_approx,
                                 "change_24h": round(change, 2),
-                                "source": "Yahoo Finance COMEX (live)"
+                                "source": "Yahoo Finance GLD (приблизительно)"
                             }
-                        else:
-                            logger.warning(f"Цена золота подозрительная: ${price} — пропускаю")
+                            logger.info(f"✅ Золото через GLD: ${gld_price} × 10 = ${gold_approx}")
+                            return
             except Exception as e:
-                logger.debug(f"Gold price error: {e}")
+                logger.debug(f"GLD error: {e}")
+
+            logger.warning("❌ Цена золота недоступна из всех источников")
 
         # Акции через Yahoo Finance
         async def get_stocks():
