@@ -59,7 +59,30 @@ FREE_DAILY_LIMIT = 5
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 
+def clean_markdown(text: str) -> str:
+    """Убирает битый markdown который ломает Telegram."""
+    # Убираем незакрытые звёздочки и подчёркивания
+    # Считаем количество * — если нечётное, убираем все
+    lines = text.split("\n")
+    clean_lines = []
+    for line in lines:
+        # Если нечётное количество * — убираем все одиночные *
+        star_count = line.count("*")
+        if star_count % 2 != 0:
+            line = line.replace("*", "")
+        # Если нечётное количество _ — убираем все одиночные _
+        under_count = line.count("_")
+        if under_count % 2 != 0:
+            line = line.replace("_", "")
+        # Убираем незакрытые backticks
+        backtick_count = line.count("`")
+        if backtick_count % 2 != 0:
+            line = line.replace("`", "")
+        clean_lines.append(line)
+    return "\n".join(clean_lines)
+
 def split_message(text: str, max_len: int = 4000) -> list:
+    text = clean_markdown(text)
     if len(text) <= max_len:
         return [text]
     chunks = []
