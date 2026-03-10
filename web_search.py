@@ -129,13 +129,33 @@ async def fetch_realtime_prices() -> dict:
             except Exception as e:
                 logger.debug(f"Crypto price error: {e}")
 
+        # Золото через прямой API (metals-api бесплатно)
+        async def get_gold():
+            try:
+                # Используем open.er-api для металлов
+                url = "https://api.metals.dev/v1/spot?api_key=demo&base=USD&currencies=XAU"
+                async with session.get(url, timeout=TIMEOUT) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        # XAU = унция золота в USD
+                        rate = data.get("currencies", {}).get("XAU", 0)
+                        if rate and rate > 0:
+                            gold_price = round(1 / rate, 2)
+                            prices["GOLD"] = {
+                                "price": gold_price,
+                                "change_24h": 0,
+                                "source": "Metals API (live)"
+                            }
+            except Exception as e:
+                logger.debug(f"Gold API error: {e}")
+
         # Акции через Yahoo Finance
         async def get_stocks():
-            tickers = ["SPY", "QQQ", "GLD", "^VIX", "DX-Y.NYB", "CL=F"]
+            tickers = ["SPY", "QQQ", "^VIX", "DX-Y.NYB", "CL=F", "HG=F"]
             name_map = {
-                "SPY": "SPY", "QQQ": "QQQ", "GLD": "GLD",
+                "SPY": "SPY", "QQQ": "QQQ",
                 "^VIX": "VIX", "DX-Y.NYB": "DXY",
-                "CL=F": "OIL_WTI",
+                "CL=F": "OIL_WTI", "HG=F": "COPPER",
             }
             for ticker in tickers:
                 try:
@@ -149,25 +169,16 @@ async def fetch_realtime_prices() -> dict:
                             prev = meta.get("previousClose", price) or price
                             change = ((price - prev) / prev * 100) if prev else 0
                             key = name_map.get(ticker, ticker)
-                            # GLD = ETF, 1 акция = ~0.1 унции золота
-                            # Умножаем на 10 чтобы получить цену за унцию
-                            actual_price = price * 10 if ticker == "GLD" and key == "GLD" else price
-                            if ticker == "GLD":
-                                key = "GOLD"
-                                actual_price = round(price * 10, 2)
-                                source_name = "Yahoo Finance (15min delay)"
-                            else:
-                                source_name = "Yahoo Finance (15min delay)"
                             prices[key] = {
-                                "price": actual_price,
+                                "price": price,
                                 "change_24h": change,
-                                "source": source_name
+                                "source": "Yahoo Finance (15min delay)"
                             }
                     await asyncio.sleep(0.15)
                 except Exception:
                     continue
 
-        await asyncio.gather(get_crypto(), get_stocks(), return_exceptions=True)
+        await asyncio.gather(get_crypto(), get_stocks(), get_gold(), return_exceptions=True)
 
     return prices
 
