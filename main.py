@@ -762,13 +762,27 @@ async def cmd_russia(message: Message):
     else:
         global_report = "Глобальный анализ пока не готов. Запусти /daily сначала."
 
-    # Подсказка если нет кэша /daily
+    # Если нет кэша /daily — предлагаем выбор
     if not storage.get_cached_report():
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="✅ Сначала запущу /daily",
+                callback_data="russia_choice:daily"
+            ),
+            InlineKeyboardButton(
+                text="🚀 Запустить сейчас",
+                callback_data="russia_choice:now"
+            ),
+        ]])
         await message.answer(
-            "💡 *Совет:* для максимально глубокого анализа сначала запусти /daily\n"
-            "_Глобальный контекст рынков усилит РФ выводы в разы_",
-            parse_mode="Markdown"
+            "💡 *Совет перед запуском /russia:*\n\n"
+            "Глобальный дайджест (/daily) даёт агентам полный контекст рынков.\n"
+            "Без него анализ будет работать только на РФ данных.\n\n"
+            "*Что делаем?*",
+            parse_mode="Markdown",
+            reply_markup=kb
         )
+        return
 
     wait_msg = await message.answer(
         "🇷🇺 *Запускаю анализ для России...*\n\n"
@@ -809,6 +823,69 @@ async def cmd_russia(message: Message):
         await bot.edit_message_text(
             f"❌ *Ошибка:* `{str(e)[:200]}`",
             chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+
+
+
+# ─── Выбор перед /russia ──────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("russia_choice:"))
+async def handle_russia_choice(callback: CallbackQuery):
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    if action == "daily":
+        await callback.answer()
+        await callback.message.answer(
+            "✅ Отличный выбор! Запускай /daily — после него /russia выдаст максимум.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # action == "now" — запускаем сразу
+    await callback.answer("🚀 Запускаю!")
+
+    wait_msg = await callback.message.answer(
+        "🇷🇺 *Запускаю анализ для России...*\n\n"
+        "🔄 ЦБ РФ → Мосбиржа → РБК → Llama агенты → Mistral синтез\n"
+        "_Займёт 1–3 минуты..._",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await increment_requests(user_id)
+        global_report = "Глобальный анализ не запускался. Работаю только на данных РФ."
+        russia_context = await fetch_russia_context()
+        report = await run_russia_analysis(global_report, russia_context)
+
+        import time
+        russia_cache["report"]    = report
+        russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        russia_cache["ts"]        = time.time()
+
+        await bot.delete_message(
+            chat_id=callback.message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+        for chunk in split_message(report):
+            await callback.message.answer(chunk, parse_mode="Markdown")
+
+        await callback.message.answer(
+            "💬 *Был ли анализ полезным?*",
+            parse_mode="Markdown",
+            reply_markup=feedback_keyboard("russia")
+        )
+
+    except Exception as e:
+        logger.error(f"Russia choice error: {e}", exc_info=True)
+        await bot.edit_message_text(
+            f"❌ *Ошибка:* `{str(e)[:200]}`",
+            chat_id=callback.message.chat.id,
             message_id=wait_msg.message_id,
             parse_mode="Markdown"
         )
