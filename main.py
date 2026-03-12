@@ -281,10 +281,6 @@ def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineK
         ))
 
     buttons.append(nav_row)
-    buttons.append([
-        InlineKeyboardButton(text="❌ Закрыть", callback_data=f"debate:{user_id}:close")
-    ])
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -319,11 +315,6 @@ async def handle_debate_page(callback: CallbackQuery):
 
     if action == "noop":
         await callback.answer()
-        return
-
-    if action == "close":
-        await callback.message.delete()
-        await callback.answer("Закрыто")
         return
 
     round_idx = int(action)
