@@ -1,6 +1,8 @@
 """
-Dialectic Edge v5.0 — Максимально честный AI-аналитик.
-Новое: уровень сигнала ⭐, GitHub export после каждого /daily, global scheduler.
+Dialectic Edge v6.0 — UX апгрейд.
+- Одно сообщение вместо 6 (краткая выжимка + Synth)
+- Кнопка "📖 Полные дебаты" — листаешь раунды по одному
+- Простой язык в выводах для обычных людей
 """
 
 import asyncio
@@ -56,8 +58,11 @@ storage = Storage()
 
 FREE_DAILY_LIMIT = 5
 
-# Глобальный scheduler — нужен для export_now() после каждого /daily
 scheduler: Scheduler = None
+
+# Хранилище дебатов для листания по кнопкам
+# {user_id: {"rounds": [...], "full_report": str}}
+debate_cache: dict = {}
 
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
@@ -109,7 +114,6 @@ def feedback_keyboard(report_type: str) -> InlineKeyboardMarkup:
 
 
 def signal_to_stars(confidence) -> str:
-    """Конвертирует confidence (число 0-1 или строка HIGH/MEDIUM/LOW) в звёзды ⭐"""
     mapping = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
     if isinstance(confidence, str):
         confidence = mapping.get(confidence.upper(), 0.5)
@@ -119,6 +123,245 @@ def signal_to_stars(confidence) -> str:
         confidence = 0.5
     stars = max(1, min(5, round(confidence * 5)))
     return "⭐" * stars + "☆" * (5 - stars)
+
+
+# ─── Парсинг отчёта на части ──────────────────────────────────────────────────
+
+def parse_report_parts(report: str) -> dict:
+    """
+    Разбивает полный отчёт на:
+    - header: шапка с датой и звёздами
+    - rounds: список раундов дебатов [раунд1, раунд2, раунд3]
+    - synthesis: итоговый синтез Synth
+    - disclaimer: нижний дисклеймер
+    """
+    parts = {
+        "header": "",
+        "rounds": [],
+        "synthesis": "",
+        "disclaimer": "",
+        "full": report
+    }
+
+    # Вытаскиваем дисклеймер
+    disclaimer_marker = "─────────────────────────\n🤝 Честно о боте:"
+    if disclaimer_marker in report:
+        idx = report.find(disclaimer_marker)
+        parts["disclaimer"] = report[idx:]
+        report = report[:idx]
+
+    # Вытаскиваем синтез
+    synth_marker = "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*"
+    if synth_marker in report:
+        idx = report.find(synth_marker)
+        parts["synthesis"] = report[idx:].strip()
+        report = report[:idx]
+
+    # Вытаскиваем раунды
+    round_markers = [
+        "── Раунд 1:",
+        "── Раунд 2:",
+        "── Раунд 3:",
+    ]
+
+    debate_marker = "🗣 *ДЕБАТЫ АГЕНТОВ*"
+    if debate_marker in report:
+        debate_idx = report.find(debate_marker)
+        parts["header"] = report[:debate_idx].strip()
+        debate_section = report[debate_idx:]
+
+        # Разбиваем на раунды
+        current_round = ""
+        current_round_num = 0
+        for line in debate_section.split("\n"):
+            is_round_header = any(m in line for m in round_markers)
+            if is_round_header:
+                if current_round.strip() and current_round_num > 0:
+                    parts["rounds"].append(current_round.strip())
+                current_round = line + "\n"
+                current_round_num += 1
+            else:
+                current_round += line + "\n"
+
+        if current_round.strip() and current_round_num > 0:
+            parts["rounds"].append(current_round.strip())
+
+        if not parts["rounds"]:
+            parts["rounds"] = [debate_section]
+    else:
+        parts["header"] = report.strip()
+
+    return parts
+
+
+def build_short_report(parts: dict, stars: str, pct: int) -> str:
+    """
+    Строит короткое сообщение (1 TG-сообщение):
+    - Шапка + звёзды
+    - Краткие позиции Bull и Bear (по 2-3 строки)
+    - Полный Synth
+    - Дисклеймер
+    """
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Пытаемся вытащить первые 2-3 строки Bull и Bear из раунда 1
+    bull_summary = ""
+    bear_summary = ""
+
+    if parts["rounds"]:
+        round1 = parts["rounds"][0]
+        lines = round1.split("\n")
+
+        # Ищем Bull
+        in_bull = False
+        bull_lines = []
+        for line in lines:
+            if "🐂 Bull" in line:
+                in_bull = True
+                continue
+            if in_bull:
+                if "🐻 Bear" in line:
+                    break
+                if line.strip() and not line.startswith("──"):
+                    bull_lines.append(line.strip())
+                if len(bull_lines) >= 3:
+                    break
+
+        # Ищем Bear
+        in_bear = False
+        bear_lines = []
+        for line in lines:
+            if "🐻 Bear" in line:
+                in_bear = True
+                continue
+            if in_bear:
+                if line.strip() and not line.startswith("──"):
+                    bear_lines.append(line.strip())
+                if len(bear_lines) >= 3:
+                    break
+
+        bull_summary = "\n".join(bull_lines[:3]) if bull_lines else "Позиция бычья"
+        bear_summary = "\n".join(bear_lines[:3]) if bear_lines else "Позиция медвежья"
+
+    short = (
+        f"📊 *DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ*\n"
+        f"🕐 _{now}_\n\n"
+        f"💬 _4 AI-модели изучили рынок и поспорили. Вот что вышло:_\n\n"
+        f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
+        f"_Больше звёзд = данные чище и противоречивее_\n\n"
+        f"{'─' * 30}\n\n"
+        f"🐂 *Бычья позиция (кратко):*\n{bull_summary}\n\n"
+        f"🐻 *Медвежья позиция (кратко):*\n{bear_summary}\n\n"
+        f"{'─' * 30}\n\n"
+        f"{parts['synthesis']}\n\n"
+        f"{parts['disclaimer']}"
+    )
+
+    return clean_markdown(short)
+
+
+def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
+    """Клавиатура для листания раундов дебатов."""
+    buttons = []
+
+    nav_row = []
+    if round_idx > 0:
+        nav_row.append(InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"debate:{user_id}:{round_idx - 1}"
+        ))
+    nav_row.append(InlineKeyboardButton(
+        text=f"📄 {round_idx + 1}/{total_rounds}",
+        callback_data="debate:noop"
+    ))
+    if round_idx < total_rounds - 1:
+        nav_row.append(InlineKeyboardButton(
+            text="Вперёд ▶️",
+            callback_data=f"debate:{user_id}:{round_idx + 1}"
+        ))
+
+    buttons.append(nav_row)
+    buttons.append([
+        InlineKeyboardButton(text="❌ Закрыть", callback_data=f"debate:{user_id}:close")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def main_report_keyboard(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
+    """Клавиатура под основным отчётом."""
+    buttons = []
+    if has_debates:
+        buttons.append([
+            InlineKeyboardButton(
+                text="📖 Полные дебаты агентов",
+                callback_data=f"debate:{user_id}:0"
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(text="👍 Полезно", callback_data=f"fb:1:daily"),
+        InlineKeyboardButton(text="👎 Мимо",    callback_data=f"fb:-1:daily"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ─── Обработчик листания дебатов ──────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("debate:"))
+async def handle_debate_page(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+
+    _, user_id_str, action = parts[0], parts[1], parts[2]
+    user_id = int(user_id_str)
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    if action == "close":
+        await callback.message.delete()
+        await callback.answer("Закрыто")
+        return
+
+    round_idx = int(action)
+
+    # Берём дебаты из кэша
+    cache = debate_cache.get(user_id)
+    if not cache:
+        await callback.answer("❌ Дебаты устарели, запусти /daily заново")
+        return
+
+    rounds = cache["rounds"]
+    if round_idx >= len(rounds):
+        await callback.answer()
+        return
+
+    round_text = clean_markdown(rounds[round_idx])
+
+    # Если текст слишком длинный — режем
+    if len(round_text) > 4000:
+        round_text = round_text[:3900] + "\n\n_...сокращено..._"
+
+    kb = debates_keyboard(user_id, round_idx, len(rounds))
+
+    try:
+        await callback.message.edit_text(
+            round_text,
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+    except Exception:
+        # Если не получается edit — отправляем новое
+        await callback.message.answer(
+            round_text,
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+
+    await callback.answer()
 
 
 # ─── /start ───────────────────────────────────────────────────────────────────
@@ -284,7 +527,7 @@ async def run_full_analysis(
         custom_mode=custom_mode
     )
 
-    # ── Добавляем уровень сигнала ⭐ сразу после первого разделителя ──────────
+    # ── Уровень сигнала ───────────────────────────────────────────────────────
     _conf_raw = sentiment_result.confidence
     _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
     if isinstance(_conf_raw, str):
@@ -294,13 +537,15 @@ async def run_full_analysis(
             _conf_num = float(_conf_raw)
         except (TypeError, ValueError):
             _conf_num = 0.5
+
     stars = signal_to_stars(_conf_num)
     pct   = int(_conf_num * 100)
+
+    separator = "─" * 30 + "\n"
     signal_line = (
         f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
         f"_Чем больше звёзд — тем чище и противоречивее данные для анализа_\n\n"
     )
-    separator = "─" * 30 + "\n"
     report = report.replace(separator, separator + signal_line, 1)
 
     # ── Сохраняем прогнозы ────────────────────────────────────────────────────
@@ -315,7 +560,6 @@ async def run_full_analysis(
 
     if not custom_mode:
         storage.cache_report(report)
-        # Экспортируем track record на GitHub после каждого /daily
         if scheduler is not None:
             asyncio.create_task(scheduler.export_now())
 
@@ -343,12 +587,25 @@ async def cmd_daily(message: Message):
 
     cached = storage.get_cached_report()
     if cached:
-        for chunk in split_message(cached['report']):
+        report = cached['report']
+        _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
+        parts = parse_report_parts(report)
+        short = build_short_report(parts, "⭐⭐⭐⭐☆", 85)
+
+        # Кэшируем раунды для листания
+        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+
+        chunks = split_message(short)
+        for chunk in chunks[:-1]:
             await message.answer(chunk, parse_mode="Markdown")
         await message.answer(
-            f"📦 _Кэш от {cached['timestamp']}. Новый через 2ч._",
+            chunks[-1],
             parse_mode="Markdown",
-            reply_markup=feedback_keyboard("daily")
+            reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
+        )
+        await message.answer(
+            f"📦 _Кэш от {cached['timestamp']}. Новый через 2ч._",
+            parse_mode="Markdown"
         )
         return
 
@@ -364,13 +621,32 @@ async def cmd_daily(message: Message):
         report = await run_daily_analysis(user_id)
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
 
-        for chunk in split_message(report):
-            await message.answer(chunk, parse_mode="Markdown")
+        # Парсим отчёт на части
+        parts = parse_report_parts(report)
 
+        # Вычисляем звёзды из отчёта
+        stars_line = ""
+        pct_val = 85
+        if "Уровень сигнала" in report:
+            import re
+            m = re.search(r"Уровень сигнала.*?(\d+)%", report)
+            if m:
+                pct_val = int(m.group(1))
+        stars_str = signal_to_stars(pct_val / 100)
+
+        # Кэшируем раунды для кнопки
+        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+
+        # Строим короткое сообщение
+        short = build_short_report(parts, stars_str, pct_val)
+
+        chunks = split_message(short)
+        for chunk in chunks[:-1]:
+            await message.answer(chunk, parse_mode="Markdown")
         await message.answer(
-            "💬 *Был ли анализ полезным?*",
+            chunks[-1],
             parse_mode="Markdown",
-            reply_markup=feedback_keyboard("daily")
+            reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
         )
 
     except Exception as e:
@@ -422,13 +698,24 @@ async def cmd_analyze(message: Message):
         report = await run_full_analysis(user_id, custom_news=user_news, custom_mode=True)
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
 
-        for chunk in split_message(report):
-            await message.answer(chunk, parse_mode="Markdown")
+        report_parts = parse_report_parts(report)
+        debate_cache[user_id] = {"rounds": report_parts["rounds"], "full": report}
 
+        pct_val = 85
+        import re
+        m = re.search(r"Уровень сигнала.*?(\d+)%", report)
+        if m:
+            pct_val = int(m.group(1))
+        stars_str = signal_to_stars(pct_val / 100)
+
+        short = build_short_report(report_parts, stars_str, pct_val)
+        chunks = split_message(short)
+        for chunk in chunks[:-1]:
+            await message.answer(chunk, parse_mode="Markdown")
         await message.answer(
-            "💬 *Был ли анализ полезным?*",
+            chunks[-1],
             parse_mode="Markdown",
-            reply_markup=feedback_keyboard("analyze")
+            reply_markup=main_report_keyboard(user_id, has_debates=bool(report_parts["rounds"]))
         )
 
     except Exception as e:
@@ -508,7 +795,7 @@ async def cmd_trackrecord(message: Message):
                 f"*Winrate:* {wr_emoji} *{winrate:.0f}%* ({wins}✅ / {losses}❌)",
                 f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*",
             ]
-            if best:              lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
+            if best:               lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
             if worst and worst < 0: lines.append(f"*Худший:* 💥 {worst:.1f}%")
 
         if by_asset:
@@ -653,11 +940,12 @@ async def cmd_stats(message: Message):
 async def cmd_help(message: Message):
     await upsert_user(message.from_user.id)
     await message.answer(
-        "📖 *Dialectic Edge v5.0*\n\n"
-        "*Что нового в v5:*\n"
-        "• Уровень сигнала ⭐⭐⭐⭐⭐ в каждом анализе\n"
-        "• FORECASTS.md на GitHub обновляется после каждого /daily\n"
-        "• Track Record в /stats\n\n"
+        "📖 *Dialectic Edge v6.0*\n\n"
+        "*Что нового в v6:*\n"
+        "• Один отчёт вместо 6 сообщений\n"
+        "• Кнопка 📖 Полные дебаты — листай раунды\n"
+        "• Простой язык в выводах\n"
+        "• Умный Risk/Reward — если риск высокий, бот честно скажет 'ВНЕ РЫНКА'\n\n"
         "*Команды:*\n"
         "• `/profile` — настрой риск-профиль первым\n"
         "• `/daily` — дайджест рынков\n"
@@ -704,7 +992,6 @@ async def cmd_admin(message: Message):
 @dp.callback_query(F.data.startswith("fb:"))
 async def handle_feedback(callback: CallbackQuery):
     _, rating_str, report_type = callback.data.split(":")
-    from database import save_feedback
     await save_feedback(callback.from_user.id, report_type, int(rating_str))
     emoji = "🙏 Спасибо!" if int(rating_str) == 1 else "📝 Учтём!"
     await callback.answer(emoji)
@@ -718,7 +1005,7 @@ async def main():
 
     await init_db()
     await init_profiles_table()
-    logger.info("🚀 Dialectic Edge v5.0 starting...")
+    logger.info("🚀 Dialectic Edge v6.0 starting...")
 
     scheduler = Scheduler(
         bot=bot,
