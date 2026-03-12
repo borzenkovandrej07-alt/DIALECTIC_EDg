@@ -762,9 +762,17 @@ async def cmd_russia(message: Message):
     else:
         global_report = "Глобальный анализ пока не готов. Запусти /daily сначала."
 
+    # Подсказка если нет кэша /daily
+    if not storage.get_cached_report():
+        await message.answer(
+            "💡 *Совет:* для максимально глубокого анализа сначала запусти /daily\n"
+            "_Глобальный контекст рынков усилит РФ выводы в разы_",
+            parse_mode="Markdown"
+        )
+
     wait_msg = await message.answer(
         "🇷🇺 *Запускаю анализ для России...*\n\n"
-        "🔄 ЦБ РФ → Мосбиржа → РБК → YandexGPT агенты → Синтез\n"
+        "🔄 ЦБ РФ → Мосбиржа → РБК → Llama агенты → Mistral синтез\n"
         "_Займёт 1–3 минуты..._",
         parse_mode="Markdown"
     )
