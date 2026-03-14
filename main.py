@@ -219,8 +219,7 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     Возвращает СПИСОК сообщений для отправки.
     Шапка с Bull/Bear кратко — первое сообщение.
-    Затем полный синтез режется на чанки.
-    Дисклеймер — последнее сообщение.
+    Затем ВЕСЬ синтез + дисклеймер режется на чанки по 2500 символов.
     """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
@@ -267,16 +266,26 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
 
     messages = [header]
 
-    # Синтез — режем на чанки по 2800 символов (с запасом)
-    synthesis = parts.get("synthesis", "").strip()
-    if synthesis:
-        for chunk in split_message(synthesis, max_len=2800):
-            messages.append(chunk)
+    # Берём весь контент после шапки из полного отчёта
+    # Ищем начало синтеза в полном отчёте
+    full = parts.get("full", "")
+    synth_start = -1
+    for marker in ["⚖️ *ИТОГОВЫЙ СИНТЕЗ", "⚖️ ИТОГОВЫЙ СИНТЕЗ", "ИТОГОВЫЙ СИНТЕЗ"]:
+        idx = full.find(marker)
+        if idx != -1:
+            synth_start = idx
+            break
 
-    # Дисклеймер — последнее сообщение
-    disclaimer = parts.get("disclaimer", "").strip()
-    if disclaimer:
-        messages.append(disclaimer)
+    if synth_start != -1:
+        synth_and_rest = full[synth_start:]
+    else:
+        # Fallback — берём synthesis + disclaimer из parts
+        synth_and_rest = parts.get("synthesis", "") + "\n\n" + parts.get("disclaimer", "")
+
+    # Режем на чанки по 2500 символов — гарантированно влезают в TG
+    for chunk in split_message(synth_and_rest, max_len=2500):
+        if chunk.strip():
+            messages.append(chunk)
 
     return messages
 
