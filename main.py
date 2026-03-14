@@ -46,6 +46,7 @@ from user_profile import (
 from weekly_report import build_weekly_report, send_weekly_reports
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
+from github_export import export_to_github, push_digest_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -559,6 +560,12 @@ async def run_full_analysis(
         storage.cache_report(report)
         if scheduler is not None:
             asyncio.create_task(scheduler.export_now())
+        # Кэшируем дайджест на GitHub для отслеживания точности (п.6)
+        try:
+            date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+            asyncio.create_task(push_digest_cache(report, date_str))
+        except Exception as e:
+            logger.warning(f"Digest cache error: {e}")
 
     return report
 
