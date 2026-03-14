@@ -47,6 +47,8 @@ from weekly_report import build_weekly_report, send_weekly_reports
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
 from github_export import export_to_github, push_digest_cache
+# ... после других импортов ...
+from learning import get_recent_lessons  # ← ДОБАВИТЬ ЭТУ СТРОКУ
 
 logging.basicConfig(
     level=logging.INFO,
