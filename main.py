@@ -200,74 +200,70 @@ def parse_report_parts(report: str) -> dict:
     return parts
 
 
-def build_short_report(parts: dict, stars: str, pct: int) -> str:
+def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
-    Строит короткое сообщение (1 TG-сообщение):
-    - Шапка + звёзды
-    - Краткие позиции Bull и Bear (по 2-3 строки)
-    - Полный Synth
-    - Дисклеймер
+    Возвращает СПИСОК сообщений для отправки:
+    [0] = шапка + Bull/Bear кратко
+    [1..N] = синтез по чанкам
+    [N+1] = дисклеймер
     """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Пытаемся вытащить первые 2-3 строки Bull и Bear из раунда 1
-    bull_summary = ""
-    bear_summary = ""
+    # Вытаскиваем Bull и Bear кратко из раунда 1
+    bull_summary = "Позиция бычья"
+    bear_summary = "Позиция медвежья"
 
     if parts["rounds"]:
         round1 = parts["rounds"][0]
         lines = round1.split("\n")
-
-        # Ищем Bull
-        in_bull = False
-        bull_lines = []
+        bull_lines, bear_lines = [], []
+        in_bull = in_bear = False
         for line in lines:
             if "🐂 Bull" in line:
-                in_bull = True
+                in_bull, in_bear = True, False
                 continue
-            if in_bull:
-                if "🐻 Bear" in line:
-                    break
-                if line.strip() and not line.startswith("──"):
-                    bull_lines.append(line.strip())
-                if len(bull_lines) >= 3:
-                    break
-
-        # Ищем Bear
-        in_bear = False
-        bear_lines = []
-        for line in lines:
             if "🐻 Bear" in line:
-                in_bear = True
+                in_bear, in_bull = True, False
                 continue
-            if in_bear:
-                if line.strip() and not line.startswith("──"):
-                    bear_lines.append(line.strip())
-                if len(bear_lines) >= 3:
-                    break
+            stripped = line.strip()
+            if not stripped or stripped.startswith("──"):
+                continue
+            if in_bull and len(bull_lines) < 3:
+                bull_lines.append(stripped)
+            elif in_bear and len(bear_lines) < 3:
+                bear_lines.append(stripped)
+        if bull_lines:
+            bull_summary = "\n".join(bull_lines)
+        if bear_lines:
+            bear_summary = "\n".join(bear_lines)
 
-        bull_summary = "\n".join(bull_lines[:3]) if bull_lines else "Позиция бычья"
-        bear_summary = "\n".join(bear_lines[:3]) if bear_lines else "Позиция медвежья"
-
+    # Шапка — всегда первое сообщение
     header = (
-        f"📊 *DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ*\n"
-        f"🕐 _{now}_\n\n"
-        f"💬 _4 AI-модели изучили рынок и поспорили. Вот что вышло:_\n\n"
-        f"📶 *Уровень сигнала:* {stars} ({pct}% уверенности)\n"
-        f"_Больше звёзд = данные чище и противоречивее_\n\n"
+        f"📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ\n"
+        f"🕐 {now}\n\n"
+        f"4 AI-модели изучили рынок и поспорили. Вот что вышло:\n\n"
+        f"Уровень сигнала: {stars} ({pct}% уверенности)\n"
+        f"Больше звёзд = данные чище и противоречивее\n\n"
         f"{'─' * 30}\n\n"
-        f"🐂 *Бычья позиция (кратко):*\n{bull_summary}\n\n"
-        f"🐻 *Медвежья позиция (кратко):*\n{bear_summary}\n\n"
-        f"{'─' * 30}\n\n"
+        f"🐂 Бычья позиция (кратко):\n{bull_summary}\n\n"
+        f"🐻 Медвежья позиция (кратко):\n{bear_summary}\n\n"
+        f"{'─' * 30}"
     )
 
-    synthesis_text = parts['synthesis'] + "\n\n" + parts['disclaimer']
-    synthesis_chunks = split_message(clean_markdown(synthesis_text))
+    messages = [header]
 
-    # Сохраняем чанки в parts чтобы caller мог отправить остаток
-    parts["_synthesis_chunks"] = synthesis_chunks
+    # Синтез режем на чанки без Markdown parse_mode (plain text надёжнее)
+    synthesis = parts.get('synthesis', '')
+    if synthesis:
+        for chunk in split_message(synthesis):
+            messages.append(chunk)
 
-    return clean_markdown(header) + synthesis_chunks[0]
+    # Дисклеймер отдельно
+    disclaimer = parts.get('disclaimer', '')
+    if disclaimer:
+        messages.append(disclaimer)
+
+    return messages
 
 
 def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
@@ -598,27 +594,18 @@ async def cmd_daily(message: Message):
         report = cached['report']
         _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
         parts = parse_report_parts(report)
-        short = build_short_report(parts, "⭐⭐⭐⭐☆", 85)
-
         # Кэшируем раунды для листания
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-        # Отправляем первый чанк
-        await message.answer(short, parse_mode="Markdown")
-
-        # Остаток синтеза если не влез
-        for chunk in parts.get("_synthesis_chunks", [])[1:]:
-            await message.answer(chunk, parse_mode="Markdown")
+        messages = build_short_report(parts, "⭐⭐⭐⭐☆", 85)
+        for msg in messages:
+            await message.answer(msg)
 
         await message.answer(
-            "📖 _Полный анализ выше_",
-            parse_mode="Markdown",
+            "Полный анализ выше",
             reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
         )
-        await message.answer(
-            f"📦 _Кэш от {cached['timestamp']}. Новый через 2ч._",
-            parse_mode="Markdown"
-        )
+        await message.answer(f"Кэш от {cached['timestamp']}. Новый через 2ч.")
         return
 
     wait_msg = await message.answer(
@@ -649,20 +636,12 @@ async def cmd_daily(message: Message):
         # Кэшируем раунды для кнопки
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-        # Строим короткое сообщение (parts["_synthesis_chunks"] заполняется внутри)
-        short = build_short_report(parts, stars_str, pct_val)
+        messages = build_short_report(parts, stars_str, pct_val)
+        for msg in messages:
+            await message.answer(msg)
 
-        # Отправляем первый чанк (header + начало синтеза)
-        await message.answer(short, parse_mode="Markdown")
-
-        # Отправляем оставшиеся чанки синтеза если синтез не влез в одно сообщение
-        for chunk in parts.get("_synthesis_chunks", [])[1:]:
-            await message.answer(chunk, parse_mode="Markdown")
-
-        # Кнопки под последним сообщением
         await message.answer(
-            "📖 _Полный анализ выше_",
-            parse_mode="Markdown",
+            "Полный анализ выше",
             reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"]))
         )
 
