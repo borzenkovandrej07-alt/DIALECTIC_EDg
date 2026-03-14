@@ -87,19 +87,23 @@ def clean_markdown(text: str) -> str:
     return "\n".join(clean_lines)
 
 
-def split_message(text: str, max_len: int = 4000) -> list:
+def split_message(text: str, max_len: int = 3800) -> list:
     text = clean_markdown(text)
     if len(text) <= max_len:
         return [text]
     chunks = []
     while len(text) > max_len:
+        # Ищем последний перенос строки в пределах лимита
         split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1 or split_at < max_len // 2:
+            # Если нет переноса — режем по пробелу
+            split_at = text.rfind(" ", 0, max_len)
         if split_at == -1:
             split_at = max_len
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    if text:
-        chunks.append(text)
+        chunks.append(text[:split_at].rstrip())
+        text = text[split_at:].lstrip("\n ")
+    if text.strip():
+        chunks.append(text.strip())
     return chunks
 
 
@@ -149,19 +153,30 @@ def parse_report_parts(report: str) -> dict:
         "full": report
     }
 
-    # Вытаскиваем дисклеймер
-    disclaimer_marker = "─────────────────────────\n🤝 Честно о боте:"
-    if disclaimer_marker in report:
-        idx = report.find(disclaimer_marker)
-        parts["disclaimer"] = report[idx:]
-        report = report[:idx]
+    # Вытаскиваем дисклеймер — пробуем несколько вариантов маркера
+    for disc_marker in [
+        "─────────────────────────\n🤝 Честно о боте:",
+        "─────────────────────────\n🤝 *Честно о боте:*",
+        "🤝 Честно о боте:",
+        "🤝 *Честно о боте:*",
+    ]:
+        if disc_marker in report:
+            idx = report.find(disc_marker)
+            parts["disclaimer"] = report[idx:]
+            report = report[:idx]
+            break
 
-    # Вытаскиваем синтез
-    synth_marker = "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*"
-    if synth_marker in report:
-        idx = report.find(synth_marker)
-        parts["synthesis"] = report[idx:].strip()
-        report = report[:idx]
+    # Вытаскиваем синтез — пробуем несколько вариантов маркера
+    for synth_marker in [
+        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
+        "ИТОГОВЫЙ СИНТЕЗ",
+    ]:
+        if synth_marker in report:
+            idx = report.find(synth_marker)
+            parts["synthesis"] = report[idx:].strip()
+            report = report[:idx]
+            break
 
     # Вытаскиваем раунды
     round_markers = [
