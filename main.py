@@ -528,6 +528,11 @@ async def run_full_analysis(
     if isinstance(meta_context, Exception): meta_context = ""
 
     profile_instruction = build_profile_instruction(profile)
+     # ─── LEARNING: Добавляем уроки из прошлых ошибок ─────────────────────────
+    lessons = await get_recent_lessons(days=14)
+    if lessons:
+        profile_instruction += lessons
+        logger.info(f"🧠 Агенты получили уроки")
 
     if custom_mode and custom_news:
         web_context = await search_news_context(custom_news)
