@@ -267,10 +267,10 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
 
     messages = [header]
 
-    # Синтез — режем на чанки по 3500 символов
+    # Синтез — режем на чанки по 2800 символов (с запасом)
     synthesis = parts.get("synthesis", "").strip()
     if synthesis:
-        for chunk in split_message(synthesis, max_len=3500):
+        for chunk in split_message(synthesis, max_len=2800):
             messages.append(chunk)
 
     # Дисклеймер — последнее сообщение
