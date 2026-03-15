@@ -125,7 +125,13 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
       - Уровень сигнала
     """
     if not MATPLOTLIB_OK:
+        logger.warning("matplotlib not available")
         return None
+
+    # Защита от пустого prices
+    if not prices:
+        logger.warning("generate_main_chart: prices пустой — пропускаю")
+        prices = {}
 
     try:
         _setup_dark_style()
@@ -378,6 +384,7 @@ def generate_russia_chart(russia_report: str) -> io.BytesIO | None:
 
 def _parse_russia_items(text: str, marker: str) -> list[dict]:
     """Парсит возможности/риски из Russia Edge отчёта."""
+    import re as _re
     items = []
     rating_map = {"ВЫСОКАЯ": 3, "СРЕДНЯЯ": 2, "НИЗКАЯ": 1}
     lines = text.split("\n")
@@ -385,7 +392,10 @@ def _parse_russia_items(text: str, marker: str) -> list[dict]:
     for line in lines:
         line = line.strip()
         if line.startswith("•") and len(line) > 5:
-            current_name = line.lstrip("• ").split("\n")[0][:40]
+            # Чистим markdown *, **, _ из названий
+            raw_name = line.lstrip("• ").split("\n")[0][:50]
+            raw_name = _re.sub(r"[*_`]", "", raw_name).strip()
+            current_name = raw_name[:28]  # обрезаем для графика
         if current_name and ("Уверенность:" in line or "Вероятность:" in line):
             for key, val in rating_map.items():
                 if key in line:
