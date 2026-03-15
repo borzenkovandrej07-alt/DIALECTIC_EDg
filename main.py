@@ -348,8 +348,16 @@ def split_digest(text: str) -> list[str]:
 # ─── Клавиатуры ───────────────────────────────────────────────────────────────
 
 def main_kb(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки под дайджестом. Дебаты идут автоматически после — кнопки возврата не нужны."""
+    """
+    Кнопки под дайджестом.
+    Дебаты — листаются по кнопке (не отправляются автоматом).
+    """
     rows = []
+    if has_debates:
+        rows.append([InlineKeyboardButton(
+            text="📖 Полные дебаты агентов",
+            callback_data=f"debate:{user_id}:0",
+        )])
     rows.append([
         InlineKeyboardButton(text="🇷🇺 Russia Edge", callback_data=f"russia_quick:{user_id}"),
         InlineKeyboardButton(text="🔄 Обновить",     callback_data=f"refresh:{user_id}"),
@@ -386,15 +394,22 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
         get_profile(user_id),
         get_meta_context(),
     ]
-    news, geo, (prices, live_prices), profile, meta = await asyncio.gather(
-        *tasks, return_exceptions=True
-    )
-    if isinstance(news, Exception):        news = ""
-    if isinstance(geo, Exception):         geo = ""
-    if isinstance(live_prices, Exception): live_prices = ""
-    if isinstance(prices, Exception):      prices = {}
-    if isinstance(profile, Exception):     profile = {"risk": "moderate", "horizon": "swing", "markets": "all"}
-    if isinstance(meta, Exception):        meta = ""
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    news, geo, realtime_result, profile, meta = results
+
+    # Безопасная распаковка realtime — если упало, не крашим всё
+    if isinstance(realtime_result, Exception):
+        logger.error(f"get_full_realtime_context error: {realtime_result}")
+        prices, live_prices = {}, ""
+    elif isinstance(realtime_result, tuple) and len(realtime_result) == 2:
+        prices, live_prices = realtime_result
+    else:
+        prices, live_prices = {}, ""
+
+    if isinstance(news, Exception):    news = ""
+    if isinstance(geo, Exception):     geo = ""
+    if isinstance(profile, Exception): profile = {"risk": "moderate", "horizon": "swing", "markets": "all"}
+    if isinstance(meta, Exception):    meta = ""
 
     profile_instr = build_profile_instruction(profile)
     lessons = await get_recent_lessons(days=14)
@@ -460,11 +475,12 @@ async def run_daily_analysis(user_id: int) -> str:
 
 async def send_digest(message: Message, report: str, prices: dict):
     """
-    UX v7.1:
+    UX v7.2 — финальный:
     1. Фото-график (dashboard)
-    2. Краткий дайджест (Bull/Bear/Вердикт/План) + кнопки 👍👎 🇷🇺 🔄
-    3. Полные дебаты — каждый раунд отдельным сообщением (автоматически)
-    4. Дисклеймер отдельным сообщением в конце
+    2. Краткий дайджест (Bull/Bear/Вердикт/План)
+    3. Дисклеймер отдельным сообщением
+    4. Кнопки: [📖 Полные дебаты] [🇷🇺] [🔄] [👍] [👎]
+       — по кнопке дебаты листаются постранично (◀️ 📄 1/3 ▶️)
     """
     parts = parse_report(report)
     user_id = message.from_user.id
@@ -477,7 +493,7 @@ async def send_digest(message: Message, report: str, prices: dict):
         pct_val = int(m.group(1))
     stars_str = signal_to_stars(pct_val / 100)
 
-    # 1. График — логируем ошибку подробно чтобы понять почему не приходит
+    # 1. График
     if charts_ok():
         try:
             logger.info(f"Генерирую график, prices keys: {list(prices.keys())}")
@@ -493,38 +509,16 @@ async def send_digest(message: Message, report: str, prices: dict):
         except Exception as e:
             logger.error(f"Chart error: {e}", exc_info=True)
     else:
-        logger.warning("matplotlib недоступен — графики отключены")
+        logger.warning("matplotlib недоступен")
 
-    # 2. Краткий дайджест + кнопки
+    # 2. Краткий дайджест (без дисклеймера внутри)
     digest = build_digest(parts, stars_str, pct_val)
     chunks = split_digest(digest)
-
-    for chunk in chunks[:-1]:
+    for chunk in chunks:
         await message.answer(chunk)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
 
-    await message.answer(
-        chunks[-1],
-        reply_markup=main_kb(user_id),
-    )
-
-    # 3. Полные дебаты — каждый раунд отдельно, автоматически
-    if parts["rounds"]:
-        await asyncio.sleep(0.5)
-        await message.answer(
-            "─" * 30 + "\n📖 ПОЛНЫЕ ДЕБАТЫ АГЕНТОВ\n" + "─" * 30
-        )
-        for i, round_text in enumerate(parts["rounds"], 1):
-            clean_round = re.sub(r"[*_`#]", "", round_text)
-            clean_round = re.sub(r"\n{3,}", "\n\n", clean_round).strip()
-            # Режем длинные раунды
-            for chunk in split_msg(clean_round, max_len=3800):
-                if chunk.strip():
-                    await message.answer(chunk)
-                    await asyncio.sleep(0.3)
-
-    # 4. Дисклеймер — отдельным сообщением в самом конце
-    await asyncio.sleep(0.3)
+    # 3. Дисклеймер — отдельным сообщением
     disclaimer = parts.get("disclaimer", "")
     if not disclaimer:
         disclaimer = (
@@ -537,6 +531,13 @@ async def send_digest(message: Message, report: str, prices: dict):
         )
     clean_disc = re.sub(r"[*_`#]", "", disclaimer).strip()
     await message.answer(clean_disc)
+
+    # 4. Кнопки — последнее сообщение
+    has_debates = bool(parts["rounds"])
+    await message.answer(
+        "👇 Действия:",
+        reply_markup=main_kb(user_id, has_debates=has_debates),
+    )
 
 
 # ─── /daily ───────────────────────────────────────────────────────────────────
