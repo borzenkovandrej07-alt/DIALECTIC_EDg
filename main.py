@@ -215,36 +215,43 @@ def extract_short_position(round1: str, agent_emoji: str) -> str:
 
 
 def extract_verdict(synthesis: str) -> str:
-    """Извлекает блок ВЕРДИКТ СУДЬИ из синтеза."""
-    markers = ["🏆 ВЕРДИКТ СУДЬИ", "ВЕРДИКТ СУДЬИ"]
-    for m in markers:
-        if m in synthesis:
-            idx   = synthesis.find(m)
-            chunk = synthesis[idx:idx + 500]
-            # Берём до следующего крупного блока
-            for stop in ["\n\n\n", "🌍", "📊", "⚔️", "🌐", "🎯", "💼"]:
-                if stop in chunk[10:]:
-                    chunk = chunk[:chunk.find(stop, 10)]
-                    break
-            return chunk.strip()
-    # Fallback — "Простыми словами"
-    for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
-        if m in synthesis:
-            idx   = synthesis.find(m)
-            chunk = synthesis[idx:idx + 600]
-            return chunk.strip()
-    return synthesis[:400].strip()
-
-
-def extract_plan(synthesis: str) -> str:
-    """Извлекает торговый план из синтеза."""
-    for m in ["💼 ПЛАН ДЕЙСТВИЙ", "ПЛАН ДЕЙСТВИЙ"]:
+    """Извлекает блок ВЕРДИКТ СУДЬИ или Простыми словами из синтеза."""
+    for m in ["🏆 ВЕРДИКТ СУДЬИ", "ВЕРДИКТ СУДЬИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
             chunk = synthesis[idx:idx + 800]
-            for stop in ["⚠️ ЧЕСТНЫЙ ИТОГ", "🗣 ПРОСТЫМИ СЛОВАМИ", "─────"]:
-                if stop in chunk[20:]:
-                    chunk = chunk[:chunk.find(stop, 20)]
+            for stop in ["💼 ПЛАН ДЕЙСТВИЙ", "⚠️ ЧЕСТНЫЙ ИТОГ",
+                         "🗣 ПРОСТЫМИ СЛОВАМИ"]:
+                pos = chunk.find(stop, 10)
+                if pos != -1:
+                    chunk = chunk[:pos]
+                    break
+            return chunk.strip()
+    # Fallback — блок Простыми словами (всегда есть в синтезе)
+    for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
+        if m in synthesis:
+            idx   = synthesis.find(m)
+            chunk = synthesis[idx:idx + 900]
+            for stop in ["⚠️ Не является", "─────────────────────────"]:
+                pos = chunk.find(stop, 10)
+                if pos != -1:
+                    chunk = chunk[:pos]
+                    break
+            return chunk.strip()
+    return synthesis[:500].strip()
+
+
+def extract_plan(synthesis: str) -> str:
+    """Извлекает торговый план из синтеза. Лимит 2500 — план бывает длинным."""
+    for m in ["💼 ПЛАН ДЕЙСТВИЙ", "ПЛАН ДЕЙСТВИЙ"]:
+        if m in synthesis:
+            idx   = synthesis.find(m)
+            chunk = synthesis[idx:idx + 2500]
+            for stop in ["⚠️ ЧЕСТНЫЙ ИТОГ", "🗣 ПРОСТЫМИ СЛОВАМИ",
+                         "🏆 ВЕРДИКТ"]:
+                pos = chunk.find(stop, 20)
+                if pos != -1:
+                    chunk = chunk[:pos]
                     break
             return chunk.strip()
     return ""
@@ -309,7 +316,33 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
         "Не является финансовым советом. AI-анализ. DYOR.",
     ]
 
-    return "\n".join(lines)
+    return "\n".join(str(l) for l in lines)
+
+
+def split_digest(text: str) -> list[str]:
+    """
+    Режет дайджест на части по смысловым блокам,
+    а не по символам — чтобы план не обрывался на полуслове.
+    """
+    # Сначала пробуем целиком — если влезает
+    clean = re.sub(r"[*_`#]", "", text)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    if len(clean) <= 4000:
+        return [clean]
+
+    # Разбиваем по смысловым разделителям
+    parts  = []
+    blocks = re.split(r"(─{10,})", clean)
+    current = ""
+    for block in blocks:
+        if len(current) + len(block) > 3800 and current.strip():
+            parts.append(current.strip())
+            current = block
+        else:
+            current += block
+    if current.strip():
+        parts.append(current.strip())
+    return parts if parts else [clean[:4000]]
 
 
 # ─── Клавиатуры ───────────────────────────────────────────────────────────────
@@ -458,15 +491,20 @@ async def send_digest(message: Message, report: str, prices: dict):
         except Exception as e:
             logger.warning(f"Chart send error: {e}")
 
-    # 2. Дайджест — одно сообщение
+    # 2. Дайджест — одно или несколько сообщений (режем по смыслу, не по символам)
     digest = build_digest(parts, stars_str, pct_val)
-    for chunk in split_msg(digest, max_len=3800):
-        await message.answer(chunk)
+    chunks = split_digest(digest)
+    has_debates = bool(parts["rounds"])
 
-    # 3. Кнопки
+    # Все части кроме последней — без кнопок
+    for chunk in chunks[:-1]:
+        await message.answer(chunk)
+        await asyncio.sleep(0.3)
+
+    # Последняя часть — с кнопками
     await message.answer(
-        "👇 Что дальше?",
-        reply_markup=main_kb(message.from_user.id, has_debates=bool(parts["rounds"])),
+        chunks[-1],
+        reply_markup=main_kb(message.from_user.id, has_debates=has_debates),
     )
 
 
@@ -493,11 +531,13 @@ async def cmd_daily(message: Message):
             pct_val = int(m.group(1))
         stars_str = signal_to_stars(pct_val / 100)
         digest    = build_digest(parts, stars_str, pct_val)
-        for chunk in split_msg(digest):
+        chunks    = split_digest(digest)
+        has_debates = bool(parts["rounds"])
+        for chunk in chunks[:-1]:
             await message.answer(chunk)
         await message.answer(
-            f"📦 Кэш от {cached['timestamp']}. Новый через 2ч.",
-            reply_markup=main_kb(user_id, has_debates=bool(parts["rounds"])),
+            chunks[-1] + f"\n\n📦 Кэш от {cached['timestamp']}. Новый через 2ч.",
+            reply_markup=main_kb(user_id, has_debates=has_debates),
         )
         return
 
