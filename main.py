@@ -348,12 +348,8 @@ def split_digest(text: str) -> list[str]:
 # ─── Клавиатуры ───────────────────────────────────────────────────────────────
 
 def main_kb(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
+    """Кнопки под дайджестом. Дебаты идут автоматически после — кнопки возврата не нужны."""
     rows = []
-    if has_debates:
-        rows.append([InlineKeyboardButton(
-            text="📖 Полные дебаты агентов →",
-            callback_data=f"debate:{user_id}:0",
-        )])
     rows.append([
         InlineKeyboardButton(text="🇷🇺 Russia Edge", callback_data=f"russia_quick:{user_id}"),
         InlineKeyboardButton(text="🔄 Обновить",     callback_data=f"refresh:{user_id}"),
@@ -464,48 +460,83 @@ async def run_daily_analysis(user_id: int) -> str:
 
 async def send_digest(message: Message, report: str, prices: dict):
     """
-    Главная функция отправки — красивый UX v7.0:
-    1. Фото-график
-    2. Одно текстовое сообщение
-    3. Кнопки
+    UX v7.1:
+    1. Фото-график (dashboard)
+    2. Краткий дайджест (Bull/Bear/Вердикт/План) + кнопки 👍👎 🇷🇺 🔄
+    3. Полные дебаты — каждый раунд отдельным сообщением (автоматически)
+    4. Дисклеймер отдельным сообщением в конце
     """
     parts = parse_report(report)
-    debate_cache[message.from_user.id] = {"rounds": parts["rounds"], "full": report}
+    user_id = message.from_user.id
+    debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-    # Уровень сигнала из отчёта
+    # Уровень сигнала
     pct_val = 55
     m = re.search(r"Уровень сигнала.*?(\d+)%", report)
     if m:
         pct_val = int(m.group(1))
     stars_str = signal_to_stars(pct_val / 100)
 
-    # 1. График
+    # 1. График — логируем ошибку подробно чтобы понять почему не приходит
     if charts_ok():
         try:
+            logger.info(f"Генерирую график, prices keys: {list(prices.keys())}")
             chart_bytes = generate_main_chart(report, prices, stars_str, pct_val)
             if chart_bytes:
                 await message.answer_photo(
                     photo=BufferedInputFile(chart_bytes.read(), filename="analysis.png"),
                     caption="📊 Dialectic Edge — Market Dashboard",
                 )
+                logger.info("✅ График отправлен")
+            else:
+                logger.warning("⚠️ generate_main_chart вернул None")
         except Exception as e:
-            logger.warning(f"Chart send error: {e}")
+            logger.error(f"Chart error: {e}", exc_info=True)
+    else:
+        logger.warning("matplotlib недоступен — графики отключены")
 
-    # 2. Дайджест — одно или несколько сообщений (режем по смыслу, не по символам)
+    # 2. Краткий дайджест + кнопки
     digest = build_digest(parts, stars_str, pct_val)
     chunks = split_digest(digest)
-    has_debates = bool(parts["rounds"])
 
-    # Все части кроме последней — без кнопок
     for chunk in chunks[:-1]:
         await message.answer(chunk)
         await asyncio.sleep(0.3)
 
-    # Последняя часть — с кнопками
     await message.answer(
         chunks[-1],
-        reply_markup=main_kb(message.from_user.id, has_debates=has_debates),
+        reply_markup=main_kb(user_id),
     )
+
+    # 3. Полные дебаты — каждый раунд отдельно, автоматически
+    if parts["rounds"]:
+        await asyncio.sleep(0.5)
+        await message.answer(
+            "─" * 30 + "\n📖 ПОЛНЫЕ ДЕБАТЫ АГЕНТОВ\n" + "─" * 30
+        )
+        for i, round_text in enumerate(parts["rounds"], 1):
+            clean_round = re.sub(r"[*_`#]", "", round_text)
+            clean_round = re.sub(r"\n{3,}", "\n\n", clean_round).strip()
+            # Режем длинные раунды
+            for chunk in split_msg(clean_round, max_len=3800):
+                if chunk.strip():
+                    await message.answer(chunk)
+                    await asyncio.sleep(0.3)
+
+    # 4. Дисклеймер — отдельным сообщением в самом конце
+    await asyncio.sleep(0.3)
+    disclaimer = parts.get("disclaimer", "")
+    if not disclaimer:
+        disclaimer = (
+            "─────────────────────────\n"
+            "🤝 Честно о боте:\n"
+            "Это AI-анализ на основе публичных данных — не предсказание будущего.\n"
+            "Рынок непредсказуем. Агенты могут ошибаться и иногда ошибаются.\n"
+            "Используй как один из инструментов мышления, не как сигнал к действию.\n\n"
+            "⚠️ Не является финансовым советом. DYOR. Торговля = риск потери капитала."
+        )
+    clean_disc = re.sub(r"[*_`#]", "", disclaimer).strip()
+    await message.answer(clean_disc)
 
 
 # ─── /daily ───────────────────────────────────────────────────────────────────
