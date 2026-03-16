@@ -1,56 +1,60 @@
 """
 tracker.py — Автоматическая проверка прогнозов агентов.
 
-Каждые несколько часов проверяет pending-прогнозы,
-сравнивает с реальными ценами и сохраняет результат win/loss.
-Это строит track record — главный конкурентный ров.
+ИСПРАВЛЕНО v2:
+- extract_predictions_from_report полностью переписан.
+  Старый regex искал "BTC: long от $96000, цель $105000, стоп $93000" —
+  такой формат Synth не пишет никогда. Track record был всегда пустым.
+
+  Новый парсер понимает реальный формат из SYNTH_SYSTEM:
+    • Актив: BTC
+    • Направление: LONG
+    • Вход: $96,500
+    • Цель: $105,000
+    • Стоп: $93,000
+  А также компактные варианты типа "BTC LONG $96500 → $105000 стоп $93000"
 """
 
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from market_data import MarketDataFetcher
 from database import (
     get_pending_predictions,
     update_prediction_result,
-    save_prediction
+    save_prediction,
 )
 
 logger = logging.getLogger(__name__)
-
 market = MarketDataFetcher()
 
-# Маппинг названий активов → тикеры для Yahoo/CoinGecko
 ASSET_MAP = {
-    # Крипта → CoinGecko IDs
-    "BTC": ("crypto", "bitcoin"),
-    "ETH": ("crypto", "ethereum"),
-    "SOL": ("crypto", "solana"),
-    "BNB": ("crypto", "binancecoin"),
-    # Акции/ETF → Yahoo Finance
-    "SPY": ("stock", "SPY"),
-    "QQQ": ("stock", "QQQ"),
-    "NVDA": ("stock", "NVDA"),
-    "AAPL": ("stock", "AAPL"),
-    "TSLA": ("stock", "TSLA"),
-    "GLD": ("stock", "GLD"),
+    "BTC":  ("crypto", "bitcoin"),
+    "ETH":  ("crypto", "ethereum"),
+    "SOL":  ("crypto", "solana"),
+    "BNB":  ("crypto", "binancecoin"),
+    "SPY":  ("stock",  "SPY"),
+    "QQQ":  ("stock",  "QQQ"),
+    "NVDA": ("stock",  "NVDA"),
+    "AAPL": ("stock",  "AAPL"),
+    "TSLA": ("stock",  "TSLA"),
+    "GLD":  ("stock",  "GLD"),
 }
 
 
+# ─── Получение цены ───────────────────────────────────────────────────────────
+
 async def get_current_price(asset: str) -> float | None:
-    """Получает текущую цену актива."""
     asset_upper = asset.upper()
-    
     if asset_upper not in ASSET_MAP:
         return None
-    
     asset_type, identifier = ASSET_MAP[asset_upper]
-    
+
     try:
+        import aiohttp
         if asset_type == "crypto":
-            import aiohttp
             url = "https://api.coingecko.com/api/v3/simple/price"
             params = {"ids": identifier, "vs_currencies": "usd"}
             async with aiohttp.ClientSession() as session:
@@ -58,30 +62,23 @@ async def get_current_price(asset: str) -> float | None:
                                        timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     data = await resp.json()
                     return data.get(identifier, {}).get("usd")
-
-        elif asset_type == "stock":
-            import aiohttp
+        else:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{identifier}"
             headers = {"User-Agent": "Mozilla/5.0"}
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers,
                                        timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     data = await resp.json()
-                    meta = data["chart"]["result"][0]["meta"]
-                    return meta.get("regularMarketPrice")
-
+                    return data["chart"]["result"][0]["meta"].get("regularMarketPrice")
     except Exception as e:
         logger.warning(f"Price fetch error for {asset}: {e}")
         return None
 
 
+# ─── Проверка прогнозов ───────────────────────────────────────────────────────
+
 async def check_pending_predictions():
-    """
-    Проверяет все pending-прогнозы.
-    Вызывается по расписанию (каждые 6 часов).
-    """
     pending = await get_pending_predictions()
-    
     if not pending:
         logger.info("Нет pending-прогнозов для проверки")
         return 0
@@ -89,53 +86,47 @@ async def check_pending_predictions():
     checked = 0
     for pred in pending:
         current_price = await get_current_price(pred["asset"])
-        
         if current_price is None:
             continue
-        
-        entry = pred["entry_price"]
-        target = pred["target_price"]
-        stop = pred["stop_loss"]
+
+        entry     = pred["entry_price"]
+        target    = pred["target_price"]
+        stop      = pred["stop_loss"]
         direction = pred["direction"].upper()
-        
+
         if not entry or not target or not stop:
             continue
-        
-        # Определяем результат
-        result = "pending"
+
+        result  = "pending"
         pnl_pct = 0.0
 
         if direction == "LONG":
             if current_price >= target:
-                result = "win"
-                pnl_pct = ((target - entry) / entry) * 100
+                result  = "win"
+                pnl_pct = (target - entry) / entry * 100
             elif current_price <= stop:
-                result = "loss"
-                pnl_pct = ((stop - entry) / entry) * 100
+                result  = "loss"
+                pnl_pct = (stop - entry) / entry * 100
             else:
-                # Ещё в игре — считаем текущий unrealized P&L
-                pnl_pct = ((current_price - entry) / entry) * 100
+                pnl_pct = (current_price - entry) / entry * 100
 
         elif direction == "SHORT":
             if current_price <= target:
-                result = "win"
-                pnl_pct = ((entry - target) / entry) * 100
+                result  = "win"
+                pnl_pct = (entry - target) / entry * 100
             elif current_price >= stop:
-                result = "loss"
-                pnl_pct = ((entry - stop) / entry) * 100
+                result  = "loss"
+                pnl_pct = (entry - stop) / entry * 100
             else:
-                pnl_pct = ((entry - current_price) / entry) * 100
+                pnl_pct = (entry - current_price) / entry * 100
 
         # Истёк ли таймфрейм?
-        from datetime import datetime, timedelta
         created = datetime.fromisoformat(pred["created_at"])
         tf = pred.get("timeframe", "1w")
-        
         timeframe_days = {"1d": 1, "3d": 3, "1w": 7, "2w": 14, "1m": 30}
         max_days = timeframe_days.get(tf, 7)
-        
+
         if (datetime.now() - created).days >= max_days and result == "pending":
-            # Таймфрейм истёк — фиксируем текущий результат
             result = "win" if pnl_pct > 0 else "loss"
 
         if result in ("win", "loss"):
@@ -145,60 +136,170 @@ async def check_pending_predictions():
                 f"Прогноз #{pred['id']} {pred['asset']} {direction}: "
                 f"{result} | P&L: {pnl_pct:+.1f}%"
             )
-        
-        await asyncio.sleep(0.5)  # пауза между запросами к API
+
+        await asyncio.sleep(0.5)
 
     logger.info(f"Проверено прогнозов: {checked}/{len(pending)}")
     return checked
 
 
+# ─── Парсер прогнозов (ПЕРЕПИСАН) ────────────────────────────────────────────
+
+def _parse_price(raw: str) -> float | None:
+    """
+    Парсит цену из строки. Понимает форматы:
+    $96,500  |  $96500  |  96.5K  |  96500  |  $96.5K
+    """
+    if not raw:
+        return None
+    raw = raw.strip().lstrip("$").replace(",", "").replace(" ", "")
+
+    # K-нотация: 96.5K → 96500
+    if raw.upper().endswith("K"):
+        try:
+            return float(raw[:-1]) * 1000
+        except ValueError:
+            return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def extract_predictions_from_report(report_text: str) -> list[dict]:
     """
-    Парсит отчёт агентов и извлекает структурированные прогнозы.
-    Ищет паттерны вида: "BTC: long от $96-97K, цель $105K, стоп $93K"
+    Парсит отчёт Synth и извлекает структурированные прогнозы.
+
+    Понимает РЕАЛЬНЫЙ формат из SYNTH_SYSTEM:
+
+        • Актив: BTC
+        • Направление: LONG / SHORT / ВНЕ РЫНКА / НАБЛЮДАТЬ
+        • Вход: $96,500
+        • Цель: $105,000
+        • Стоп: $93,000
+        • Горизонт: 1 неделя
+
+    А также компактные варианты (на случай если Synth написал иначе):
+        BTC LONG вход $96500 цель $105000 стоп $93000
     """
     predictions = []
-    
-    # Паттерны для поиска прогнозов
-    # Пример: "BTC: long от $96000, цель $105000, стоп $93000"
-    pattern = re.compile(
-        r'(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)'
-        r'[:\s]+'
-        r'(long|short|LONG|SHORT)'
-        r'[^$]*\$\s*([\d,\.]+)[Kk]?'  # entry
-        r'[^$]*(?:цел[ьи]|target)[^$]*\$\s*([\d,\.]+)[Kk]?'  # target
-        r'[^$]*(?:стоп|stop)[^$]*\$\s*([\d,\.]+)[Kk]?',  # stop
-        re.IGNORECASE
+    known_assets = set(ASSET_MAP.keys())
+
+    # ── Метод 1: структурированный блок "• Актив: ... • Направление: ..." ──────
+    # Ищем блоки торгового плана целиком
+    plan_blocks = re.findall(
+        r'(?:Актив|актив)[:\s]+([A-Z]{2,5}).*?'
+        r'(?:Направление|направление)[:\s]+(LONG|SHORT|long|short)[^\n]*\n.*?'
+        r'(?:Вход|вход)[:\s]+\$?([\d,.KkКк]+).*?\n.*?'
+        r'(?:Цел[ьи]|цел[ьи]|Target|target)[:\s]+\$?([\d,.KkКк]+).*?\n.*?'
+        r'(?:Стоп|стоп|Stop|stop)[:\s]+\$?([\d,.KkКк]+)',
+        report_text,
+        re.IGNORECASE | re.DOTALL
     )
-    
-    for match in pattern.finditer(report_text):
-        asset, direction, entry_str, target_str, stop_str = match.groups()
-        
-        def parse_price(s: str) -> float:
-            s = s.replace(",", "").replace(" ", "")
-            val = float(s)
-            # Если меньше 1000 и это крипта — умножаем на 1000 (K нотация)
-            return val
-        
-        try:
-            predictions.append({
-                "asset": asset.upper(),
-                "direction": direction.upper(),
-                "entry_price": parse_price(entry_str),
-                "target_price": parse_price(target_str),
-                "stop_loss": parse_price(stop_str),
-                "timeframe": "1w",  # дефолт
-            })
-        except ValueError:
+
+    for match in plan_blocks:
+        asset, direction, entry_s, target_s, stop_s = match
+        asset = asset.upper()
+        direction = direction.upper()
+        if asset not in known_assets:
             continue
-    
+
+        entry  = _parse_price(entry_s)
+        target = _parse_price(target_s)
+        stop   = _parse_price(stop_s)
+
+        if not all([entry, target, stop]):
+            continue
+        if entry <= 0 or target <= 0 or stop <= 0:
+            continue
+
+        # Санити-проверка: стоп и цель должны быть логичными
+        if direction == "LONG" and not (stop < entry < target):
+            continue
+        if direction == "SHORT" and not (target < entry < stop):
+            continue
+
+        # Горизонт
+        tf_match = re.search(
+            r'(?:Горизонт|горизонт|timeframe)[:\s]+([^\n]{1,20})',
+            report_text[report_text.find(asset):report_text.find(asset) + 500],
+            re.IGNORECASE
+        )
+        tf = _parse_timeframe(tf_match.group(1) if tf_match else "1w")
+
+        predictions.append({
+            "asset":       asset,
+            "direction":   direction,
+            "entry_price": entry,
+            "target_price": target,
+            "stop_loss":   stop,
+            "timeframe":   tf,
+        })
+
+    # ── Метод 2: компактный inline формат ────────────────────────────────────
+    # "BTC LONG $96500 → $105000 стоп $93000"
+    # "ETH: SHORT от $3200, цель $2800, стоп $3400"
+    if not predictions:
+        inline_pattern = re.compile(
+            r'\b(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\b'
+            r'[:\s]+(LONG|SHORT|long|short)'
+            r'[^$\n]{0,30}\$\s*([\d,.K]+)'   # entry
+            r'[^$\n]{0,30}\$\s*([\d,.K]+)'   # target
+            r'[^$\n]{0,30}\$\s*([\d,.K]+)',   # stop
+            re.IGNORECASE
+        )
+        for m in inline_pattern.finditer(report_text):
+            asset     = m.group(1).upper()
+            direction = m.group(2).upper()
+            entry     = _parse_price(m.group(3))
+            target    = _parse_price(m.group(4))
+            stop      = _parse_price(m.group(5))
+
+            if not all([entry, target, stop]):
+                continue
+
+            if direction == "LONG" and not (stop < entry < target):
+                continue
+            if direction == "SHORT" and not (target < entry < stop):
+                continue
+
+            predictions.append({
+                "asset":        asset,
+                "direction":    direction,
+                "entry_price":  entry,
+                "target_price": target,
+                "stop_loss":    stop,
+                "timeframe":    "1w",
+            })
+
+    if predictions:
+        logger.info(f"📊 Найдено {len(predictions)} прогнозов в отчёте")
+    else:
+        logger.debug("Прогнозы в отчёте не найдены (Synth написал ВНЕ РЫНКА или нестандартный формат)")
+
     return predictions
+
+
+def _parse_timeframe(raw: str) -> str:
+    """Нормализует строку горизонта в код таймфрейма."""
+    raw = raw.lower().strip()
+    if any(x in raw for x in ["скальп", "день", "1d", "intraday"]):
+        return "1d"
+    if any(x in raw for x in ["3 дн", "3d"]):
+        return "3d"
+    if any(x in raw for x in ["недел", "1w", "week"]):
+        return "1w"
+    if any(x in raw for x in ["2 недел", "2w"]):
+        return "2w"
+    if any(x in raw for x in ["месяц", "1m", "month"]):
+        return "1m"
+    return "1w"  # дефолт
 
 
 async def save_predictions_from_report(report_text: str, source_news: str = ""):
     """Извлекает и сохраняет все прогнозы из отчёта."""
     predictions = extract_predictions_from_report(report_text)
-    
+
     saved = 0
     for pred in predictions:
         try:
@@ -209,13 +310,13 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
                 target_price=pred["target_price"],
                 stop_loss=pred["stop_loss"],
                 timeframe=pred["timeframe"],
-                source_news=source_news[:300]
+                source_news=source_news[:300],
             )
             saved += 1
         except Exception as e:
             logger.warning(f"Не удалось сохранить прогноз: {e}")
-    
+
     if saved:
         logger.info(f"Сохранено {saved} прогнозов из отчёта")
-    
+
     return saved
