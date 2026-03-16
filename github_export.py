@@ -55,7 +55,7 @@ async def _github_get(path: str) -> tuple[str, str | None]:
 
 
 async def _github_put(path: str, content: str, sha: str | None, message: str) -> bool:
-    """Записывает файл на GitHub."""
+    """Записывает файл на GitHub. При 409 (SHA конфликт) — перечитывает SHA и повторяет."""
     if not GITHUB_TOKEN:
         logger.warning("GITHUB_TOKEN не задан — экспорт пропущен")
         return False
@@ -63,22 +63,40 @@ async def _github_put(path: str, content: str, sha: str | None, message: str) ->
     url     = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}",
                "Accept": "application/vnd.github.v3+json"}
-    payload = {
-        "message": message,
-        "content": base64.b64encode(content.encode()).decode(),
-    }
-    if sha:
-        payload["sha"] = sha
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.put(url, json=payload, headers=headers,
-                             timeout=TIMEOUT) as resp:
-                if resp.status in (200, 201):
-                    return True
-                err = await resp.text()
-                logger.error(f"GitHub PUT {path} → {resp.status}: {err[:200]}")
-    except Exception as e:
-        logger.error(f"GitHub PUT {path}: {e}")
+
+    # Пробуем до 3 раз при конфликте SHA
+    for attempt in range(3):
+        # При повторе — перечитываем актуальный SHA
+        if attempt > 0:
+            _, sha = await _github_get(path)
+            await asyncio.sleep(1 * attempt)
+
+        payload = {
+            "message": message,
+            "content": base64.b64encode(content.encode()).decode(),
+        }
+        if sha:
+            payload["sha"] = sha
+
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.put(url, json=payload, headers=headers,
+                                 timeout=TIMEOUT) as resp:
+                    if resp.status in (200, 201):
+                        return True
+                    elif resp.status == 409:
+                        # SHA конфликт — перечитаем и повторим
+                        logger.warning(f"GitHub PUT {path} → 409 SHA конфликт, попытка {attempt+1}/3")
+                        continue
+                    else:
+                        err = await resp.text()
+                        logger.error(f"GitHub PUT {path} → {resp.status}: {err[:200]}")
+                        return False
+        except Exception as e:
+            logger.error(f"GitHub PUT {path}: {e}")
+            return False
+
+    logger.error(f"GitHub PUT {path}: все попытки исчерпаны")
     return False
 
 
