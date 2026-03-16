@@ -1,21 +1,12 @@
 """
 sentiment.py — Sentiment scoring с FinBERT (Hugging Face) + keyword fallback.
 
-Уровни анализа:
-1. FinBERT (ProsusAI/finbert) через HF Inference API — специально обучен
-   на финансовых текстах (10K/8K отчёты, новости Reuters/Bloomberg).
-   Точность ~85% на финансовых текстах vs ~60% у keyword-подхода.
-   Бесплатно: 1000 запросов/день на HF_TOKEN.
-
-2. Keyword fallback — если HF API недоступен или токен не задан.
-   Быстрый подсчёт Bull/Bear слов. Работал раньше, остаётся как резерв.
-
-Архитектура:
-- Делим новости на заголовки (до 15 штук)
-- Переводим русские заголовки на английский через простые замены
-- Каждый заголовок → FinBERT → positive/negative/neutral score
-- Агрегируем взвешенно (свежие новости весят больше)
-- Формируем SentimentResult с уверенностью HIGH/MEDIUM/LOW/EXTREME
+ИСПРАВЛЕНО v2:
+- _aggregate_finbert: исправлен порядок проверки confidence.
+  Раньше EXTREME проверялся ПОСЛЕ HIGH с более строгими условиями,
+  но HIGH уже перехватывал его — EXTREME никогда не срабатывал.
+  Теперь порядок: EXTREME → HIGH → MEDIUM → LOW.
+- Порог MEDIUM снижен с 0.55 до 0.50 — сигнал чаще бывает MEDIUM вместо LOW.
 """
 
 import asyncio
@@ -32,24 +23,21 @@ HF_TOKEN   = os.getenv("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert/pipeline/text-classification"
 TIMEOUT    = aiohttp.ClientTimeout(total=15)
 
-# Максимум заголовков на один запрос (экономим лимит 1000/день)
 MAX_HEADLINES = 15
 
 
-# ─── Датакласс результата ─────────────────────────────────────────────────────
-
 @dataclass
 class SentimentResult:
-    score: float          # от -1.0 (медвежий) до +1.0 (бычий)
-    label: str            # BULLISH / BEARISH / NEUTRAL / MIXED
-    confidence: str       # HIGH / MEDIUM / LOW / EXTREME
+    score: float
+    label: str
+    confidence: str
     bull_signals: int
     bear_signals: int
     summary: str
-    source: str           # "finbert" или "keywords"
+    source: str
 
 
-# ─── Русско-английский мини-переводчик для FinBERT ────────────────────────────
+# ─── Русско-английский мини-переводчик ───────────────────────────────────────
 
 RU_EN_MAP = {
     "рост": "growth", "растёт": "rises", "вырос": "surged",
@@ -58,7 +46,6 @@ RU_EN_MAP = {
     "покупка": "buying", "инвестиции": "investment", "партнёрство": "partnership",
     "снизил ставку": "rate cut", "смягчение": "easing", "халвинг": "halving",
     "институциональный": "institutional",
-    # Bear
     "падение": "decline", "упал": "fell", "снизился": "decreased",
     "убыток": "loss", "банкротство": "bankruptcy", "запрет": "ban",
     "санкции": "sanctions", "арест": "arrest", "взлом": "hack",
@@ -67,41 +54,25 @@ RU_EN_MAP = {
     "регуляция": "regulation", "обвал": "crash", "коллапс": "collapse",
     "война": "war", "эскалация": "escalation", "конфликт": "conflict",
     "нефть": "oil", "геополитика": "geopolitics",
-    # Нейтральные
     "ожидает": "expects", "возможно": "possibly", "вероятно": "likely",
     "неопределённость": "uncertainty", "может": "may", "если": "if",
     "рынок": "market", "акции": "stocks", "биткоин": "bitcoin",
     "индекс": "index", "ставка": "rate", "доллар": "dollar",
-    "рубль": "ruble", "золото": "gold", "нефть": "oil",
+    "рубль": "ruble", "золото": "gold",
 }
 
 
 def _ru_to_en(text: str) -> str:
-    """Простая замена русских финансовых терминов на английские."""
     result = text.lower()
-    # Сначала длинные фразы (чтобы "снизил ставку" не разбилось на части)
     for ru, en in sorted(RU_EN_MAP.items(), key=lambda x: -len(x[0])):
         result = result.replace(ru, en)
     return result
 
 
 def _extract_headlines(text: str) -> list[str]:
-    """
-    Извлекает заголовки из текста новостей.
-
-    Реальный формат из news_fetcher:
-        === АКТУАЛЬНЫЕ НОВОСТИ ===
-        --- Yahoo Finance ---
-        • Fed holds rates steady
-          Summary: ...
-        --- Cointelegraph ---
-        • Bitcoin holds above $74K
-
-    Строки с • = заголовки новостей (приоритет 1).
-    """
-    headlines  = []   # буллеты • — заголовки новостей
-    short_lines = []  # короткие строки без буллетов
-    long_lines  = []  # длинные строки (запасной)
+    headlines   = []
+    short_lines = []
+    long_lines  = []
 
     skip_prefixes = [
         "http", "источник:", "source:", "summary:", "уверенность",
@@ -126,7 +97,6 @@ def _extract_headlines(text: str) -> list[str]:
         if any(w in cl for w in skip_words):
             continue
 
-        # Приоритет 1: буллет • = заголовок новости
         if raw.startswith("•") or raw.startswith("– ") or raw.startswith("- "):
             title = re.sub(r"^[•–\-]+\s*", "", clean).strip()
             if 15 <= len(title) <= 200:
@@ -150,14 +120,9 @@ def _extract_headlines(text: str) -> list[str]:
 
 
 async def _finbert_score(headlines: list[str]) -> list[dict] | None:
-    """
-    Отправляет список заголовков в FinBERT.
-    Возвращает список [{positive, negative, neutral}, ...] или None при ошибке.
-    """
     if not HF_TOKEN:
         return None
 
-    # Переводим на английский для лучшей точности
     en_headlines = [_ru_to_en(h) for h in headlines]
 
     try:
@@ -173,31 +138,18 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    logger.debug(f"FinBERT raw response type: {type(data)}, len: {len(data) if isinstance(data, list) else 'N/A'}")
-
                     results = []
-
-                    # HF может возвращать разные форматы:
-                    # Формат 1 (батч): [[{label,score},...], [{label,score},...]]
-                    # Формат 2 (один): [{label,score}, {label,score}]
-                    # Формат 3 (router): [{label,score,score,...}] с top_k
 
                     if isinstance(data, list) and len(data) > 0:
                         first = data[0]
-
                         if isinstance(first, list):
-                            # Формат 1: батч — список списков
                             for item in data:
                                 scores = {d["label"].lower(): d["score"] for d in item}
                                 results.append(scores)
-
                         elif isinstance(first, dict) and "label" in first:
-                            # Формат 2: один заголовок — плоский список
-                            # Это значит батч не сработал, обрабатываем как один
                             scores = {d["label"].lower(): d["score"] for d in data}
                             results.append(scores)
                             logger.warning("FinBERT вернул один результат — батч не сработал")
-
                         else:
                             logger.warning(f"FinBERT неизвестный формат: {str(data)[:200]}")
 
@@ -205,7 +157,6 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
                     return results if results else None
 
                 elif resp.status == 503:
-                    # Модель загружается — нормально при первом запросе
                     logger.warning("FinBERT: модель загружается (503), использую keywords")
                     return None
                 else:
@@ -221,12 +172,13 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
         return None
 
 
+# ─── ИСПРАВЛЕНО: порядок confidence ──────────────────────────────────────────
 def _aggregate_finbert(results: list[dict]) -> tuple[float, str, str]:
     """
-    Агрегирует результаты FinBERT по всем заголовкам.
-    Более свежие заголовки (начало списка) весят чуть больше.
-
-    Возвращает: (score, label, confidence)
+    ИСПРАВЛЕНО: раньше EXTREME проверялся после HIGH с более строгими
+    условиями — никогда не срабатывал т.к. HIGH его перехватывал.
+    Теперь порядок строгий: EXTREME → HIGH → MEDIUM → LOW.
+    Также снижен порог MEDIUM (0.55 → 0.50) — меньше LOW сигналов.
     """
     if not results:
         return 0.0, "MIXED", "LOW"
@@ -237,7 +189,6 @@ def _aggregate_finbert(results: list[dict]) -> tuple[float, str, str]:
     total_weight   = 0.0
 
     for i, r in enumerate(results):
-        # Убывающий вес — первые заголовки важнее
         weight = 1.0 / (1 + i * 0.1)
         total_positive += r.get("positive", 0) * weight
         total_negative += r.get("negative", 0) * weight
@@ -250,29 +201,23 @@ def _aggregate_finbert(results: list[dict]) -> tuple[float, str, str]:
     pos = total_positive / total_weight
     neg = total_negative / total_weight
     neu = total_neutral  / total_weight
+    n   = len(results)
 
-    # Score от -1 до +1
     score = pos - neg
 
-    # Label
-    if pos > 0.5:
-        label = "BULLISH"
-    elif neg > 0.5:
-        label = "BEARISH"
-    elif neu > 0.5:
-        label = "NEUTRAL"
-    else:
-        label = "MIXED"
+    if pos > 0.5:   label = "BULLISH"
+    elif neg > 0.5: label = "BEARISH"
+    elif neu > 0.5: label = "NEUTRAL"
+    else:           label = "MIXED"
 
-    # Confidence — насколько модель уверена
     max_score = max(pos, neg, neu)
-    dominance = max_score - (1.0 - max_score) / 2
 
-    if max_score > 0.75 and len(results) >= 6:
-        confidence = "HIGH"
-    elif max_score > 0.85 and len(results) >= 8:
+    # ИСПРАВЛЕНО: сначала самый строгий порог, потом всё мягче
+    if max_score > 0.85 and n >= 8:
         confidence = "EXTREME"
-    elif max_score > 0.55 and len(results) >= 3:
+    elif max_score > 0.70 and n >= 5:
+        confidence = "HIGH"
+    elif max_score > 0.50 and n >= 3:   # было 0.55 — слишком строго
         confidence = "MEDIUM"
     else:
         confidence = "LOW"
@@ -280,7 +225,7 @@ def _aggregate_finbert(results: list[dict]) -> tuple[float, str, str]:
     return round(score, 3), label, confidence
 
 
-# ─── Keyword fallback (старый метод) ─────────────────────────────────────────
+# ─── Keyword fallback ─────────────────────────────────────────────────────────
 
 BULL_WORDS = [
     "рост", "растёт", "вырос", "повысился", "прибыль", "прорыв", "максимум",
@@ -314,15 +259,15 @@ def _keyword_score(text: str) -> tuple[float, str, str, int, int]:
 
     score = (bull - bear) / total if total > 0 else 0.0
 
-    if score > 0.3:      label = "BULLISH"
-    elif score < -0.3:   label = "BEARISH"
-    elif neu > 3:        label = "NEUTRAL"
-    else:                label = "MIXED"
+    if score > 0.3:    label = "BULLISH"
+    elif score < -0.3: label = "BEARISH"
+    elif neu > 3:      label = "NEUTRAL"
+    else:              label = "MIXED"
 
     imbalance = abs(bull - bear)
-    if imbalance >= 5 and total >= 8:     confidence = "HIGH"
-    elif imbalance >= 3 and total >= 4:   confidence = "MEDIUM"
-    else:                                 confidence = "LOW"
+    if imbalance >= 5 and total >= 8:   confidence = "HIGH"
+    elif imbalance >= 3 and total >= 4: confidence = "MEDIUM"
+    else:                               confidence = "LOW"
 
     return round(score, 3), label, confidence, bull, bear
 
@@ -332,30 +277,19 @@ def _keyword_score(text: str) -> tuple[float, str, str, int, int]:
 async def analyze_and_filter_async(
     news_text: str, market_data: str = ""
 ) -> tuple[SentimentResult, str]:
-    """
-    Async версия — использует FinBERT если доступен.
-    Возвращает (SentimentResult, confidence_instruction).
-    """
-    combined   = news_text + " " + market_data
-    headlines  = _extract_headlines(combined)
+    combined  = news_text + " " + market_data
+    headlines = _extract_headlines(combined)
 
     finbert_results = None
     if HF_TOKEN and headlines:
         finbert_results = await _finbert_score(headlines)
 
     if finbert_results:
-        # ── FinBERT путь ──────────────────────────────────────────────────────
         score, label, confidence = _aggregate_finbert(finbert_results)
 
-        # Считаем bull/bear из FinBERT для совместимости
-        bull_signals = sum(
-            1 for r in finbert_results if r.get("positive", 0) > 0.5
-        )
-        bear_signals = sum(
-            1 for r in finbert_results if r.get("negative", 0) > 0.5
-        )
+        bull_signals = sum(1 for r in finbert_results if r.get("positive", 0) > 0.5)
+        bear_signals = sum(1 for r in finbert_results if r.get("negative", 0) > 0.5)
 
-        # Средние уверенности модели
         avg_pos = sum(r.get("positive", 0) for r in finbert_results) / len(finbert_results)
         avg_neg = sum(r.get("negative", 0) for r in finbert_results) / len(finbert_results)
         avg_neu = sum(r.get("neutral",  0) for r in finbert_results) / len(finbert_results)
@@ -388,7 +322,6 @@ async def analyze_and_filter_async(
         )
 
     else:
-        # ── Keyword fallback ─────────────────────────────────────────────────
         score, label, confidence, bull, bear = _keyword_score(combined)
 
         bar_bull = "█" * min(bull, 10)
@@ -429,14 +362,10 @@ async def analyze_and_filter_async(
 def analyze_and_filter(
     news_text: str, market_data: str = ""
 ) -> tuple[SentimentResult, str]:
-    """
-    Sync обёртка для обратной совместимости с main.py.
-    Запускает async версию через event loop.
-    """
+    """Sync обёртка для обратной совместимости."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Уже внутри async контекста — создаём задачу
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(
