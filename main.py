@@ -41,7 +41,7 @@ from news_fetcher import NewsFetcher
 from data_sources import fetch_full_context
 from web_search import get_full_realtime_context, search_news_context, get_news_context
 from meta_analyst import get_meta_context
-from sentiment import analyze_and_filter, format_for_agents
+from sentiment import analyze_and_filter_async, format_for_agents
 from agents import DebateOrchestrator
 from storage import Storage
 from database import (
@@ -461,7 +461,7 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
         news_ctx += f"\n\n{prev_digest}"
         logger.info("📚 Прошлый анализ передан агентам для сравнения")
 
-    sentiment_result, confidence_instr = analyze_and_filter(news_ctx, str(live_prices))
+    sentiment_result, confidence_instr = await analyze_and_filter_async(news_ctx, str(live_prices))
     sentiment_block = format_for_agents(sentiment_result, confidence_instr)
 
     orchestrator = DebateOrchestrator()
