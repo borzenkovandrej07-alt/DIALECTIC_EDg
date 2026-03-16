@@ -191,7 +191,7 @@ async def export_to_github() -> bool:
     _, sha  = await _github_get(FORECASTS_FILE)
     success = await _github_put(
         FORECASTS_FILE, content, sha,
-        f"📊 Update track record {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        f"📊 Update track record {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]"
     )
     if success:
         logger.info("✅ FORECASTS.md обновлён на GitHub")
@@ -277,7 +277,7 @@ async def push_digest_cache(report: str, date_str: str) -> bool:
 
     success = await _github_put(
         DIGEST_CACHE_FILE, full_content, sha,
-        f"📊 Digest {date_str}"
+        f"📊 Digest {date_str} [skip ci]"
     )
     if success:
         logger.info("✅ Дайджест закэширован на GitHub")
