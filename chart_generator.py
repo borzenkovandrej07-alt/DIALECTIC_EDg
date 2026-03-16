@@ -155,10 +155,10 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
         ax1.set_title("Баланс аргументов", color=COLORS["text"],
                       fontsize=10, pad=8)
         ax1.barh([""], [bull_pct], color=COLORS["bull"], height=0.5,
-                 label=f"🐂 Bull {bull_pct:.0f}%")
+                 label=f"Bull {bull_pct:.0f}%")
         ax1.barh([""], [bear_pct], left=[bull_pct],
                  color=COLORS["bear"], height=0.5,
-                 label=f"🐻 Bear {bear_pct:.0f}%")
+                 label=f"Bear {bear_pct:.0f}%")
         ax1.set_xlim(0, 100)
         ax1.set_xlabel("% аргументов", fontsize=8)
         ax1.axvline(50, color=COLORS["border"], linewidth=1, linestyle="--")
