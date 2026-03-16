@@ -135,7 +135,7 @@ def signal_to_stars(confidence) -> str:
     except (TypeError, ValueError):
         confidence = 0.5
     stars = max(1, min(5, round(confidence * 5)))
-    return "⭐" * stars + "☆" * (5 - stars)
+    return "★" * stars + "☆" * (5 - stars)
 
 
 def feedback_kb(report_type: str) -> InlineKeyboardMarkup:
