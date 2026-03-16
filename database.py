@@ -1,7 +1,9 @@
 """
 database.py — SQLite база данных.
-Хранит: пользователей, прогнозы, фидбек, подписки на рассылку.
-Это главный "ров" — данные которые нельзя скопировать.
+
+ИСПРАВЛЕНО v2:
+- DB_PATH теперь импортируется из config.py (единый источник правды)
+  Раньше был захардкожен здесь и не совпадал с learning.py
 """
 
 import aiosqlite
@@ -10,16 +12,16 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+# ИСПРАВЛЕНО: импортируем из config чтобы все модули использовали один путь
+from config import DB_PATH
 
-DB_PATH = "dialectic_edge.db"
+logger = logging.getLogger(__name__)
 
 
 async def init_db():
     """Создаёт все таблицы при первом запуске."""
     async with aiosqlite.connect(DB_PATH) as db:
-        
-        # ── Пользователи ──────────────────────────────────────────────────────
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id     INTEGER PRIMARY KEY,
@@ -35,61 +37,55 @@ async def init_db():
             )
         """)
 
-        # ── Прогнозы агентов (Track Record) ───────────────────────────────────
         await db.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at   TEXT DEFAULT (datetime('now')),
-                asset        TEXT NOT NULL,        -- BTC, ETH, SPY, NVDA...
-                direction    TEXT NOT NULL,         -- LONG / SHORT / NEUTRAL
-                entry_price  REAL,                  -- цена в момент прогноза
-                target_price REAL,                  -- целевая цена
-                stop_loss    REAL,                  -- стоп-лосс
-                timeframe    TEXT,                  -- '1d', '1w', '1m'
-                source_news  TEXT,                  -- краткая суть новости
-                
-                -- Результат (заполняется автоматически через неделю)
-                result       TEXT DEFAULT 'pending', -- win/loss/pending/expired
-                result_price REAL,                   -- цена в момент проверки
-                result_at    TEXT,                   -- когда проверили
-                pnl_pct      REAL                    -- % прибыли/убытка
+                asset        TEXT NOT NULL,
+                direction    TEXT NOT NULL,
+                entry_price  REAL,
+                target_price REAL,
+                stop_loss    REAL,
+                timeframe    TEXT,
+                source_news  TEXT,
+                result       TEXT DEFAULT 'pending',
+                result_price REAL,
+                result_at    TEXT,
+                pnl_pct      REAL
             )
         """)
 
-        # ── Фидбек пользователей ──────────────────────────────────────────────
         await db.execute("""
             CREATE TABLE IF NOT EXISTS feedback (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id     INTEGER,
-                report_type TEXT,   -- 'daily' / 'analyze'
-                rating      INTEGER, -- 1 = 👍, -1 = 👎
+                report_type TEXT,
+                rating      INTEGER,
                 comment     TEXT,
                 created_at  TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
 
-        # ── Лог отчётов ───────────────────────────────────────────────────────
         await db.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id     INTEGER,
                 report_type TEXT,
                 news_used   TEXT,
-                summary     TEXT,   -- первые 500 символов отчёта
+                summary     TEXT,
                 created_at  TEXT DEFAULT (datetime('now'))
             )
         """)
 
         await db.commit()
-    
+
     logger.info("✅ База данных инициализирована")
 
 
 # ─── Пользователи ─────────────────────────────────────────────────────────────
 
 async def upsert_user(user_id: int, username: str = "", first_name: str = ""):
-    """Создаёт или обновляет пользователя."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO users (user_id, username, first_name, last_active)
@@ -125,14 +121,12 @@ async def increment_requests(user_id: int):
 
 
 async def reset_daily_counts():
-    """Сбрасывает счётчик запросов за день (вызывается в полночь)."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET requests_today = 0")
         await db.commit()
 
 
 async def get_daily_subscribers() -> list[dict]:
-    """Возвращает всех пользователей с включённой подпиской."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -160,9 +154,8 @@ async def save_prediction(
     target_price: float,
     stop_loss: float,
     timeframe: str,
-    source_news: str
+    source_news: str,
 ) -> int:
-    """Сохраняет прогноз агентов. Возвращает ID прогноза."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO predictions
@@ -174,7 +167,6 @@ async def save_prediction(
 
 
 async def get_pending_predictions() -> list[dict]:
-    """Возвращает прогнозы которые ещё не проверены и созданы > 24ч назад."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -191,7 +183,7 @@ async def update_prediction_result(
     pred_id: int,
     result: str,
     result_price: float,
-    pnl_pct: float
+    pnl_pct: float,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -206,18 +198,13 @@ async def update_prediction_result(
 
 
 async def get_track_record() -> dict:
-    """
-    Считает статистику точности агентов.
-    Возвращает словарь с метриками.
-    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        # Общая статистика
         async with db.execute("""
             SELECT
                 COUNT(*) as total,
-                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
                 SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END) as pending,
                 AVG(CASE WHEN result != 'pending' THEN pnl_pct END) as avg_pnl,
@@ -228,7 +215,6 @@ async def get_track_record() -> dict:
         """) as cursor:
             stats = dict(await cursor.fetchone())
 
-        # Последние 10 прогнозов
         async with db.execute("""
             SELECT asset, direction, entry_price, result, pnl_pct, created_at
             FROM predictions
@@ -238,7 +224,6 @@ async def get_track_record() -> dict:
         """) as cursor:
             recent = [dict(r) for r in await cursor.fetchall()]
 
-        # Лучшие активы
         async with db.execute("""
             SELECT asset,
                 COUNT(*) as calls,
@@ -253,11 +238,7 @@ async def get_track_record() -> dict:
         """) as cursor:
             by_asset = [dict(r) for r in await cursor.fetchall()]
 
-        return {
-            "stats": stats,
-            "recent": recent,
-            "by_asset": by_asset
-        }
+        return {"stats": stats, "recent": recent, "by_asset": by_asset}
 
 
 # ─── Фидбек ───────────────────────────────────────────────────────────────────
@@ -277,7 +258,7 @@ async def get_feedback_stats() -> dict:
         async with db.execute("""
             SELECT
                 COUNT(*) as total,
-                SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) as positive,
+                SUM(CASE WHEN rating =  1 THEN 1 ELSE 0 END) as positive,
                 SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END) as negative
             FROM feedback
         """) as cursor:
@@ -320,8 +301,8 @@ async def get_admin_stats() -> dict:
             total_reports = (await c.fetchone())["total"]
 
         return {
-            "total_users": total_users,
-            "active_week": active_week,
-            "subscribers": subscribers,
+            "total_users":   total_users,
+            "active_week":   active_week,
+            "subscribers":   subscribers,
             "total_reports": total_reports,
         }
