@@ -1,11 +1,13 @@
 """
-main.py — Dialectic Edge v7.0
+main.py — Dialectic Edge v7.1
 
 ИСПРАВЛЕНО v2:
 - Убраны push_digest_cache() и export_now() из run_full_analysis.
-  Эти вызовы создавали GitHub коммит после каждого /daily,
-  что триггерило Railway на бесконечный цикл редеплоев.
-  Теперь GitHub экспорт происходит раз в сутки через scheduler.
+
+ИСПРАВЛЕНО v7.1:
+- extract_short_position: гибкий поиск агента — Bull больше не пустой
+- extract_verdict: берёт самый ранний стоп-маркер — вердикт не дублируется
+- build_digest: проверка дублирования simple_words
 """
 
 import asyncio
@@ -51,8 +53,6 @@ from user_profile import (
 from weekly_report import build_weekly_report
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
-# ИСПРАВЛЕНО: убран push_digest_cache — он создавал коммит после каждого /daily
-# и триггерил бесконечные редеплои на Railway
 from github_export import export_to_github, get_previous_digest
 from learning import get_recent_lessons
 from chart_generator import generate_main_chart, generate_russia_chart, is_available as charts_ok
@@ -180,42 +180,78 @@ def parse_report(report: str) -> dict:
     return parts
 
 
+# ─── ИСПРАВЛЕНО v7.1: гибкий поиск агента ────────────────────────────────────
 def extract_short_position(round1: str, agent_emoji: str) -> str:
+    """
+    Гибкий поиск по имени агента, не только по emoji.
+    Старая версия искала emoji + "Bull"/"Bear" в одной строке,
+    но реальный формат: "[🐂 Bull Researcher | Раунд 1]:" — не совпадало.
+    """
+    if "🐂" in agent_emoji:
+        start_markers = ["Bull Researcher", "🐂 Bull", "Bull:"]
+        stop_markers  = ["Bear Skeptic", "🐻 Bear", "Data Verifier", "🔍", "Verifier"]
+    else:
+        start_markers = ["Bear Skeptic", "🐻 Bear", "Bear:"]
+        stop_markers  = ["Bull Researcher", "🐂 Bull", "Data Verifier", "🔍", "Verifier"]
+
     lines      = round1.split("\n")
     collecting = False
     result     = []
+
     for line in lines:
-        if agent_emoji in line and ("Bull" in line or "Bear" in line):
-            collecting = True
+        s = line.strip()
+        if not collecting:
+            if any(m in s for m in start_markers):
+                collecting = True
             continue
-        if collecting:
-            if any(e in line for e in ["🐂", "🐻", "🔍", "⚖️"]) and line.strip():
-                break
-            stripped = line.strip()
-            if not stripped or stripped.startswith("──") or stripped.startswith("*──"):
-                continue
-            if len(result) < 4:
-                result.append(stripped)
-    return "\n".join(result) if result else "Анализируем данные..."
+        if any(m in s for m in stop_markers) and s:
+            break
+        if not s or s.startswith("──") or s.startswith("*──") or s.startswith("---"):
+            continue
+        clean = re.sub(r"[*_`#]", "", s).strip()
+        if len(clean) < 10:
+            continue
+        result.append(clean)
+        if len(result) >= 4:
+            break
+
+    if result:
+        return "\n".join(result)
+
+    # Fallback — первые содержательные строки раунда
+    fallback = []
+    for line in lines:
+        clean = re.sub(r"[*_`#]", "", line.strip()).strip()
+        if len(clean) > 15 and not any(m in clean for m in ["Раунд", "──", "---", "Bull", "Bear", "Verifier"]):
+            fallback.append(clean)
+        if len(fallback) >= 3:
+            break
+    return "\n".join(fallback) if fallback else "Данные анализируются..."
 
 
+# ─── ИСПРАВЛЕНО v7.1: берёт самый ранний стоп-маркер ─────────────────────────
 def extract_verdict(synthesis: str) -> str:
-    parts = []
+    """
+    Старая версия останавливалась на первом найденном стоп-маркере из списка,
+    но не на самом раннем по позиции — вердикт захватывал ПРОСТЫМИ СЛОВАМИ
+    и дублировался в дайджесте. Теперь берём earliest.
+    """
     for m in ["🏆 ВЕРДИКТ СУДЬИ", "ВЕРДИКТ СУДЬИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
             chunk = synthesis[idx:idx + 600]
-            for stop in ["💼 ПЛАН ДЕЙСТВИЙ", "⚠️ ЧЕСТНЫЙ ИТОГ",
-                         "🗣 ПРОСТЫМИ СЛОВАМИ", "─────────────────"]:
+            stop_markers = [
+                "💼 ПЛАН ДЕЙСТВИЙ", "⚠️ ЧЕСТНЫЙ ИТОГ",
+                "🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ",
+                "─────────────────",
+            ]
+            earliest = len(chunk)
+            for stop in stop_markers:
                 pos = chunk.find(stop, 10)
-                if pos != -1:
-                    chunk = chunk[:pos]
-                    break
-            parts.append(chunk.strip())
-            break
-    if parts:
-        return "\n\n".join(parts)
-    return synthesis[:600].strip()
+                if pos != -1 and pos < earliest:
+                    earliest = pos
+            return chunk[:earliest].strip()
+    return synthesis[:400].strip()
 
 
 def extract_simple_words(synthesis: str) -> str:
@@ -252,8 +288,8 @@ def extract_plan(synthesis: str) -> str:
 def build_digest(parts: dict, stars: str, pct: int) -> str:
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    bull_text = "Анализируем..."
-    bear_text = "Анализируем..."
+    bull_text = "Данные анализируются..."
+    bear_text = "Данные анализируются..."
     if parts["rounds"]:
         r1        = parts["rounds"][0]
         bull_text = extract_short_position(r1, "🐂")
@@ -283,7 +319,8 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
         lines += ["", verdict, ""]
     if plan:
         lines += ["─" * 30, "", plan, ""]
-    if simple_words:
+    # ИСПРАВЛЕНО v7.1: показываем только если не дублирует вердикт
+    if simple_words and simple_words[:60] not in verdict:
         lines += ["─" * 30, "", simple_words, ""]
 
     lines += [
@@ -428,11 +465,6 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
 
     if not custom_mode:
         storage.cache_report(report)
-        # ИСПРАВЛЕНО: убраны export_now() и push_digest_cache() отсюда.
-        # Они вызывали GitHub коммит после каждого /daily → Railway видел
-        # новый коммит → триггерил деплой → бесконечный цикл.
-        # Теперь GitHub экспорт происходит раз в сутки в 00:05 UTC
-        # через scheduler._daily_github_export_loop()
 
     return report, prices
 
@@ -750,7 +782,7 @@ async def cmd_start(message: Message):
     name = message.from_user.first_name or "трейдер"
     await message.answer(
         f"👋 Привет, {name}!\n\n"
-        "🧠 Dialectic Edge v7.0 — честный AI-аналитик рынков\n\n"
+        "🧠 Dialectic Edge v7.1 — честный AI-аналитик рынков\n\n"
         "4 агента спорят используя живые данные:\n"
         "🐂 Bull (Groq/Llama) — ищет возможности\n"
         "🐻 Bear (Mistral) — указывает риски\n"
@@ -772,13 +804,13 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     await upsert_user(message.from_user.id)
     await message.answer(
-        "📖 Dialectic Edge v7.0\n\n"
-        "/daily — дайджест рынков\n"
-        "/analyze [текст] — анализ новости\n"
-        "/russia — анализ для РФ рынка\n"
+        "📖 Dialectic Edge v7.1\n\n"
+        "/daily — дайджест рынков (график + анализ + кнопки)\n"
+        "/analyze [текст] — анализ конкретной новости\n"
+        "/russia — анализ для российского рынка\n"
         "/markets — живые цены\n"
         "/profile — риск-профиль\n"
-        "/trackrecord — история точности\n"
+        "/trackrecord — история точности прогнозов\n"
         "/weeklyreport — отчёт за неделю\n"
         "/subscribe on 08:00 — авторассылка\n"
         "/stats — статистика\n\n"
@@ -1004,7 +1036,7 @@ async def main():
     global scheduler
     await init_db()
     await init_profiles_table()
-    logger.info("🚀 Dialectic Edge v7.0 starting...")
+    logger.info("🚀 Dialectic Edge v7.1 starting...")
     if charts_ok():
         logger.info("✅ matplotlib — графики активны")
     else:
