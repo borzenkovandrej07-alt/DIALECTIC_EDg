@@ -1,20 +1,11 @@
 """
 main.py — Dialectic Edge v7.0
 
-UX v7.0:
-- Пользователь получает 1 красивое сообщение вместо 6
-- Bull кратко / Bear кратко / Вердикт судьи / ПЛАН
-- Фото-график (matplotlib) прикреплён к сообщению
-- Кнопка "📖 Полные дебаты" — все раунды постранично
-- Кнопка "🇷🇺 Анализ для России"
-- Tavily веб-поиск обогащает контекст агентов
-
-Исправления v7.0:
-- Synth обязан занять позицию (не "наблюдаем")
-- S&P 500 → ^GSPC (не SPY ETF)
-- CPI база обновлена → ~2.4% YoY
-- Графики через chart_generator.py
-- Память ошибок через learning.py
+ИСПРАВЛЕНО v2:
+- Убраны push_digest_cache() и export_now() из run_full_analysis.
+  Эти вызовы создавали GitHub коммит после каждого /daily,
+  что триггерило Railway на бесконечный цикл редеплоев.
+  Теперь GitHub экспорт происходит раз в сутки через scheduler.
 """
 
 import asyncio
@@ -60,7 +51,9 @@ from user_profile import (
 from weekly_report import build_weekly_report
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
-from github_export import export_to_github, push_digest_cache, get_previous_digest
+# ИСПРАВЛЕНО: убран push_digest_cache — он создавал коммит после каждого /daily
+# и триггерил бесконечные редеплои на Railway
+from github_export import export_to_github, get_previous_digest
 from learning import get_recent_lessons
 from chart_generator import generate_main_chart, generate_russia_chart, is_available as charts_ok
 
@@ -78,16 +71,13 @@ storage  = Storage()
 FREE_DAILY_LIMIT = 5
 scheduler: Scheduler = None
 
-# Кэш для листания дебатов {user_id: {"rounds": [...], "full": str}}
 debate_cache: dict = {}
-# Кэш РФ анализа
 russia_cache: dict = {}
 
 
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 
 def clean_md(text: str) -> str:
-    """Чистит незакрытые markdown-теги."""
     lines = []
     for line in text.split("\n"):
         for ch in ("*", "_", "`"):
@@ -98,7 +88,6 @@ def clean_md(text: str) -> str:
 
 
 def split_msg(text: str, max_len: int = 3800) -> list[str]:
-    """Режет текст на куски <= max_len, убирает markdown."""
     text = re.sub(r"[*_`#]", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if len(text) <= max_len:
@@ -148,15 +137,11 @@ def feedback_kb(report_type: str) -> InlineKeyboardMarkup:
 # ─── Парсинг отчёта ───────────────────────────────────────────────────────────
 
 def parse_report(report: str) -> dict:
-    """Разбивает полный отчёт на части для UX."""
     parts = {"rounds": [], "synthesis": "", "disclaimer": "", "full": report}
 
-    # Дисклеймер — ищем ТОЛЬКО по тексту, без разделителя
-    # (разделители встречаются внутри синтеза и не должны его обрезать)
     for marker in ["🤝 Честно о боте:", "🤝 *Честно о боте:*"]:
         if marker in report:
             idx = report.find(marker)
-            # Берём разделитель перед дисклеймером если он есть
             sep_before = report.rfind("─────────────────────────", 0, idx)
             if sep_before != -1 and idx - sep_before < 5:
                 idx = sep_before
@@ -164,7 +149,6 @@ def parse_report(report: str) -> dict:
             report = report[:idx]
             break
 
-    # Синтез
     for marker in ["⚖️ *ВЕРДИКТ И ТОРГОВЫЙ ПЛАН*", "⚖️ ВЕРДИКТ И ТОРГОВЫЙ ПЛАН",
                    "⚖️ *ИТОГОВЫЙ СИНТЕЗ", "⚖️ ИТОГОВЫЙ СИНТЕЗ"]:
         if marker in report:
@@ -173,7 +157,6 @@ def parse_report(report: str) -> dict:
             report = report[:idx]
             break
 
-    # Раунды
     debate_marker = "🗣 *ХОД ДЕБАТОВ*"
     round_markers = ["── Раунд 1 ──", "── Раунд 2 ──", "── Раунд 3 ──",
                      "── Раунд 4 ──", "── Раунд 5 ──"]
@@ -198,7 +181,6 @@ def parse_report(report: str) -> dict:
 
 
 def extract_short_position(round1: str, agent_emoji: str) -> str:
-    """Извлекает первые 3-4 тезиса агента из раунда 1."""
     lines      = round1.split("\n")
     collecting = False
     result     = []
@@ -207,7 +189,6 @@ def extract_short_position(round1: str, agent_emoji: str) -> str:
             collecting = True
             continue
         if collecting:
-            # Останавливаемся на другом агенте
             if any(e in line for e in ["🐂", "🐻", "🔍", "⚖️"]) and line.strip():
                 break
             stripped = line.strip()
@@ -219,18 +200,11 @@ def extract_short_position(round1: str, agent_emoji: str) -> str:
 
 
 def extract_verdict(synthesis: str) -> str:
-    """
-    Извлекает ВЕРДИКТ СУДЬИ + ПРОСТЫМИ СЛОВАМИ из синтеза.
-    Оба блока важны — вердикт даёт позицию, простыми словами даёт понимание.
-    """
     parts = []
-
-    # Блок 1: Вердикт судьи
     for m in ["🏆 ВЕРДИКТ СУДЬИ", "ВЕРДИКТ СУДЬИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
             chunk = synthesis[idx:idx + 600]
-            # Берём до плана действий или честного итога
             for stop in ["💼 ПЛАН ДЕЙСТВИЙ", "⚠️ ЧЕСТНЫЙ ИТОГ",
                          "🗣 ПРОСТЫМИ СЛОВАМИ", "─────────────────"]:
                 pos = chunk.find(stop, 10)
@@ -239,23 +213,18 @@ def extract_verdict(synthesis: str) -> str:
                     break
             parts.append(chunk.strip())
             break
-
     if parts:
         return "\n\n".join(parts)
-
-    # Fallback
     return synthesis[:600].strip()
 
 
 def extract_simple_words(synthesis: str) -> str:
-    """Извлекает блок ПРОСТЫМИ СЛОВАМИ отдельно."""
     for m in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
             chunk = synthesis[idx:idx + 1200]
             for stop in ["⚠️ Не является", "─────────────────────────",
-                         "🏆 ВЕРДИКТ СУДЬИ", "🏆 ВЕРДИКТ",
-                         "💎 ЖЁСТКИЙ"]:
+                         "🏆 ВЕРДИКТ СУДЬИ", "🏆 ВЕРДИКТ", "💎 ЖЁСТКИЙ"]:
                 pos = chunk.find(stop, 10)
                 if pos != -1:
                     chunk = chunk[:pos]
@@ -265,13 +234,11 @@ def extract_simple_words(synthesis: str) -> str:
 
 
 def extract_plan(synthesis: str) -> str:
-    """Извлекает торговый план из синтеза. Лимит 2500 — план бывает длинным."""
     for m in ["💼 ПЛАН ДЕЙСТВИЙ", "ПЛАН ДЕЙСТВИЙ"]:
         if m in synthesis:
             idx   = synthesis.find(m)
             chunk = synthesis[idx:idx + 2500]
-            for stop in ["⚠️ ЧЕСТНЫЙ ИТОГ", "🗣 ПРОСТЫМИ СЛОВАМИ",
-                         "🏆 ВЕРДИКТ"]:
+            for stop in ["⚠️ ЧЕСТНЫЙ ИТОГ", "🗣 ПРОСТЫМИ СЛОВАМИ", "🏆 ВЕРДИКТ"]:
                 pos = chunk.find(stop, 20)
                 if pos != -1:
                     chunk = chunk[:pos]
@@ -280,22 +247,11 @@ def extract_plan(synthesis: str) -> str:
     return ""
 
 
-# ─── Построение красивого короткого дайджеста ─────────────────────────────────
+# ─── Построение дайджеста ─────────────────────────────────────────────────────
 
 def build_digest(parts: dict, stars: str, pct: int) -> str:
-    """
-    Формирует ОДНО сообщение — главный дайджест для пользователя.
-    Структура:
-      Шапка (дата, сигнал)
-      🐂 Bull — 3 тезиса
-      🐻 Bear — 3 тезиса
-      🏆 Вердикт судьи
-      💼 Торговый план
-      Дисклеймер капсом
-    """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Позиции из раунда 1
     bull_text = "Анализируем..."
     bear_text = "Анализируем..."
     if parts["rounds"]:
@@ -303,7 +259,6 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
         bull_text = extract_short_position(r1, "🐂")
         bear_text = extract_short_position(r1, "🐻")
 
-    # Вердикт, простыми словами и план из синтеза
     verdict      = extract_verdict(parts["synthesis"])      if parts["synthesis"] else ""
     simple_words = extract_simple_words(parts["synthesis"]) if parts["synthesis"] else ""
     plan         = extract_plan(parts["synthesis"])         if parts["synthesis"] else ""
@@ -326,11 +281,8 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
 
     if verdict:
         lines += ["", verdict, ""]
-
     if plan:
         lines += ["─" * 30, "", plan, ""]
-
-    # Простыми словами — всегда в конце перед дисклеймером
     if simple_words:
         lines += ["─" * 30, "", simple_words, ""]
 
@@ -348,17 +300,11 @@ def build_digest(parts: dict, stars: str, pct: int) -> str:
 
 
 def split_digest(text: str) -> list[str]:
-    """
-    Режет дайджест на части по смысловым блокам,
-    а не по символам — чтобы план не обрывался на полуслове.
-    """
-    # Сначала пробуем целиком — если влезает
     clean = re.sub(r"[*_`#]", "", text)
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
     if len(clean) <= 4000:
         return [clean]
 
-    # Разбиваем по смысловым разделителям
     parts  = []
     blocks = re.split(r"(─{10,})", clean)
     current = ""
@@ -376,10 +322,6 @@ def split_digest(text: str) -> list[str]:
 # ─── Клавиатуры ───────────────────────────────────────────────────────────────
 
 def main_kb(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
-    """
-    Кнопки под дайджестом.
-    Дебаты — листаются по кнопке (не отправляются автоматом).
-    """
     rows = []
     if has_debates:
         rows.append([InlineKeyboardButton(
@@ -414,20 +356,18 @@ def debates_kb(user_id: int, idx: int, total: int) -> InlineKeyboardMarkup:
 
 async def run_full_analysis(user_id: int, custom_news: str = "",
                             custom_mode: bool = False) -> tuple[str, dict]:
-    """Возвращает (report_text, prices_dict)."""
     tasks = [
         fetcher.fetch_all(),
         fetch_full_context(),
         get_full_realtime_context(),
         get_profile(user_id),
         get_meta_context(),
-        get_previous_digest(),   # прошлый анализ для сравнения
+        get_previous_digest(),
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     news, geo, realtime_result, profile, meta, prev_digest = results
     if isinstance(prev_digest, Exception): prev_digest = ""
 
-    # Безопасная распаковка realtime — если упало, не крашим всё
     if isinstance(realtime_result, Exception):
         logger.error(f"get_full_realtime_context error: {realtime_result}")
         prices, live_prices = {}, ""
@@ -446,7 +386,6 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
     if lessons:
         profile_instr += lessons
 
-    # Tavily веб-поиск — реальные новости в контекст
     topics = [custom_news] if custom_mode and custom_news else ["markets", "bitcoin", "fed"]
     tavily_news = await get_news_context(topics)
 
@@ -457,14 +396,11 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
     else:
         news_ctx = (f"{geo}\n\n=== НОВОСТИ ===\n{news}\n\n{meta}\n\n{tavily_news}")
 
-    # Добавляем прошлый анализ в контекст — агенты сравнивают с реальностью
     if prev_digest and not custom_mode:
         news_ctx += f"\n\n{prev_digest}"
         logger.info("📚 Прошлый анализ передан агентам для сравнения")
 
-    # FinBERT получает только чистые заголовки новостей, не весь контекст
     _news_for_sentiment = news if news else news_ctx
-    # DEBUG: логируем первые 500 символов для проверки формата
     logger.info(f"📰 News для FinBERT (первые 300 символов): {repr(_news_for_sentiment[:300])}")
     sentiment_result, confidence_instr = await analyze_and_filter_async(_news_for_sentiment, str(live_prices))
     sentiment_block = format_for_agents(sentiment_result, confidence_instr)
@@ -477,7 +413,6 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
         custom_mode=custom_mode,
     )
 
-    # Уровень сигнала
     _conf_map = {"HIGH": 0.85, "MEDIUM": 0.55, "LOW": 0.25, "EXTREME": 0.95}
     c_raw = sentiment_result.confidence
     c_num = _conf_map.get(c_raw.upper(), 0.5) if isinstance(c_raw, str) else float(c_raw or 0.5)
@@ -493,14 +428,11 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
 
     if not custom_mode:
         storage.cache_report(report)
-        if scheduler:
-            asyncio.create_task(scheduler.export_now())
-        try:
-            asyncio.create_task(
-                push_digest_cache(report, datetime.now().strftime("%d.%m.%Y %H:%M"))
-            )
-        except Exception as e:
-            logger.warning(f"Digest cache: {e}")
+        # ИСПРАВЛЕНО: убраны export_now() и push_digest_cache() отсюда.
+        # Они вызывали GitHub коммит после каждого /daily → Railway видел
+        # новый коммит → триггерил деплой → бесконечный цикл.
+        # Теперь GitHub экспорт происходит раз в сутки в 00:05 UTC
+        # через scheduler._daily_github_export_loop()
 
     return report, prices
 
@@ -510,29 +442,19 @@ async def run_daily_analysis(user_id: int) -> str:
     return report
 
 
-# ─── Отправка дайджеста пользователю ─────────────────────────────────────────
+# ─── Отправка дайджеста ───────────────────────────────────────────────────────
 
 async def send_digest(message: Message, report: str, prices: dict):
-    """
-    UX v7.2 — финальный:
-    1. Фото-график (dashboard)
-    2. Краткий дайджест (Bull/Bear/Вердикт/План)
-    3. Дисклеймер отдельным сообщением
-    4. Кнопки: [📖 Полные дебаты] [🇷🇺] [🔄] [👍] [👎]
-       — по кнопке дебаты листаются постранично (◀️ 📄 1/3 ▶️)
-    """
     parts = parse_report(report)
     user_id = message.from_user.id
     debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
 
-    # Уровень сигнала
     pct_val = 55
     m = re.search(r"Уровень сигнала.*?(\d+)%", report)
     if m:
         pct_val = int(m.group(1))
     stars_str = signal_to_stars(pct_val / 100)
 
-    # 1. График
     if charts_ok():
         try:
             logger.info(f"Генерирую график, prices keys: {list(prices.keys())}")
@@ -550,14 +472,12 @@ async def send_digest(message: Message, report: str, prices: dict):
     else:
         logger.warning("matplotlib недоступен")
 
-    # 2. Краткий дайджест (без дисклеймера внутри)
     digest = build_digest(parts, stars_str, pct_val)
     chunks = split_digest(digest)
     for chunk in chunks:
         await message.answer(chunk)
         await asyncio.sleep(0.2)
 
-    # 3. Дисклеймер — отдельным сообщением
     disclaimer = parts.get("disclaimer", "")
     if not disclaimer:
         disclaimer = (
@@ -571,7 +491,6 @@ async def send_digest(message: Message, report: str, prices: dict):
     clean_disc = re.sub(r"[*_`#]", "", disclaimer).strip()
     await message.answer(clean_disc)
 
-    # 4. Кнопки — последнее сообщение
     has_debates = bool(parts["rounds"])
     await message.answer(
         "👇 Действия:",
@@ -591,7 +510,6 @@ async def cmd_daily(message: Message):
                              "Попробуй завтра или /subscribe.")
         return
 
-    # Кэш
     cached = storage.get_cached_report()
     if cached:
         parts = parse_report(cached["report"])
@@ -704,7 +622,7 @@ async def cb_debate(callback: CallbackQuery):
 async def cb_refresh(callback: CallbackQuery):
     user_id = int(callback.data.split(":")[1])
     await callback.answer("🔄 Запускаю обновлённый анализ...")
-    storage.clear_cache()  # сбрасываем кэш чтобы пересчитать
+    storage.clear_cache()
     try:
         report, prices = await run_full_analysis(user_id)
         await send_digest(callback.message, report, prices)
@@ -712,13 +630,12 @@ async def cb_refresh(callback: CallbackQuery):
         await callback.message.answer(f"❌ Ошибка обновления: {str(e)[:100]}")
 
 
-# ─── Russia Edge (кнопка и команда) ──────────────────────────────────────────
+# ─── Russia Edge ──────────────────────────────────────────────────────────────
 
 async def _send_russia(message: Message, user_id: int):
     import time
     now_ts = time.time()
     if russia_cache.get("report") and (now_ts - russia_cache.get("ts", 0)) < 7200:
-        # Из кэша
         report = russia_cache["report"]
         if charts_ok():
             try:
@@ -755,7 +672,6 @@ async def _send_russia(message: Message, user_id: int):
         russia_ctx = await fetch_russia_context()
         report     = await run_russia_analysis(global_report, russia_ctx)
 
-        import time
         russia_cache.update({
             "report":    report,
             "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
@@ -840,11 +756,6 @@ async def cmd_start(message: Message):
         "🐻 Bear (Mistral) — указывает риски\n"
         "🔍 Verifier — проверяет каждую цифру\n"
         "⚖️ Synth — итог с чётким вердиктом\n\n"
-        "НОВОЕ в v7.0:\n"
-        "• 1 сообщение вместо 6 — кратко и чётко\n"
-        "• Графики рынка (matplotlib)\n"
-        "• Реальный веб-поиск (Tavily)\n"
-        "• Synth всегда даёт вердикт — не уклоняется\n\n"
         "Команды:\n"
         "/profile — настрой риск-профиль\n"
         "/daily — дайджест рынков\n"
@@ -862,16 +773,16 @@ async def cmd_help(message: Message):
     await upsert_user(message.from_user.id)
     await message.answer(
         "📖 Dialectic Edge v7.0\n\n"
-        "/daily — дайджест рынков (график + краткий анализ + кнопки)\n"
-        "/analyze [текст] — анализ конкретной новости\n"
-        "/russia — анализ для российского рынка\n"
-        "/markets — живые цены Binance/Yahoo/FRED\n"
-        "/profile — риск-профиль (влияет на рекомендации)\n"
-        "/trackrecord — история точности прогнозов\n"
+        "/daily — дайджест рынков\n"
+        "/analyze [текст] — анализ новости\n"
+        "/russia — анализ для РФ рынка\n"
+        "/markets — живые цены\n"
+        "/profile — риск-профиль\n"
+        "/trackrecord — история точности\n"
         "/weeklyreport — отчёт за неделю\n"
         "/subscribe on 08:00 — авторассылка\n"
-        "/stats — твоя статистика\n\n"
-        "⚠️ Не финансовый совет. Будущее неизвестно никому."
+        "/stats — статистика\n\n"
+        "⚠️ Не финансовый совет."
     )
 
 
@@ -929,22 +840,22 @@ async def cb_profile(callback: CallbackQuery):
 async def cmd_trackrecord(message: Message):
     await upsert_user(message.from_user.id)
     try:
-        data    = await get_track_record()
-        stats   = data["stats"]
-        recent  = data["recent"]
-        by_asset= data["by_asset"]
-        total   = stats.get("total") or 0
+        data     = await get_track_record()
+        stats    = data["stats"]
+        recent   = data["recent"]
+        by_asset = data["by_asset"]
+        total    = stats.get("total") or 0
         if total == 0:
             await message.answer(
                 "📊 Track Record\n\nПрогнозы накапливаются. "
                 "Запусти /daily — через 1-2 недели появится статистика."
             )
             return
-        wins      = stats.get("wins") or 0
-        losses    = stats.get("losses") or 0
-        finished  = wins + losses
-        winrate   = wins / finished * 100 if finished else 0
-        avg_pnl   = stats.get("avg_pnl") or 0
+        wins     = stats.get("wins") or 0
+        losses   = stats.get("losses") or 0
+        finished = wins + losses
+        winrate  = wins / finished * 100 if finished else 0
+        avg_pnl  = stats.get("avg_pnl") or 0
         lines = [
             "📊 TRACK RECORD АГЕНТОВ\n",
             f"Всего: {total} | Winrate: {'🟢' if winrate>=55 else '🔴'} {winrate:.0f}%",
