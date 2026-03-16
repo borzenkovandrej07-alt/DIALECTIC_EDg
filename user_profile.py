@@ -1,26 +1,24 @@
 """
 user_profile.py — Персонализация под риск-профиль пользователя.
 
-Пользователь один раз настраивает профиль — бот адаптирует
-весь анализ и рекомендации под его стиль торговли.
+ИСПРАВЛЕНО v2:
+- DB_PATH импортируется из config.py (единый источник правды)
 """
 
 import logging
-from database import DB_PATH
+from config import DB_PATH
 import aiosqlite
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Профили ──────────────────────────────────────────────────────────────────
-
 RISK_PROFILES = {
     "conservative": {
         "name": "🛡️ Консерватор",
         "desc": "Сохранение капитала важнее прибыли. Минимальный риск.",
-        "max_position": 5,       # % от портфеля на одну позицию
-        "max_total_risk": 15,    # % портфеля в рискованных активах
-        "stop_loss": 5,          # % максимальный стоп
+        "max_position": 5,
+        "max_total_risk": 15,
+        "stop_loss": 5,
         "preferred_assets": ["GLD", "SPY", "Облигации", "Дивидендные акции"],
         "avoid": ["Крипта", "Маржинальная торговля", "Опционы"],
         "horizon": "1-4 недели",
@@ -31,7 +29,7 @@ RISK_PROFILES = {
             "- Фокус: золото, широкий рынок, дивидендные акции\n"
             "- Криптовалюту и маржу не рекомендуй\n"
             "- Если риск высокий — рекомендуй кэш/золото как защиту"
-        )
+        ),
     },
     "moderate": {
         "name": "⚖️ Умеренный",
@@ -49,7 +47,7 @@ RISK_PROFILES = {
             "- Крипта допустима до 20% портфеля (BTC/ETH)\n"
             "- Диверсификация обязательна\n"
             "- Маржу не рекомендуй"
-        )
+        ),
     },
     "aggressive": {
         "name": "🚀 Агрессивный",
@@ -58,7 +56,7 @@ RISK_PROFILES = {
         "max_total_risk": 80,
         "stop_loss": 15,
         "preferred_assets": ["BTC", "ETH", "Altcoins", "Акции роста", "Опционы"],
-        "avoid": ["Ничего специально"],
+        "avoid": [],
         "horizon": "1д-2 недели",
         "agent_instruction": (
             "Пользователь — АГРЕССИВНЫЙ трейдер. Приоритет: максимальный рост.\n"
@@ -67,27 +65,25 @@ RISK_PROFILES = {
             "- Крипта и акции роста приоритетны\n"
             "- Можно рассматривать краткосрочные спекуляции\n"
             "- Всё равно обязательно указывай стоп-лосс"
-        )
-    }
+        ),
+    },
 }
 
 HORIZONS = {
-    "scalp":  {"name": "⚡ Скальпинг", "desc": "Внутри дня (часы)"},
-    "swing":  {"name": "📈 Свинг",     "desc": "1-14 дней"},
-    "position": {"name": "🏗️ Позиционный", "desc": "2-8 недель"},
-    "invest": {"name": "💎 Инвестиции", "desc": "3+ месяца"},
+    "scalp":    {"name": "⚡ Скальпинг",     "desc": "Внутри дня (часы)"},
+    "swing":    {"name": "📈 Свинг",          "desc": "1-14 дней"},
+    "position": {"name": "🏗️ Позиционный",   "desc": "2-8 недель"},
+    "invest":   {"name": "💎 Инвестиции",     "desc": "3+ месяца"},
 }
 
 MARKETS = {
-    "crypto":  "₿ Криптовалюта",
-    "stocks":  "📈 Акции (США)",
-    "forex":   "💱 Форекс",
-    "commodities": "🛢️ Сырьё",
-    "all":     "🌍 Все рынки",
+    "crypto":       "₿ Криптовалюта",
+    "stocks":       "📈 Акции (США)",
+    "forex":        "💱 Форекс",
+    "commodities":  "🛢️ Сырьё",
+    "all":          "🌍 Все рынки",
 }
 
-
-# ─── База данных профилей ──────────────────────────────────────────────────────
 
 async def init_profiles_table():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -121,7 +117,6 @@ async def save_profile(user_id: int, risk: str, horizon: str,
 
 
 async def get_profile(user_id: int) -> dict:
-    """Возвращает профиль пользователя или дефолтный умеренный."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
@@ -133,22 +128,19 @@ async def get_profile(user_id: int) -> dict:
                     return dict(row)
     except Exception:
         pass
-
-    # Дефолт
     return {"risk": "moderate", "horizon": "swing", "markets": "all", "capital": "unknown"}
 
 
 def build_profile_instruction(profile: dict) -> str:
-    """Строит инструкцию для агентов на основе профиля пользователя."""
-    risk = profile.get("risk", "moderate")
+    risk    = profile.get("risk", "moderate")
     horizon = profile.get("horizon", "swing")
     markets = profile.get("markets", "all")
 
-    risk_data = RISK_PROFILES.get(risk, RISK_PROFILES["moderate"])
+    risk_data    = RISK_PROFILES.get(risk, RISK_PROFILES["moderate"])
     horizon_data = HORIZONS.get(horizon, HORIZONS["swing"])
-    market_name = MARKETS.get(markets, "Все рынки")
+    market_name  = MARKETS.get(markets, "Все рынки")
 
-    instruction = (
+    return (
         f"\n{'='*50}\n"
         f"ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ (адаптируй анализ под него):\n"
         f"Риск-профиль: {risk_data['name']}\n"
@@ -158,18 +150,16 @@ def build_profile_instruction(profile: dict) -> str:
         f"Горизонт рекомендаций: {horizon_data['desc']}\n"
         f"{'='*50}\n"
     )
-    return instruction
 
 
 def format_profile_card(profile: dict) -> str:
-    """Красивая карточка профиля для Telegram."""
-    risk = profile.get("risk", "moderate")
+    risk    = profile.get("risk", "moderate")
     horizon = profile.get("horizon", "swing")
     markets = profile.get("markets", "all")
 
-    risk_data = RISK_PROFILES.get(risk, RISK_PROFILES["moderate"])
+    risk_data    = RISK_PROFILES.get(risk, RISK_PROFILES["moderate"])
     horizon_data = HORIZONS.get(horizon, HORIZONS["swing"])
-    market_name = MARKETS.get(markets, "Все рынки")
+    market_name  = MARKETS.get(markets, "Все рынки")
 
     return (
         f"👤 *Твой профиль:*\n\n"
