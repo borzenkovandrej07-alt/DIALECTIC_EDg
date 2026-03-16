@@ -254,7 +254,8 @@ def extract_simple_words(synthesis: str) -> str:
             idx   = synthesis.find(m)
             chunk = synthesis[idx:idx + 1200]
             for stop in ["⚠️ Не является", "─────────────────────────",
-                         "🏆 ВЕРДИКТ", "💎 ЖЁСТКИЙ"]:
+                         "🏆 ВЕРДИКТ СУДЬИ", "🏆 ВЕРДИКТ",
+                         "💎 ЖЁСТКИЙ"]:
                 pos = chunk.find(stop, 10)
                 if pos != -1:
                     chunk = chunk[:pos]
@@ -461,7 +462,11 @@ async def run_full_analysis(user_id: int, custom_news: str = "",
         news_ctx += f"\n\n{prev_digest}"
         logger.info("📚 Прошлый анализ передан агентам для сравнения")
 
-    sentiment_result, confidence_instr = await analyze_and_filter_async(news_ctx, str(live_prices))
+    # FinBERT получает только чистые заголовки новостей, не весь контекст
+    _news_for_sentiment = news if news else news_ctx
+    # DEBUG: логируем первые 500 символов для проверки формата
+    logger.info(f"📰 News для FinBERT (первые 300 символов): {repr(_news_for_sentiment[:300])}")
+    sentiment_result, confidence_instr = await analyze_and_filter_async(_news_for_sentiment, str(live_prices))
     sentiment_block = format_for_agents(sentiment_result, confidence_instr)
 
     orchestrator = DebateOrchestrator()
