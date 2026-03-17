@@ -213,8 +213,10 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
                 pr = p["price"]
                 ch = p["change_24h"]
                 p_str = f"{prefix}{pr:,.0f}" if fmt == "," else f"{prefix}{pr:,.2f}"
-                arrow = "▲" if ch >= 0 else "▼"
-                color = COLORS["bull"] if ch >= 0 else COLORS["bear"]
+                arrow = "▲" if ch > 0 else "▼" if ch < 0 else "●"
+                color = (COLORS["bull"] if ch > 0 else
+                         COLORS["bear"] if ch < 0 else
+                         COLORS["neutral"])  # серый для 0.00%
                 rows.append((name, p_str, f"{arrow}{abs(ch):.2f}%", color))
 
         y = 0.95
