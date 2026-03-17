@@ -546,6 +546,21 @@ async def send_digest(message: Message, report: str, prices: dict):
         pct_val = int(m.group(1))
     stars_str = signal_to_stars(pct_val / 100)
 
+    # Добавляем FinBERT данные в prices для графика
+    if "SENTIMENT" not in prices and parts.get("synthesis"):
+        import re as _re
+        fb_m = _re.search(
+            r"(?:FINBERT|FinBERT)[^-+\d]*([+-]?\d+\.\d+)[^A-Z]*(BULLISH|BEARISH|MIXED|NEUTRAL)",
+            report, _re.IGNORECASE
+        )
+        conf_m = _re.search(r"(?:Уверенность|Confidence)[^:]*:\s*(HIGH|MEDIUM|LOW|EXTREME)", report, _re.IGNORECASE)
+        if fb_m:
+            prices["SENTIMENT"] = {
+                "score": float(fb_m.group(1)),
+                "label": fb_m.group(2).upper(),
+                "confidence": conf_m.group(1).upper() if conf_m else "LOW",
+            }
+
     if charts_ok():
         try:
             logger.info(f"Генерирую график, prices keys: {list(prices.keys())}")
