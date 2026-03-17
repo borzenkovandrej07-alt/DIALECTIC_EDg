@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import aiohttp
 
 logger = logging.getLogger(__name__)
+logger.info("🔬 sentiment.py v4 loaded — single requests enabled")
 
 HF_TOKEN   = os.getenv("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert/pipeline/text-classification"
