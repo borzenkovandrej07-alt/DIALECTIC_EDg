@@ -775,7 +775,8 @@ async def _send_russia(message: Message, user_id: int):
     )
     try:
         await increment_requests(user_id)
-        russia_ctx = await fetch_russia_context()
+        # ИСПРАВЛЕНО v2.1: передаём global_report для синхронизации цены нефти
+        russia_ctx = await fetch_russia_context(global_report=global_report)
         report     = await run_russia_analysis(global_report, russia_ctx)
 
         russia_cache.update({
