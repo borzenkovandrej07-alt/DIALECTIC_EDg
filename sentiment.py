@@ -166,8 +166,11 @@ async def _finbert_score(headlines: list[str]) -> list[dict] | None:
                             logger.info(f"✅ FinBERT батч: {len(results)} заголовков")
                             return results
                         elif isinstance(first, dict) and "label" in first:
-                            # Батч не работает — вернул один результат
-                            logger.warning("FinBERT батч не работает — переключаюсь на одиночные запросы")
+                            # HF вернул плоский список [{label,score},{label,score},{label,score}]
+                            # Это ответ на ОДИН заголовок — батч не сработал
+                            logger.warning("FinBERT батч вернул 1 результат — запускаю одиночные запросы")
+                            # НЕ возвращаем None — падаем ниже на одиночные запросы
+                            pass
                         else:
                             logger.warning(f"FinBERT неизвестный формат батча: {str(data)[:200]}")
                 elif resp.status == 503:
