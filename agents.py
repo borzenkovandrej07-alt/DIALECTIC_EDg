@@ -690,11 +690,16 @@ class DebateOrchestrator:
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         title = "🔍 *АНАЛИЗ НОВОСТИ*" if custom_mode else "📊 *DIALECTIC EDGE — DAILY*"
         
+        try:
+            from ai_provider import get_models_summary
+            models_line = get_models_summary()
+        except Exception:
+            models_line = "🐂 Bull | 🐻 Bear | 🔍 Verifier | ⚖️ Synth"
+ 
         honest_header = (
             "💬 *Прежде чем читать:*\n"
             "Это структурированный AI-анализ. 4 разные модели спорят между собой.\n"
-            "🐂 Bull = Groq/Llama | 🐻 Bear = Mistral | "
-            "🔍 Verifier = Llama | ⚖️ Synth = Mistral Large\n"
+            f"{models_line}\n"
         )
 
         report_parts = [
