@@ -1,12 +1,12 @@
 """
 sentiment.py — Sentiment scoring с FinBERT (Hugging Face) + keyword fallback.
 
-ИСПРАВЛЕНО v2:
-- _aggregate_finbert: исправлен порядок проверки confidence.
-  Раньше EXTREME проверялся ПОСЛЕ HIGH с более строгими условиями,
-  но HIGH уже перехватывал его — EXTREME никогда не срабатывал.
-  Теперь порядок: EXTREME → HIGH → MEDIUM → LOW.
-- Порог MEDIUM снижен с 0.55 до 0.50 — сигнал чаще бывает MEDIUM вместо LOW.
+ИСПРАВЛЕНО v3:
+- _aggregate_finbert: исправлен порядок confidence (EXTREME → HIGH → MEDIUM → LOW)
+- Порог MEDIUM снижен с 0.55 до 0.50
+- TIMEOUT увеличен до 45 сек (HF модель просыпается ~20-30 сек)
+- Добавлен debug лог формата ответа HF API
+- Батч разбит на одиночные запросы если HF не поддерживает батч
 """
 
 import asyncio
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 HF_TOKEN   = os.getenv("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert/pipeline/text-classification"
-TIMEOUT    = aiohttp.ClientTimeout(total=45)  # увеличено: модель на HF "спит" и просыпается ~20-30 сек
+TIMEOUT    = aiohttp.ClientTimeout(total=45)
 
 MAX_HEADLINES = 15
 
@@ -36,8 +36,6 @@ class SentimentResult:
     summary: str
     source: str
 
-
-# ─── Русско-английский мини-переводчик ───────────────────────────────────────
 
 RU_EN_MAP = {
     "рост": "growth", "растёт": "rises", "вырос": "surged",
@@ -119,67 +117,85 @@ def _extract_headlines(text: str) -> list[str]:
     return result
 
 
+async def _finbert_single(headline: str, session: aiohttp.ClientSession, headers: dict) -> dict | None:
+    """Отправляет ОДИН заголовок в FinBERT. Надёжнее батча."""
+    try:
+        payload = {"inputs": headline}
+        async with session.post(HF_API_URL, json=payload, headers=headers, timeout=TIMEOUT) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # Один заголовок → [{label, score}, {label, score}, {label, score}]
+                if isinstance(data, list) and len(data) > 0:
+                    if isinstance(data[0], dict) and "label" in data[0]:
+                        return {d["label"].lower(): d["score"] for d in data}
+                    elif isinstance(data[0], list):
+                        # Вложенный список — берём первый элемент
+                        return {d["label"].lower(): d["score"] for d in data[0]}
+            return None
+    except Exception:
+        return None
+
+
 async def _finbert_score(headlines: list[str]) -> list[dict] | None:
     if not HF_TOKEN:
         return None
 
     en_headlines = [_ru_to_en(h) for h in headlines]
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
+    # Сначала пробуем батч
     try:
-        headers = {
-            "Authorization": f"Bearer {HF_TOKEN}",
-            "Content-Type": "application/json",
-        }
-        payload = {"inputs": en_headlines}
-
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                HF_API_URL, json=payload, headers=headers, timeout=TIMEOUT
-            ) as resp:
+            payload = {"inputs": en_headlines}
+            async with session.post(HF_API_URL, json=payload, headers=headers, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    results = []
+                    logger.info(f"FinBERT batch response: type={type(data).__name__}, len={len(data) if isinstance(data, list) else 0}, first={str(data[0])[:80] if isinstance(data, list) and data else 'empty'}")
 
+                    results = []
                     if isinstance(data, list) and len(data) > 0:
                         first = data[0]
                         if isinstance(first, list):
+                            # Батч работает: [[{label,score},...], ...]
                             for item in data:
                                 scores = {d["label"].lower(): d["score"] for d in item}
                                 results.append(scores)
+                            logger.info(f"✅ FinBERT батч: {len(results)} заголовков")
+                            return results
                         elif isinstance(first, dict) and "label" in first:
-                            scores = {d["label"].lower(): d["score"] for d in data}
-                            results.append(scores)
-                            logger.warning("FinBERT вернул один результат — батч не сработал")
+                            # Батч не работает — вернул один результат
+                            logger.warning("FinBERT батч не работает — переключаюсь на одиночные запросы")
                         else:
-                            logger.warning(f"FinBERT неизвестный формат: {str(data)[:200]}")
-
-                    logger.info(f"✅ FinBERT: обработано {len(results)} заголовков")
-                    return results if results else None
-
+                            logger.warning(f"FinBERT неизвестный формат батча: {str(data)[:200]}")
                 elif resp.status == 503:
-                    logger.warning("FinBERT: модель загружается (503), использую keywords")
+                    logger.warning("FinBERT: модель загружается (503)")
                     return None
                 else:
                     err = await resp.text()
                     logger.warning(f"FinBERT API {resp.status}: {err[:100]}")
                     return None
-
     except asyncio.TimeoutError:
-        logger.warning("FinBERT: timeout, использую keywords")
+        logger.warning("FinBERT: timeout на батче")
         return None
     except Exception as e:
-        logger.warning(f"FinBERT error: {e}, использую keywords")
+        logger.warning(f"FinBERT батч error: {e}")
         return None
 
+    # Если батч не сработал — отправляем по одному (параллельно)
+    logger.info(f"FinBERT: отправляю {len(en_headlines)} заголовков по одному...")
+    async with aiohttp.ClientSession() as session:
+        tasks = [_finbert_single(h, session, headers) for h in en_headlines[:10]]  # макс 10
+        raw_results = await asyncio.gather(*tasks)
 
-# ─── ИСПРАВЛЕНО: порядок confidence ──────────────────────────────────────────
+    results = [r for r in raw_results if r is not None]
+    logger.info(f"✅ FinBERT одиночные запросы: {len(results)}/{len(en_headlines)} успешно")
+    return results if results else None
+
+
 def _aggregate_finbert(results: list[dict]) -> tuple[float, str, str]:
-    """
-    ИСПРАВЛЕНО: раньше EXTREME проверялся после HIGH с более строгими
-    условиями — никогда не срабатывал т.к. HIGH его перехватывал.
-    Теперь порядок строгий: EXTREME → HIGH → MEDIUM → LOW.
-    Также снижен порог MEDIUM (0.55 → 0.50) — меньше LOW сигналов.
-    """
     if not results:
         return 0.0, "MIXED", "LOW"
 
@@ -212,20 +228,18 @@ def _aggregate_finbert(results: list[dict]) -> tuple[float, str, str]:
 
     max_score = max(pos, neg, neu)
 
-    # ИСПРАВЛЕНО: сначала самый строгий порог, потом всё мягче
+    # ИСПРАВЛЕНО: EXTREME сначала
     if max_score > 0.85 and n >= 8:
         confidence = "EXTREME"
     elif max_score > 0.70 and n >= 5:
         confidence = "HIGH"
-    elif max_score > 0.50 and n >= 3:   # было 0.55 — слишком строго
+    elif max_score > 0.50 and n >= 3:
         confidence = "MEDIUM"
     else:
         confidence = "LOW"
 
     return round(score, 3), label, confidence
 
-
-# ─── Keyword fallback ─────────────────────────────────────────────────────────
 
 BULL_WORDS = [
     "рост", "растёт", "вырос", "повысился", "прибыль", "прорыв", "максимум",
@@ -272,13 +286,13 @@ def _keyword_score(text: str) -> tuple[float, str, str, int, int]:
     return round(score, 3), label, confidence, bull, bear
 
 
-# ─── Главный анализатор ───────────────────────────────────────────────────────
-
 async def analyze_and_filter_async(
     news_text: str, market_data: str = ""
 ) -> tuple[SentimentResult, str]:
     combined  = news_text + " " + market_data
     headlines = _extract_headlines(combined)
+
+    logger.info(f"FinBERT: извлечено {len(headlines)} заголовков")
 
     finbert_results = None
     if HF_TOKEN and headlines:
@@ -372,7 +386,7 @@ def analyze_and_filter(
                     asyncio.run,
                     analyze_and_filter_async(news_text, market_data)
                 )
-                return future.result(timeout=20)
+                return future.result(timeout=60)
         else:
             return loop.run_until_complete(
                 analyze_and_filter_async(news_text, market_data)
@@ -395,42 +409,29 @@ def format_for_agents(result: SentimentResult, instruction: str) -> str:
     return f"\n\n{result.summary}\n{instruction}\n"
 
 
-# ─── Confidence Instructions ──────────────────────────────────────────────────
-
 CONFIDENCE_INSTRUCTIONS = {
     "EXTREME": """
 🚨 РЕЖИМ: ЭКСТРЕМАЛЬНЫЙ СИГНАЛ
 FinBERT зафиксировал однозначное направление с экстремальной уверенностью.
 Это редкий сигнал — давай конкретные торговые рекомендации с чёткими входами и стопами.
-Всё равно честно — проверяй данные и цитируй источники.
 """,
     "HIGH": """
 🟢 РЕЖИМ: СИЛЬНЫЙ СИГНАЛ
 Sentiment score показывает чёткое направление с высокой уверенностью.
 Можешь давать конкретные торговые рекомендации с точками входа и стопами.
-Но всё равно честно — если агенты расходятся, скажи об этом.
 """,
     "MEDIUM": """
 🟡 РЕЖИМ: УМЕРЕННЫЙ СИГНАЛ
-Sentiment неоднозначный. Можешь давать рекомендации но только с пометкой
+Sentiment неоднозначный. Можешь давать рекомендации с пометкой
 "умеренный сигнал — маленькая позиция или жди подтверждения".
-Акцент на сценариях и рисках, не на конкретных точках входа.
 """,
     "LOW": """
 🔴 РЕЖИМ: СЛАБЫЙ СИГНАЛ — НЕ ДАВАЙ ТОРГОВЫЕ РЕКОМЕНДАЦИИ
-Данные противоречивы или их недостаточно для уверенного прогноза.
 ЗАПРЕЩЕНО давать торговые рекомендации (LONG/SHORT/вход/стоп).
-Вместо этого:
-- Дай качественный анализ ситуации
-- Опиши что нужно отслеживать
-- Честно скажи: "Сигнал слабый — лучше подождать ясности"
-Помни: пользователь который не потерял деньги на плохом сигнале —
-доверяет боту больше чем тот кто потерял на "уверенном" прогнозе.
+Дай качественный анализ и опиши что нужно отслеживать.
 """,
 }
 
 
 def get_confidence_instruction(confidence: str) -> str:
-    return CONFIDENCE_INSTRUCTIONS.get(
-        confidence, CONFIDENCE_INSTRUCTIONS["LOW"]
-    )
+    return CONFIDENCE_INSTRUCTIONS.get(confidence, CONFIDENCE_INSTRUCTIONS["LOW"])
