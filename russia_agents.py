@@ -19,12 +19,13 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+# Используем централизованный ai_provider с автоматическим fallback
+# GROQ_API_KEY, GROQ_API_KEY_2, MISTRAL_API_KEY, OPENROUTER_API_KEY, TOGETHER_API_KEY
+from ai_provider import _call_for_agent
 
-GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
-TIMEOUT = aiohttp.ClientTimeout(total=60)
+TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 
 # ─── Промпты ──────────────────────────────────────────────────────────────────
@@ -241,70 +242,17 @@ RUSSIA_SYNTH_SYSTEM = """Ты — финальный синтезатор для
 # ─── Groq вызов ───────────────────────────────────────────────────────────────
 
 async def call_groq_or_mistral(system: str, user_message: str) -> str:
-    """Groq/Llama первый выбор, Mistral Small как fallback при rate limit."""
-
-    # Сначала пробуем Groq
-    if GROQ_API_KEY:
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_message},
-            ],
-            "temperature": 0.3,
-            "max_tokens": 2000,
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    GROQ_URL, json=payload, headers=headers, timeout=TIMEOUT
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        logger.info("✅ Groq агент отработал")
-                        return data["choices"][0]["message"]["content"]
-                    elif resp.status == 429:
-                        logger.warning("⚠️ Groq rate limit — переключаюсь на Mistral Small")
-                    else:
-                        logger.warning(f"Groq {resp.status} — переключаюсь на Mistral Small")
-        except Exception as e:
-            logger.warning(f"Groq недоступен ({e}) — переключаюсь на Mistral Small")
-
-    # Fallback — Mistral Small (дешёвый, быстрый)
-    if MISTRAL_API_KEY:
-        headers = {
-            "Authorization": f"Bearer {MISTRAL_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_message},
-            ],
-            "temperature": 0.3,
-            "max_tokens": 2000,
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    MISTRAL_URL, json=payload, headers=headers, timeout=TIMEOUT
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        logger.info("✅ Mistral Small fallback отработал")
-                        return data["choices"][0]["message"]["content"]
-                    else:
-                        error = await resp.text()
-                        logger.error(f"Mistral Small error {resp.status}: {error[:200]}")
-        except Exception as e:
-            logger.error(f"Mistral Small exception: {e}")
-
-    return "⚠️ Все провайдеры недоступны"
+    """
+    Автоматический fallback через ai_provider:
+    Groq-1 → Groq-2 → Together → OpenRouter → Mistral-Small
+    """
+    try:
+        result = await _call_for_agent("bull", user_message, system, 0.3)
+        logger.info("✅ Russia агент отработал")
+        return result
+    except Exception as e:
+        logger.error(f"Russia агент — все провайдеры недоступны: {e}")
+        return "⚠️ Все провайдеры недоступны"
 
 
 # Алиас для обратной совместимости
@@ -315,6 +263,22 @@ async def call_groq(system: str, user_message: str) -> str:
 # ─── Mistral синтез ───────────────────────────────────────────────────────────
 
 async def call_mistral_synth(system: str, user_message: str) -> str:
+    """
+    Синтез через ai_provider:
+    Mistral-Large → Mistral-Small → Groq-2 → Together
+    """
+    if not MISTRAL_API_KEY:
+        logger.warning("MISTRAL_API_KEY не задан — пробую Groq")
+    try:
+        result = await _call_for_agent("synth", user_message, system, 0.3)
+        logger.info("✅ Russia синтез отработал")
+        return result
+    except Exception as e:
+        logger.error(f"Russia синтез — все провайдеры недоступны: {e}")
+        return "⚠️ Синтез недоступен — попробуй /russia через 5 минут"
+
+async def _call_mistral_synth_legacy(system: str, user_message: str) -> str:
+    """Оставляем старый код как запасной."""
     if not MISTRAL_API_KEY:
         return "⚠️ MISTRAL_API_KEY не настроен"
 
