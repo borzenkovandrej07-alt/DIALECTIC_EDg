@@ -1,11 +1,12 @@
 """
 chart_generator.py — Генерация графиков для Dialectic Edge.
 
-УЛУЧШЕНО v2:
-- Добавлен FinBERT Sentiment бар в индикаторы
-- Добавлен RSI BTC в индикаторы
-- Улучшен заголовок — показывает реальные модели из ai_provider.MODELS_USED
-- Цвет сигнала зависит от направления (BULLISH=зелёный, BEARISH=красный)
+УЛУЧШЕНО v3:
+- Исправлен _parse_russia_items: обрабатывает " • Название" с пробелами
+  и "Уверенность: ВЫСОКАЯ." с точкой в конце
+- Добавлен FinBERT Sentiment бар
+- Добавлен RSI BTC
+- Заголовок показывает реальные модели из ai_provider.MODELS_USED
 """
 
 import io
@@ -83,7 +84,7 @@ def _parse_scenarios(report: str) -> dict:
     return scenarios
 
 
-def _parse_bull_bear_score(report: str) -> tuple[float, float]:
+def _parse_bull_bear_score(report: str) -> tuple:
     bull_signals = [
         "бычий", "рост", "покупать", "long", "восстановлени",
         "позитивный", "сильный сигнал", "точка входа"
@@ -99,11 +100,7 @@ def _parse_bull_bear_score(report: str) -> tuple[float, float]:
     return round(bull / total * 100, 1), round(bear / total * 100, 1)
 
 
-def _parse_finbert(report: str) -> dict | None:
-    """
-    Извлекает FinBERT данные из отчёта.
-    Формат: FINBERT SENTIMENT: +0.374 → BEARISH | Confidence: MEDIUM
-    """
+def _parse_finbert(report: str):
     m = re.search(
         r"FINBERT SENTIMENT:\s*([+-]?\d+\.\d+)\s*→\s*(\w+).*?Уверенность[^:]*:\s*(\w+)",
         report, re.IGNORECASE | re.DOTALL
@@ -117,7 +114,59 @@ def _parse_finbert(report: str) -> dict | None:
     return None
 
 
-def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.BytesIO | None:
+def _parse_russia_items(text: str, marker: str) -> list:
+    """
+    Парсит блоки возможностей/рисков из Russia Edge отчёта.
+    Обрабатывает форматы:
+      " • Название (период)" — с пробелами перед •
+      "  Уверенность: ВЫСОКАЯ." — с точкой в конце
+    """
+    items      = []
+    rating_map = {"ВЫСОКАЯ": 3, "СРЕДНЯЯ": 2, "НИЗКАЯ": 1}
+
+    start = text.find(marker)
+    if start == -1:
+        return items
+
+    other_marker = "🔴" if marker == "🟢" else "🟢"
+    end_markers  = [other_marker, "🇷🇺 ИТОГ", "──────"]
+    end          = len(text)
+    for em in end_markers:
+        pos = text.find(em, start + 5)
+        if pos != -1 and pos < end:
+            end = pos
+
+    block = text[start:end]
+    lines = block.split("\n")
+
+    current_name = None
+    for line in lines:
+        # strip() убирает ВСЕ ведущие пробелы — ключевой фикс
+        stripped = line.strip()
+
+        # Ловим • с любым количеством пробелов перед ним
+        if stripped.startswith("•") and len(stripped) > 3:
+            raw = stripped.lstrip("• ").strip()
+            # Убираем markdown символы
+            raw = re.sub(r"[*_`]", "", raw)
+            # Убираем "(1-3 месяца)" и подобные скобки в конце названия
+            raw = re.sub(r"\s*\([^)]+\)\s*$", "", raw).strip()
+            if raw:
+                current_name = raw[:28]
+
+        # Ловим Уверенность/Вероятность (с точкой в конце тоже работает)
+        if current_name and re.search(r"(Уверенность|Вероятность)\s*:", stripped, re.IGNORECASE):
+            for key, val in rating_map.items():
+                if key in stripped:
+                    if val >= 2:
+                        items.append({"name": current_name, "rating": val})
+                    current_name = None
+                    break
+
+    return items
+
+
+def generate_main_chart(report: str, prices: dict, stars: str, pct: int):
     if not MATPLOTLIB_OK:
         return None
     if not prices:
@@ -132,29 +181,24 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
         now            = datetime.now().strftime("%d.%m.%Y %H:%M")
         bull_pct, bear_pct = _parse_bull_bear_score(report)
         scenarios      = _parse_scenarios(report)
-        # Читаем FinBERT из prices["SENTIMENT"] (более надёжно чем парсинг отчёта)
         finbert = prices.get("SENTIMENT")
         if not finbert:
-            finbert = _parse_finbert(report)  # fallback
+            finbert = _parse_finbert(report)
 
-        # Получаем названия моделей из ai_provider
         try:
             from ai_provider import get_models_summary
             models_str = get_models_summary()
         except Exception:
             models_str = ""
 
-        # ── Заголовок ─────────────────────────────────────────────────────────
         fig.text(0.5, 0.95, "DIALECTIC EDGE — MARKET ANALYSIS",
                  ha="center", va="top", fontsize=13, fontweight="bold",
                  color=COLORS["gold"])
         fig.text(0.5, 0.91, f"{now}   |   Сигнал: {stars} ({pct}%)",
                  ha="center", va="top", fontsize=9, color=COLORS["subtext"])
 
-        # ── 1. Bull/Bear баланс ───────────────────────────────────────────────
         ax1 = fig.add_subplot(gs[0, 0])
-        ax1.set_title("Баланс аргументов", color=COLORS["text"],
-                      fontsize=10, pad=8)
+        ax1.set_title("Баланс аргументов", color=COLORS["text"], fontsize=10, pad=8)
         ax1.barh([""], [bull_pct], color=COLORS["bull"], height=0.5,
                  label=f"Bull {bull_pct:.0f}%")
         ax1.barh([""], [bear_pct], left=[bull_pct],
@@ -164,20 +208,16 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
         ax1.set_xlabel("% аргументов", fontsize=8)
         ax1.axvline(50, color=COLORS["border"], linewidth=1, linestyle="--")
         ax1.text(bull_pct / 2, 0, f"{bull_pct:.0f}%",
-                 ha="center", va="center", fontsize=9,
-                 color="white", fontweight="bold")
+                 ha="center", va="center", fontsize=9, color="white", fontweight="bold")
         ax1.text(bull_pct + bear_pct / 2, 0, f"{bear_pct:.0f}%",
-                 ha="center", va="center", fontsize=9,
-                 color="white", fontweight="bold")
+                 ha="center", va="center", fontsize=9, color="white", fontweight="bold")
         ax1.set_yticks([])
         ax1.legend(loc="upper right", fontsize=7,
                    facecolor=COLORS["surface"], edgecolor=COLORS["border"],
                    labelcolor=COLORS["text"])
 
-        # ── 2. Сценарии (пончик) ──────────────────────────────────────────────
         ax2 = fig.add_subplot(gs[0, 1])
-        ax2.set_title("Вероятность сценариев", color=COLORS["text"],
-                      fontsize=10, pad=8)
+        ax2.set_title("Вероятность сценариев", color=COLORS["text"], fontsize=10, pad=8)
         labels     = list(scenarios.keys())
         sizes      = list(scenarios.values())
         colors_pie = [COLORS["neutral"], COLORS["bull"], COLORS["bear"]]
@@ -193,10 +233,8 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
             at.set_fontsize(8)
             at.set_fontweight("bold")
 
-        # ── 3. Цены ───────────────────────────────────────────────────────────
         ax3 = fig.add_subplot(gs[1, 0])
-        ax3.set_title("Ключевые активы", color=COLORS["text"],
-                      fontsize=10, pad=8)
+        ax3.set_title("Ключевые активы", color=COLORS["text"], fontsize=10, pad=8)
         ax3.axis("off")
 
         rows = []
@@ -216,36 +254,28 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
                 arrow = "▲" if ch > 0 else "▼" if ch < 0 else "●"
                 color = (COLORS["bull"] if ch > 0 else
                          COLORS["bear"] if ch < 0 else
-                         COLORS["neutral"])  # серый для 0.00%
+                         COLORS["neutral"])
                 rows.append((name, p_str, f"{arrow}{abs(ch):.2f}%", color))
 
         y = 0.95
-        ax3.text(0.0,  y, "Актив",  transform=ax3.transAxes,
-                 fontsize=8, color=COLORS["subtext"], fontweight="bold")
-        ax3.text(0.45, y, "Цена",   transform=ax3.transAxes,
-                 fontsize=8, color=COLORS["subtext"], fontweight="bold")
-        ax3.text(0.78, y, "24ч",    transform=ax3.transAxes,
-                 fontsize=8, color=COLORS["subtext"], fontweight="bold")
+        ax3.text(0.0,  y, "Актив",  transform=ax3.transAxes, fontsize=8, color=COLORS["subtext"], fontweight="bold")
+        ax3.text(0.45, y, "Цена",   transform=ax3.transAxes, fontsize=8, color=COLORS["subtext"], fontweight="bold")
+        ax3.text(0.78, y, "24ч",    transform=ax3.transAxes, fontsize=8, color=COLORS["subtext"], fontweight="bold")
         ax3.plot([0, 1], [y - 0.04, y - 0.04], color=COLORS["border"],
                  linewidth=0.5, transform=ax3.transAxes, clip_on=False)
 
         for i, (name, price_str, chg_str, c) in enumerate(rows):
             yi = y - 0.16 - i * 0.16
-            ax3.text(0.0,  yi, name,      transform=ax3.transAxes,
-                     fontsize=8.5, color=COLORS["text"])
-            ax3.text(0.45, yi, price_str, transform=ax3.transAxes,
-                     fontsize=8.5, color=COLORS["text"])
-            ax3.text(0.78, yi, chg_str,   transform=ax3.transAxes,
-                     fontsize=8.5, color=c, fontweight="bold")
+            ax3.text(0.0,  yi, name,      transform=ax3.transAxes, fontsize=8.5, color=COLORS["text"])
+            ax3.text(0.45, yi, price_str, transform=ax3.transAxes, fontsize=8.5, color=COLORS["text"])
+            ax3.text(0.78, yi, chg_str,   transform=ax3.transAxes, fontsize=8.5, color=c, fontweight="bold")
 
-        # ── 4. Индикаторы (улучшенные) ────────────────────────────────────────
         ax4 = fig.add_subplot(gs[1, 1])
         ax4.set_title("Индикаторы", color=COLORS["text"], fontsize=10, pad=8)
         ax4.set_xlim(0, 100)
         ax4.set_ylim(0, 4)
         ax4.axis("off")
 
-        # Уровень сигнала (y=3.4) — цвет зависит от FinBERT label
         if finbert:
             sig_color = (COLORS["bull"] if finbert["label"] == "BULLISH" else
                          COLORS["bear"] if finbert["label"] == "BEARISH" else
@@ -256,10 +286,8 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
                          COLORS["gold"])
         ax4.barh([3.4], [pct],       height=0.3, color=sig_color)
         ax4.barh([3.4], [100 - pct], height=0.3, color=COLORS["border"], left=pct)
-        ax4.text(0, 3.75, f"Уровень сигнала: {pct}%",
-                 fontsize=8.5, color=COLORS["text"])
+        ax4.text(0, 3.75, f"Уровень сигнала: {pct}%", fontsize=8.5, color=COLORS["text"])
 
-        # Fear & Greed (y=2.5)
         macro = prices.get("MACRO", {})
         fng   = macro.get("fng", {}) if isinstance(macro, dict) else {}
         fv    = fng.get("val", "N/A")
@@ -270,27 +298,21 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
                          COLORS["gold"])
             ax4.barh([2.5], [fv],       height=0.3, color=fng_color)
             ax4.barh([2.5], [100 - fv], height=0.3, color=COLORS["border"], left=fv)
-            ax4.text(0, 2.85, f"Fear & Greed: {fv}/100 ({fs})",
-                     fontsize=8.5, color=COLORS["text"])
+            ax4.text(0, 2.85, f"Fear & Greed: {fv}/100 ({fs})", fontsize=8.5, color=COLORS["text"])
 
-        # FinBERT Sentiment (y=1.6) — НОВОЕ
         if finbert:
             score     = finbert["score"]
             label     = finbert["label"]
             conf      = finbert["confidence"]
-            # Нормализуем score от -1..+1 в 0..100
             bar_val   = int((score + 1) / 2 * 100)
             sent_color = (COLORS["bull"] if label == "BULLISH" else
                           COLORS["bear"] if label == "BEARISH" else
                           COLORS["gold"])
             ax4.barh([1.6], [bar_val],       height=0.3, color=sent_color)
-            ax4.barh([1.6], [100 - bar_val], height=0.3,
-                     color=COLORS["border"], left=bar_val)
-            ax4.text(0, 1.95,
-                     f"FinBERT: {score:+.2f} {label} ({conf})",
+            ax4.barh([1.6], [100 - bar_val], height=0.3, color=COLORS["border"], left=bar_val)
+            ax4.text(0, 1.95, f"FinBERT: {score:+.2f} {label} ({conf})",
                      fontsize=8.5, color=sent_color, fontweight="bold")
 
-        # VIX (y=0.7)
         if "VIX" in prices:
             vix_val   = prices["VIX"]["price"]
             vix_color = (COLORS["bear"] if vix_val > 30 else
@@ -302,9 +324,7 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
             ax4.text(0, 0.95, f"VIX: {vix_val:.2f} — {vix_label}",
                      fontsize=8.5, color=vix_color, fontweight="bold")
 
-        # RSI BTC (y=0.2)
         if "BTC" in prices:
-            # RSI не в prices — парсим из отчёта
             rsi_m = re.search(r"RSI[^\d]*BTC[^\d]*(\d+\.?\d*)", report, re.IGNORECASE)
             if rsi_m:
                 rsi_val   = float(rsi_m.group(1))
@@ -317,9 +337,7 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
                 ax4.text(0, 0.35, f"RSI BTC: {rsi_val:.1f} — {rsi_label}",
                          fontsize=8.5, color=rsi_color)
 
-        # Дисклеймер
-        fig.text(0.5, 0.01,
-                 "⚠️ Не является финансовым советом. AI-анализ. DYOR.",
+        fig.text(0.5, 0.01, "⚠️ Не является финансовым советом. AI-анализ. DYOR.",
                  ha="center", fontsize=7, color=COLORS["subtext"])
 
         return _to_bytes(fig)
@@ -329,17 +347,15 @@ def generate_main_chart(report: str, prices: dict, stars: str, pct: int) -> io.B
         return None
 
 
-def generate_russia_chart(russia_report: str) -> io.BytesIO | None:
+def generate_russia_chart(russia_report: str):
     if not MATPLOTLIB_OK:
         return None
 
     try:
         _setup_dark_style()
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4),
-                                 facecolor=COLORS["bg"])
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), facecolor=COLORS["bg"])
         fig.suptitle("🇷🇺 RUSSIA EDGE — Анализ рисков и возможностей",
-                     color=COLORS["gold"], fontsize=12, fontweight="bold",
-                     y=1.02)
+                     color=COLORS["gold"], fontsize=12, fontweight="bold", y=1.02)
 
         opportunities = _parse_russia_items(russia_report, "🟢")
         risks         = _parse_russia_items(russia_report, "🔴")
@@ -398,38 +414,6 @@ def generate_russia_chart(russia_report: str) -> io.BytesIO | None:
     except Exception as e:
         logger.error(f"Russia chart error: {e}", exc_info=True)
         return None
-
-
-def _parse_russia_items(text: str, marker: str) -> list[dict]:
-    items       = []
-    rating_map  = {"ВЫСОКАЯ": 3, "СРЕДНЯЯ": 2, "НИЗКАЯ": 1}
-    start       = text.find(marker)
-    if start == -1:
-        return items
-    other_marker = "🔴" if marker == "🟢" else "🟢"
-    end_markers  = [other_marker, "🇷🇺 ИТОГ", "──────"]
-    end          = len(text)
-    for em in end_markers:
-        pos = text.find(em, start + 5)
-        if pos != -1 and pos < end:
-            end = pos
-    block        = text[start:end]
-    lines        = block.split("\n")
-    current_name = None
-    for line in lines:
-        line = line.strip()
-        if line.startswith("•") and len(line) > 5:
-            raw_name     = line.lstrip("• ").split("\n")[0][:50]
-            raw_name     = re.sub(r"[*_`]", "", raw_name).strip()
-            current_name = raw_name[:28]
-        if current_name and ("Уверенность:" in line or "Вероятность:" in line):
-            for key, val in rating_map.items():
-                if key in line:
-                    if val >= 2:
-                        items.append({"name": current_name, "rating": val})
-                    current_name = None
-                    break
-    return items
 
 
 def is_available() -> bool:
