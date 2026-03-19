@@ -37,6 +37,7 @@ OPENROUTER_API_KEY_2 = os.getenv("OPENROUTER_API_KEY_2", "")  # резервны
 OPENROUTER_URL       = "https://openrouter.ai/api/v1/chat/completions"
 
 TOGETHER_API_KEY   = os.getenv("TOGETHER_API_KEY", "")
+TOGETHER_API_KEY_2 = os.getenv("TOGETHER_API_KEY_2", "")  # резервный Together
 TOGETHER_URL       = "https://api.together.xyz/v1/chat/completions"
 
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
@@ -222,18 +223,33 @@ async def _call_openrouter_gemma(prompt: str, system: str, temperature: float,
 
 
 async def _call_together(prompt: str, system: str, temperature: float, agent_key: str = None) -> str:
-    """Together AI — бесплатный Llama 3.3 70B."""
-    if not TOGETHER_API_KEY:
-        raise ValueError("Нет TOGETHER_API_KEY")
+    """Together AI — KEY_1 → KEY_2 при 429."""
     m = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
-    result = await _call_openai_style(
-        TOGETHER_URL, TOGETHER_API_KEY, m,
-        prompt, system, temperature, "Together",
-        agent_key=agent_key
-    )
-    if agent_key:
-        _track_model(agent_key, "Together", m)
-    return result
+    keys_to_try = []
+    if TOGETHER_API_KEY:   keys_to_try.append(("Together#1", TOGETHER_API_KEY))
+    if TOGETHER_API_KEY_2: keys_to_try.append(("Together#2", TOGETHER_API_KEY_2))
+    if not keys_to_try:
+        raise ValueError("Нет TOGETHER_API_KEY")
+
+    last_err = None
+    for key_name, key in keys_to_try:
+        try:
+            result = await _call_openai_style(
+                TOGETHER_URL, key, m,
+                prompt, system, temperature, key_name,
+                agent_key=agent_key
+            )
+            if agent_key:
+                _track_model(agent_key, key_name, m)
+            logger.info(f"{key_name} ✅")
+            return result
+        except RuntimeError as e:
+            if "429" in str(e):
+                logger.warning(f"{key_name} лимит — пробую Together#2...")
+                last_err = e
+                continue
+            raise
+    raise RuntimeError(f"Все Together ключи исчерпаны: {last_err}")
 
 
 async def _call_openrouter_llama2(prompt: str, system: str, temperature: float, agent_key: str = None) -> str:
@@ -338,7 +354,7 @@ async def _call_best_available(prompt: str, system: str, temperature: float,
         providers.append(("OpenRouter#2/Llama",
             lambda p, s, t: _call_openrouter_llama2(p, s, t, agent_key=agent_name)))
 
-    if TOGETHER_API_KEY:
+    if TOGETHER_API_KEY or TOGETHER_API_KEY_2:
         providers.append(("Together/Llama",
             lambda p, s, t: _call_together(p, s, t, agent_key=agent_name)))
 
