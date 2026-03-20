@@ -132,7 +132,9 @@ def _parse_russia_items(text: str, marker: str) -> list:
         return items
 
     other_marker = "🔴" if marker == "🟢" else "🟢"
-    end_markers  = [other_marker, "🇷🇺 ИТОГ", "──────"]
+    # ВАЖНО: убрали "──────" из стоп-маркеров!
+    # Разделители есть внутри блока возможностей/рисков — они обрезали данные.
+    end_markers  = [other_marker, "🇷🇺 ИТОГ", "🤝 Честно"]
     end          = len(text)
     for em in end_markers:
         pos = text.find(em, start + 5)
