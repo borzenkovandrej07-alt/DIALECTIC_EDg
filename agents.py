@@ -186,7 +186,7 @@ BEAR_COUNTER_SYSTEM = """
 Используй только: цены, VIX, FinBERT, нефть, RSI из текущего контекста.
 
 ЗАПРЕЩЕНО: "ARK Invest", "Schwab", нейтральный вывод
-""" + COMMON_GROUNDING_RULE
+""" + COMMON_GROUNDING_RULE + ANTI_HALLUCINATION_RULE
 
 
 VERIFIER_SYSTEM = """
