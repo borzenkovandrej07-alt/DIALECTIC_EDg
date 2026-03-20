@@ -1,7 +1,9 @@
 """
 chart_generator.py — Генерация графиков для Dialectic Edge.
 
-УЛУЧШЕНО v3:
+УЛУЧШЕНО v4:
+- ИСПРАВЛЕН emoji фикс: убирает 📦🏭💰📈 из названий (isalnum + кириллица)
+- Добавлено детальное логирование для диагностики
 - Исправлен _parse_russia_items: обрабатывает " • Название" с пробелами
   и "Уверенность: ВЫСОКАЯ." с точкой в конце
 - Добавлен FinBERT Sentiment бар
@@ -15,6 +17,7 @@ import re
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+logger.info("chart_generator v4 loaded — emoji fix active")
 
 try:
     import matplotlib
@@ -356,8 +359,15 @@ def generate_russia_chart(russia_report: str):
         fig.suptitle("🇷🇺 RUSSIA EDGE — Анализ рисков и возможностей",
                      color=COLORS["gold"], fontsize=12, fontweight="bold", y=1.02)
 
+        # Логируем первые 500 символов для диагностики
+        logger.info(f"Russia chart: report len={len(russia_report)}, "
+                    f"has_green={'🟢' in russia_report}, has_red={'🔴' in russia_report}")
+        logger.info(f"Russia report start: {repr(russia_report[:300])}")
+
         opportunities = _parse_russia_items(russia_report, "🟢")
         risks         = _parse_russia_items(russia_report, "🔴")
+
+        logger.info(f"Russia chart parsed: {len(opportunities)} opportunities, {len(risks)} risks")
 
         ax1 = axes[0]
         ax1.set_title("Возможности", color=COLORS["bull"], fontsize=10, pad=8)
