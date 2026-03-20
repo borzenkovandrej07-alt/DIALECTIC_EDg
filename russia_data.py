@@ -183,53 +183,100 @@ async def fetch_moex_data() -> str:
     return "📈 *МОСБИРЖА:*\n" + "\n".join(results)
 
 
-# ─── 3. Нефть Urals (российский сорт) ────────────────────────────────────────
+# ─── 3. Нефть Urals + WTI + Brent с изменениями ─────────────────────────────
 
 async def fetch_urals_oil() -> str:
     """
-    Urals — российская нефть, продаётся с дисконтом к Brent.
-    Критически важна для бюджета РФ.
+    Urals — российская нефть с дисконтом к Brent.
+    Добавлено: WTI для сравнения, изменение за 24ч и неделю.
     """
-    try:
-        # Минфин РФ публикует цену Urals для расчёта налогов
-        url = "https://www.minfin.ru/ru/perfomance/oil_gas/estimates/"
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            async with session.get(url, timeout=TIMEOUT) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    prices = re.findall(r'(\d{1,3}[.,]\d{1,2})\s*долл', text)
-                    if prices:
-                        price = prices[0].replace(",", ".")
-                        return (
-                            f"🛢️ *НЕФТЬ URALS (российский сорт):*\n"
-                            f"• Цена Urals: *${price}/баррель*\n"
-                            f"_📌 Каждые $10 изменения цены Urals = ~±1.5 трлн ₽ в бюджет РФ_"
-                        )
-    except Exception as e:
-        logger.warning(f"Urals error: {e}")
+    budget_price = 69.7  # Urals в бюджете РФ 2025
 
-    # Fallback — считаем через Brent с типичным дисконтом
-    try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/BZ=F"
-        params = {"interval": "1d", "range": "2d"}
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+    async def get_oil_price(ticker: str, session) -> dict:
+        """Получает цену, изменение за 24ч и неделю для тикера."""
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            params = {"interval": "1d", "range": "8d"}
             async with session.get(url, params=params, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    brent = data["chart"]["result"][0]["meta"].get("regularMarketPrice", 0)
-                    if brent:
-                        urals_est = brent - 12  # типичный дисконт Urals к Brent
-                        return (
-                            f"🛢️ *НЕФТЬ:*\n"
-                            f"• Brent: *${brent:.1f}/баррель*\n"
-                            f"• Urals (оценка): *~${urals_est:.1f}/баррель* (дисконт ~$12)\n"
-                            f"_📌 Бюджет РФ 2025 рассчитан при Urals $69.7. "
-                            f"{'Профицит' if urals_est > 69.7 else 'Дефицит'} бюджета вероятен._"
-                        )
-    except Exception as e:
-        logger.warning(f"Brent fallback error: {e}")
+                    result = data["chart"]["result"][0]
+                    meta   = result["meta"]
+                    price  = meta.get("regularMarketPrice", 0)
+                    prev   = meta.get("previousClose", price)
+                    # Изменение за 24ч
+                    chg_24h = ((price - prev) / prev * 100) if prev else 0
+                    # Изменение за неделю — берём цену 5 торговых дней назад
+                    closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                    closes = [c for c in closes if c is not None]
+                    week_ago = closes[-6] if len(closes) >= 6 else None
+                    chg_week = ((price - week_ago) / week_ago * 100) if week_ago else None
+                    return {"price": price, "chg_24h": chg_24h, "chg_week": chg_week}
+        except Exception as e:
+            logger.warning(f"Oil price {ticker}: {e}")
+        return {}
 
-    return ""
+    def fmt_change(val, suffix="%") -> str:
+        if val is None:
+            return ""
+        arrow = "📈" if val > 0 else "📉" if val < 0 else "➡️"
+        return f"{arrow} {val:+.1f}{suffix}"
+
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
+            brent_data, wti_data = await asyncio.gather(
+                get_oil_price("BZ=F", session),
+                get_oil_price("CL=F", session),
+            )
+
+        brent = brent_data.get("price", 0)
+        wti   = wti_data.get("price", 0)
+
+        if brent:
+            urals = brent - 12  # дисконт Urals к Brent ~$10-14
+            budget_diff = urals - budget_price
+            budget_status = (
+                f"Профицит ~+${budget_diff:.1f}/барр"
+                if budget_diff > 0
+                else f"Дефицит ~${budget_diff:.1f}/барр"
+            )
+
+            lines = [
+                "🛢️ *НЕФТЬ:*",
+                f"• Urals (оценка):  *${urals:.1f}* | "
+                f"24ч: {fmt_change(brent_data.get('chg_24h'))} | "
+                f"Неделя: {fmt_change(brent_data.get('chg_week'))}",
+            ]
+
+            if wti:
+                spread_bw = brent - wti
+                lines.append(
+                    f"• WTI:             *${wti:.1f}* | "
+                    f"24ч: {fmt_change(wti_data.get('chg_24h'))} | "
+                    f"Спред Brent−WTI: ${spread_bw:+.1f}"
+                )
+
+            lines.append(
+                f"• Brent:           *${brent:.1f}* | "
+                f"Дисконт Urals: ~$12"
+            )
+            lines.append(
+                f"• Бюджет РФ при $69.7 → сейчас: *{budget_status}*"
+            )
+            lines.append(
+                "_📌 Каждые $10 изменения Urals = ~±1.5 трлн ₽ в бюджет РФ_"
+            )
+
+            return "\n".join(lines)
+
+    except Exception as e:
+        logger.warning(f"Oil fetch error: {e}")
+
+    # Минимальный fallback
+    return (
+        "🛢️ *НЕФТЬ:* данные временно недоступны\n"
+        "_Бюджет РФ рассчитан при Urals $69.7/барр_"
+    )
 
 
 # ─── 4. Новости РФ — РБК + Коммерсант + Ведомости + Интерфакс ───────────────
@@ -391,6 +438,43 @@ async def fetch_ofz_yields() -> str:
     return ""
 
 
+
+# ─── 5г. Цена газа TTF (европейский бенчмарк) ────────────────────────────────
+
+async def fetch_europe_gas_price() -> str:
+    """
+    Получает цену на природный газ TTF с Yahoo Finance.
+    TTF = Dutch TTF Gas (бенчмарк для Европы).
+    """
+    try:
+        import aiohttp
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/TTF=F?interval=1d&range=2d"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, 
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+                    closes = [c for c in closes if c]
+                    if len(closes) >= 2:
+                        price = closes[-1]
+                        prev = closes[-2]
+                        chg = (price - prev) / prev * 100
+                        chg_str = f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
+                        return (
+                            f"⚡ *ГАЗ TTF (Европа):*\n"
+                            f"• TTF: ${price:.2f}/МBtu ({chg_str} за день)\n"
+                            f"_Высокий TTF = выгодно для Газпрома и рублёвых экспортёров_"
+                        )
+                    elif closes:
+                        return f"⚡ Газ TTF: ${closes[-1]:.2f}/МBtu"
+    except Exception as e:
+        logger.warning(f"TTF gas fetch error: {e}")
+    return ""
+
 # ─── 5в. Бюджетный калькулятор РФ ────────────────────────────────────────────
 
 def calc_budget_balance(urals_price: float, budget_price: float = 69.7) -> str:
@@ -435,11 +519,12 @@ async def fetch_russia_context() -> str:
         fetch_rosstat_inflation(),
         fetch_russia_news(),
         fetch_ofz_yields(),
+        fetch_europe_gas_price(),
         return_exceptions=True
     )
 
     sections = []
-    labels = ["ЦБ РФ", "Мосбиржа", "Нефть Urals", "Инфляция РФ", "Новости РФ", "ОФЗ"]
+    labels = ["ЦБ РФ", "Мосбиржа", "Нефть Urals", "Инфляция РФ", "Новости РФ", "ОФЗ", "Газ TTF"]
     for label, result in zip(labels, results):
         if isinstance(result, str) and result.strip():
             sections.append(result)
