@@ -47,6 +47,7 @@ from weekly_report import build_weekly_report, send_weekly_reports
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
 from github_export import export_to_github, push_digest_cache
+from github_export import get_previous_digest, push_digest_cache
 
 logging.basicConfig(
     level=logging.INFO,
