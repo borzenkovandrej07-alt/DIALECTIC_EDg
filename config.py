@@ -12,9 +12,15 @@ from pathlib import Path
 
 # ─── ПЕРСИСТЕНТНОЕ ХРАНИЛИЩЕ (Railway volume / любой VPS) ─────────────────────
 # Без тома файлы живут в эфемерной ФС контейнера — после деплоя cache.json и БД пустые.
-# Railway: New → Volume → Mount path, например /data → в Variables: DATA_DIR=/data
-# В один каталог кладём и SQLite, и cache.json (дебаты + last_report + user_debates).
-_DATA_DIR = os.getenv("DATA_DIR", "").strip()
+# Railway: том НЕ в Settings → Variables. Создание: Ctrl+K (⌘K на Mac) → набери "Volume"
+#   ИЛИ правый клик по пустому месту на схеме проекта → Volume → привяжи к сервису бота,
+#   укажи mount path (например /data). Тогда Railway сам выставит RAILWAY_VOLUME_MOUNT_PATH —
+#   бот подхватит его без ручного DATA_DIR. Вручную: Variables → DATA_DIR=/data
+# В один каталог кладём SQLite и cache.json (дебаты + last_report + user_debates).
+_DATA_DIR = (
+    os.getenv("DATA_DIR", "").strip()
+    or os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+)
 if _DATA_DIR:
     _data_root = Path(_DATA_DIR)
     _data_root.mkdir(parents=True, exist_ok=True)

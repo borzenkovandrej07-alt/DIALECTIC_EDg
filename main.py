@@ -1435,7 +1435,7 @@ async def main():
     logger.info("🚀 Dialectic Edge v6.0 starting...")
     if USING_DATA_DIR:
         logger.info(
-            "Постоянный том DATA_DIR: SQLite=%s | cache.json=%s",
+            "Постоянное хранилище: SQLite=%s | cache.json=%s",
             DB_PATH,
             CACHE_FILE,
         )
