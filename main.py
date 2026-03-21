@@ -24,7 +24,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-from config import BOT_TOKEN, ADMIN_IDS, CACHE_TTL_HOURS
+from config import BOT_TOKEN, ADMIN_IDS, CACHE_TTL_HOURS, REDIS_URL
 from news_fetcher import NewsFetcher
 from data_sources import fetch_full_context
 from web_search import get_full_realtime_context, search_news_context
@@ -174,7 +174,9 @@ def extract_signal_pct_and_stars(report: str) -> tuple[int, str]:
 SIGNAL_PCT_EXPLAINED = (
     "Число % — уверенность FinBERT в тоне новостей "
     "(EXTREME≈95%, HIGH≈85%, MEDIUM≈55%, LOW≈25%), "
-    "не прогноз «рынок пойдёт вверх/вниз». Звёзды — наглядная шкала той же метрики."
+    "не прогноз «рынок пойдёт вверх/вниз». Звёзды — наглядная шкала той же метрики.\n"
+    "Если ниже FinBERT = NEUTRAL/MIXED, процент — насколько модель уверена именно в этой метке тона, "
+    "а не «сила бычьего/медвежьего тренда»."
 )
 
 
@@ -194,6 +196,28 @@ _DEBATE_START_MARKERS = (
     "🗣 ДЕБАТЫ АГЕНТОВ",
 )
 _ROUND_HEADER_RE = re.compile(r"──\s*Раунд\s+\d+")
+
+# Где начинается блок дебатов (жёсткие строки + запасные варианты — модель/парсер могли слегка сменить разметку)
+_DEBATE_START_RES = (
+    re.compile(r"🗣\s*\*?\s*ХОД\s+ДЕБАТОВ", re.IGNORECASE),
+    re.compile(r"🗣\s*\*?\s*ДЕБАТЫ\s+АГЕНТОВ", re.IGNORECASE),
+    re.compile(r"\*?──\*?\s*Раунд\s+1\b"),
+    re.compile(r"──\s*Раунд\s+1\b"),
+    re.compile(r"🐂\s*Bull\s+Researcher"),
+)
+
+
+def find_debate_start_index(text: str) -> Optional[int]:
+    """Индекс начала блока дебатов; None если не найден."""
+    hit = _find_first_marker(text, _DEBATE_START_MARKERS)
+    if hit:
+        return hit[0]
+    best: Optional[int] = None
+    for rx in _DEBATE_START_RES:
+        m = rx.search(text)
+        if m and (best is None or m.start() < best):
+            best = m.start()
+    return best
 
 
 def _find_first_marker(text: str, markers: Tuple[str, ...]) -> Optional[Tuple[int, str]]:
@@ -250,9 +274,8 @@ def parse_report_parts(report: str) -> dict:
         "── Раунд 3:",
     )
 
-    debate_hit = _find_first_marker(report, _DEBATE_START_MARKERS)
-    if debate_hit:
-        debate_idx, _ = debate_hit
+    debate_idx = find_debate_start_index(report)
+    if debate_idx is not None:
         parts["header"] = report[:debate_idx].strip()
         debate_section = report[debate_idx:]
 
@@ -292,10 +315,9 @@ def hydrate_debate_from_report(full_report: str) -> dict | None:
     parts = parse_report_parts(full_report)
     if parts.get("rounds"):
         return {"rounds": parts["rounds"], "full": parts.get("full", full_report)}
-    debate_hit = _find_first_marker(full_report, _DEBATE_START_MARKERS)
-    if not debate_hit:
+    start = find_debate_start_index(full_report)
+    if start is None:
         return None
-    start = debate_hit[0]
     tail = full_report[start:]
     synth_hit = _find_first_marker(tail, _SYNTH_START_MARKERS)
     if synth_hit:
@@ -544,6 +566,12 @@ async def handle_debate_page(callback: CallbackQuery):
 
     if not cache:
         storage.reload_from_disk()
+        rep_user = storage.get_user_last_cached_report(user_id)
+        cache = hydrate_debate_from_report(rep_user) if rep_user else None
+        if cache:
+            debate_cache[user_id] = cache
+    if not cache:
+        storage.reload_from_disk()
         cached = storage.get_cached_report()
         rep = cached.get("report") if cached else None
         cache = hydrate_debate_from_report(rep) if rep else None
@@ -552,11 +580,16 @@ async def handle_debate_page(callback: CallbackQuery):
 
     if not cache:
         logger.warning(
-            "debate hydrate miss user_id=%s (RAM/Redis/SQLite/cache.json/last_report). "
-            "Подключи Redis (REDIS_URL) если несколько воркеров.",
+            "debate hydrate miss user_id=%s — RAM пуст, Redis/SQLite/JSON недоступны с этого воркера "
+            "(часто: два инстанса бота → TelegramConflict, или эфемерный диск без Redis). "
+            "Railway: один реплика + REDIS_URL или постоянный volume для БД.",
             user_id,
         )
-        await callback.answer("❌ Дебаты устарели, запусти /daily заново")
+        await callback.answer(
+            "❌ Дебаты не найдены (рестарт бота или второй инстанс). "
+            "Задай REDIS_URL на Railway или /daily заново.",
+            show_alert=True,
+        )
         return
 
     rounds = cache["rounds"]
@@ -804,7 +837,7 @@ async def run_full_analysis(
     )
 
     if not custom_mode:
-        storage.cache_report(report, prices_dict)
+        storage.cache_report(report, prices_dict, owner_user_id=user_id)
         if scheduler is not None:
             asyncio.create_task(scheduler.export_now())
         # Кэшируем дайджест на GitHub для отслеживания точности (п.6)
@@ -1392,6 +1425,11 @@ async def main():
     await init_db()
     await init_profiles_table()
     logger.info("🚀 Dialectic Edge v6.0 starting...")
+    if not REDIS_URL.strip():
+        logger.warning(
+            "REDIS_URL не задан — кнопка «Полные дебаты» не переживет другой воркер/рестарт. "
+            "Railway: Add-ons → Redis; при TelegramConflict выключи лишний деплой с тем же BOT_TOKEN."
+        )
 
     scheduler = Scheduler(
         bot=bot,

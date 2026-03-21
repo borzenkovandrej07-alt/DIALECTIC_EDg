@@ -145,6 +145,7 @@ async def save_debate_session(user_id: int, report: str):
                 updated_at = datetime('now')
         """, (user_id, report))
         await db.commit()
+    logger.info("debate_sessions сохранён user_id=%s (%s симв.)", user_id, len(report or ""))
 
 
 async def get_debate_session(user_id: int) -> Optional[str]:
