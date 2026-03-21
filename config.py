@@ -8,10 +8,23 @@ config.py — Центральная конфигурация Dialectic Edge.
 """
 
 import os
+from pathlib import Path
 
-# ─── БАЗА ДАННЫХ ──────────────────────────────────────────────────────────────
-# Единая константа — импортируй отсюда во всех модулях
-DB_PATH = "dialectic_edge.db"
+# ─── ПЕРСИСТЕНТНОЕ ХРАНИЛИЩЕ (Railway volume / любой VPS) ─────────────────────
+# Без тома файлы живут в эфемерной ФС контейнера — после деплоя cache.json и БД пустые.
+# Railway: New → Volume → Mount path, например /data → в Variables: DATA_DIR=/data
+# В один каталог кладём и SQLite, и cache.json (дебаты + last_report + user_debates).
+_DATA_DIR = os.getenv("DATA_DIR", "").strip()
+if _DATA_DIR:
+    _data_root = Path(_DATA_DIR)
+    _data_root.mkdir(parents=True, exist_ok=True)
+    DB_PATH = str(_data_root / "dialectic_edge.db")
+    CACHE_FILE = str(_data_root / "cache.json")
+    USING_DATA_DIR = True
+else:
+    DB_PATH = os.getenv("DB_PATH", "dialectic_edge.db")
+    CACHE_FILE = os.getenv("CACHE_FILE", "cache.json")
+    USING_DATA_DIR = False
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
@@ -67,8 +80,7 @@ RSS_FEEDS = {
 MAX_NEWS_PER_FEED = int(os.getenv("MAX_NEWS_PER_FEED", "3"))
 MAX_TOTAL_NEWS    = int(os.getenv("MAX_TOTAL_NEWS", "20"))
 
-# ─── ХРАНИЛИЩЕ ────────────────────────────────────────────────────────────────
-CACHE_FILE      = "cache.json"
+# ─── ХРАНИЛИЩЕ (CACHE_FILE / DB_PATH заданы выше; при DATA_DIR — внутри тома) ─
 # Повторный /daily отдаёт тот же отчёт без вызова AI, пока не истечёт TTL (экономия токенов).
 # Раньше по умолчанию было 2 ч.; сутки — разумный баланс. Переопределение: CACHE_TTL_HOURS=6
 CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))

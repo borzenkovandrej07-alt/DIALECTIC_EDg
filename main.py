@@ -24,7 +24,15 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-from config import BOT_TOKEN, ADMIN_IDS, CACHE_TTL_HOURS, REDIS_URL
+from config import (
+    BOT_TOKEN,
+    ADMIN_IDS,
+    CACHE_TTL_HOURS,
+    REDIS_URL,
+    CACHE_FILE,
+    DB_PATH,
+    USING_DATA_DIR,
+)
 from news_fetcher import NewsFetcher
 from data_sources import fetch_full_context
 from web_search import get_full_realtime_context, search_news_context
@@ -1425,6 +1433,12 @@ async def main():
     await init_db()
     await init_profiles_table()
     logger.info("🚀 Dialectic Edge v6.0 starting...")
+    if USING_DATA_DIR:
+        logger.info(
+            "Постоянный том DATA_DIR: SQLite=%s | cache.json=%s",
+            DB_PATH,
+            CACHE_FILE,
+        )
     if not REDIS_URL.strip():
         logger.warning(
             "REDIS_URL не задан — кнопка «Полные дебаты» не переживет другой воркер/рестарт. "

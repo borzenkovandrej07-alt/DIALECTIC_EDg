@@ -9,10 +9,9 @@ import aiosqlite
 import logging
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+from config import DB_PATH
 
-# ИСПРАВЛЕНО: было "dialectic.db" — не совпадало с database.py
-DB_PATH = "dialectic_edge.db"
+logger = logging.getLogger(__name__)
 
 
 def classify_error(pred: dict) -> str:
