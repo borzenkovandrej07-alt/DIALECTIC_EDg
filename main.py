@@ -24,7 +24,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-from config import BOT_TOKEN, ADMIN_IDS
+from config import BOT_TOKEN, ADMIN_IDS, CACHE_TTL_HOURS
 from news_fetcher import NewsFetcher
 from data_sources import fetch_full_context
 from web_search import get_full_realtime_context, search_news_context
@@ -90,6 +90,18 @@ def clean_markdown(text: str) -> str:
             line = line.replace("`", "")
         clean_lines.append(line)
     return "\n".join(clean_lines)
+
+
+def debate_plain_text(text: str) -> str:
+    """
+    Текст раунда дебатов без parse_mode: ответы моделей часто ломают Telegram Markdown
+    (незакрытые *, _, ссылки) → Bad Request: can't parse entities.
+    """
+    t = clean_markdown(text)
+    t = re.sub(r"[*_`#]", "", t)
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
 
 def split_message(text: str, max_len: int = 3800) -> list:
@@ -500,27 +512,21 @@ async def handle_debate_page(callback: CallbackQuery):
         await callback.answer()
         return
 
-    round_text = clean_markdown(rounds[round_idx])
+    round_text = debate_plain_text(rounds[round_idx])
 
-    # Если текст слишком длинный — режем
     if len(round_text) > 4000:
-        round_text = round_text[:3900] + "\n\n_...сокращено..._"
+        round_text = round_text[:3900] + "\n\n(…сокращено)"
 
     kb = debates_keyboard(user_id, round_idx, len(rounds))
 
     try:
-        await callback.message.edit_text(
-            round_text,
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-    except Exception:
-        # Если не получается edit — отправляем новое
-        await callback.message.answer(
-            round_text,
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
+        await callback.message.edit_text(round_text, reply_markup=kb)
+    except Exception as e:
+        logger.warning("debate edit_text: %s", e)
+        try:
+            await callback.message.answer(round_text, reply_markup=kb)
+        except Exception as e2:
+            logger.error("debate answer fallback: %s", e2)
 
     await callback.answer()
 
@@ -764,8 +770,14 @@ async def run_daily_analysis(user_id: int) -> str:
 
 
 async def deliver_scheduled_daily(user_id: int) -> None:
-    """Рассылка подписчикам: полный прогон + те же сообщения, что и при /daily."""
+    """Рассылка подписчикам: как /daily — сначала общий кэш (без токенов), иначе полный прогон."""
     try:
+        cached = storage.get_cached_report()
+        if cached:
+            report = cached["report"]
+            prices = cached.get("prices") or {}
+            await send_daily_digest_bundle(user_id, user_id, report, prices)
+            return
         report, prices = await run_full_analysis(user_id)
         await send_daily_digest_bundle(user_id, user_id, report, prices)
     except Exception as e:
@@ -785,12 +797,22 @@ async def cmd_daily(message: Message):
         )
         return
 
-    cached = storage.get_cached_report()
+    text_parts = (message.text or "").split(maxsplit=1)
+    force_fresh = (
+        len(text_parts) > 1
+        and text_parts[1].strip().lower() in ("force", "fresh", "новый", "new")
+    )
+
+    cached = None if force_fresh else storage.get_cached_report()
     if cached:
         report = cached["report"]
         prices = cached.get("prices") or {}
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
-        await message.answer(f"Кэш от {cached['timestamp']}. Новый через 2ч.")
+        await message.answer(
+            f"Кэш от {cached['timestamp']}. Повтор без AI до ~{CACHE_TTL_HOURS} ч. "
+            f"Сброс: `/daily force`",
+            parse_mode="Markdown",
+        )
         return
 
     wait_msg = await message.answer(
@@ -1255,7 +1277,8 @@ async def cmd_help(message: Message):
         "• Умный Risk/Reward — если риск высокий, бот честно скажет 'ВНЕ РЫНКА'\n\n"
         "*Команды:*\n"
         "• `/profile` — настрой риск-профиль первым\n"
-        "• `/daily` — дайджест рынков\n"
+        "• `/daily` — дайджест (из кэша до суток без токенов)\n"
+        "• `/daily force` — принудительно новый AI-прогон\n"
         "• `/analyze [текст]` — анализ новости\n"
         "• `/markets` — живые цены\n"
         "• `/trackrecord` — история точности\n"

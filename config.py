@@ -62,7 +62,9 @@ MAX_TOTAL_NEWS    = int(os.getenv("MAX_TOTAL_NEWS", "15"))
 
 # ─── ХРАНИЛИЩЕ ────────────────────────────────────────────────────────────────
 CACHE_FILE      = "cache.json"
-CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "2"))
+# Повторный /daily отдаёт тот же отчёт без вызова AI, пока не истечёт TTL (экономия токенов).
+# Раньше по умолчанию было 2 ч.; сутки — разумный баланс. Переопределение: CACHE_TTL_HOURS=6
+CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))
 
 # ─── ФОРМАТИРОВАНИЕ ───────────────────────────────────────────────────────────
 DISCLAIMER = (
