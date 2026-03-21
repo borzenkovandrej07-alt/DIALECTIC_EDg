@@ -280,6 +280,33 @@ def parse_report_parts(report: str) -> dict:
     return parts
 
 
+def hydrate_debate_from_report(full_report: str) -> dict | None:
+    """
+    rounds + full для листания дебатов. Если parse_report_parts не выделил раунды,
+    берём целиком блок от 🗣 до ⚖️ ВЕРДИКТ (одна «страница» вместо пустого кэша).
+    """
+    if not full_report or not full_report.strip():
+        return None
+    parts = parse_report_parts(full_report)
+    if parts.get("rounds"):
+        return {"rounds": parts["rounds"], "full": parts.get("full", full_report)}
+    debate_hit = _find_first_marker(full_report, _DEBATE_START_MARKERS)
+    if not debate_hit:
+        return None
+    start = debate_hit[0]
+    tail = full_report[start:]
+    synth_hit = _find_first_marker(tail, _SYNTH_START_MARKERS)
+    if synth_hit:
+        section = tail[: synth_hit[0]].strip()
+    else:
+        disc_snip = "\n\n─────────────────────────"
+        di = tail.find(disc_snip)
+        section = tail[:di].strip() if di != -1 else tail.strip()
+    if len(section) < 80:
+        return None
+    return {"rounds": [section], "full": full_report}
+
+
 def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     Возвращает СПИСОК сообщений для отправки.
@@ -387,11 +414,19 @@ async def send_daily_digest_bundle(
     """Текст дайджеста + график (после первого блока) + клавиатура."""
     parts = parse_report_parts(report)
     pct_val, stars_str = extract_signal_pct_and_stars(report)
-    debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+    hid = hydrate_debate_from_report(report)
+    if hid:
+        debate_cache[user_id] = hid
+    else:
+        debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
     try:
         await save_debate_session(user_id, report)
     except Exception as e:
         logger.warning("save_debate_session: %s", e)
+    try:
+        storage.save_user_debate_snapshot(user_id, report)
+    except Exception as e:
+        logger.warning("save_user_debate_snapshot: %s", e)
 
     messages = build_short_report(parts, stars_str, pct_val)
     logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
@@ -404,7 +439,9 @@ async def send_daily_digest_bundle(
     await bot.send_message(
         chat_id,
         "Полный анализ выше",
-        reply_markup=main_report_keyboard(user_id, has_debates=bool(parts["rounds"])),
+        reply_markup=main_report_keyboard(
+            user_id, has_debates=bool(debate_cache.get(user_id, {}).get("rounds")),
+        ),
     )
 
 
@@ -481,29 +518,33 @@ async def handle_debate_page(callback: CallbackQuery):
         await callback.answer()
         return
 
-    def _hydrate_from_report(text: str) -> dict | None:
-        if not text or not text.strip():
-            return None
-        p = parse_report_parts(text)
-        if not p.get("rounds"):
-            return None
-        return {"rounds": p["rounds"], "full": text}
-
     cache = debate_cache.get(user_id)
     if not cache:
+        storage.reload_from_disk()
         report_db = await get_debate_session(user_id)
-        cache = _hydrate_from_report(report_db) if report_db else None
+        cache = hydrate_debate_from_report(report_db) if report_db else None
         if cache:
             debate_cache[user_id] = cache
 
     if not cache:
+        snap = storage.get_user_debate_snapshot(user_id)
+        cache = hydrate_debate_from_report(snap) if snap else None
+        if cache:
+            debate_cache[user_id] = cache
+
+    if not cache:
+        storage.reload_from_disk()
         cached = storage.get_cached_report()
         rep = cached.get("report") if cached else None
-        cache = _hydrate_from_report(rep) if rep else None
+        cache = hydrate_debate_from_report(rep) if rep else None
         if cache:
             debate_cache[user_id] = cache
 
     if not cache:
+        logger.warning(
+            "debate hydrate miss user_id=%s (нет данных в RAM/SQLite/cache.json/last_report)",
+            user_id,
+        )
         await callback.answer("❌ Дебаты устарели, запусти /daily заново")
         return
 

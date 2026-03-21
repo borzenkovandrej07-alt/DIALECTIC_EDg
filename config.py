@@ -46,25 +46,30 @@ AGENT_TEMPERATURE    = float(os.getenv("AGENT_TEMP", "0.7"))
 # ─── НОВОСТИ ──────────────────────────────────────────────────────────────────
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
+# RSS: Reuters (feeds.reuters.com) часто недоступен из облаков — добавлены BBC, Guardian, MarketWatch и др.
 RSS_FEEDS = {
-    "Reuters Markets":    "https://feeds.reuters.com/reuters/businessNews",
-    "Reuters World":      "https://feeds.reuters.com/Reuters/worldNews",
+    "BBC Business":       "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "Guardian Business":  "https://www.theguardian.com/business/rss",
+    "Guardian World":     "https://www.theguardian.com/world/rss",
+    "MarketWatch":        "https://feeds.marketwatch.com/marketwatch/topstories/",
     "CNBC Markets":       "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135",
-    "CoinDesk":           "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "Yahoo Finance":      "https://finance.yahoo.com/news/rssindex",
     "Investing.com Eco":  "https://www.investing.com/rss/news_14.rss",
     "FT Markets":         "https://www.ft.com/rss/home/uk",
-    "Yahoo Finance":      "https://finance.yahoo.com/news/rssindex",
+    "CoinDesk":           "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "Cointelegraph":      "https://cointelegraph.com/rss",
 }
 
 MAX_NEWS_PER_FEED = int(os.getenv("MAX_NEWS_PER_FEED", "3"))
-MAX_TOTAL_NEWS    = int(os.getenv("MAX_TOTAL_NEWS", "15"))
+MAX_TOTAL_NEWS    = int(os.getenv("MAX_TOTAL_NEWS", "20"))
 
 # ─── ХРАНИЛИЩЕ ────────────────────────────────────────────────────────────────
 CACHE_FILE      = "cache.json"
 # Повторный /daily отдаёт тот же отчёт без вызова AI, пока не истечёт TTL (экономия токенов).
 # Раньше по умолчанию было 2 ч.; сутки — разумный баланс. Переопределение: CACHE_TTL_HOURS=6
 CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))
+# Снимок дебатов для кнопки «листать раунды» (JSON + SQLite; переживает другой воркер при общем диске)
+DEBATE_SNAPSHOT_HOURS = int(os.getenv("DEBATE_SNAPSHOT_HOURS", "72"))
 
 # ─── ФОРМАТИРОВАНИЕ ───────────────────────────────────────────────────────────
 DISCLAIMER = (

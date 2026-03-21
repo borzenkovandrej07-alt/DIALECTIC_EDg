@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config import CACHE_FILE, CACHE_TTL_HOURS
+from config import CACHE_FILE, CACHE_TTL_HOURS, DEBATE_SNAPSHOT_HOURS
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,10 @@ class Storage:
     def __init__(self):
         self.cache_path = Path(CACHE_FILE)
         self._data: dict = self._load()
+
+    def reload_from_disk(self):
+        """Актуализировать данные из cache.json (другой воркер мог записать дебаты)."""
+        self._data = self._load()
 
     def _load(self) -> dict:
         if self.cache_path.exists():
@@ -58,6 +62,53 @@ class Storage:
             return None
         
         return cached
+
+    def _prune_expired_debate_snapshots(self):
+        ud = self._data.get("user_debates")
+        if not isinstance(ud, dict):
+            return
+        now = datetime.now()
+        dead = []
+        for k, v in list(ud.items()):
+            if not isinstance(v, dict):
+                dead.append(k)
+                continue
+            try:
+                exp = datetime.fromisoformat(v.get("expires", "2000-01-01"))
+            except Exception:
+                dead.append(k)
+                continue
+            if now > exp:
+                dead.append(k)
+        for k in dead:
+            ud.pop(k, None)
+
+    def save_user_debate_snapshot(self, user_id: int, report: str):
+        """Дублирует полный отчёт для кнопки дебатов (рядом с last_report в JSON)."""
+        self.reload_from_disk()
+        self._data.setdefault("user_debates", {})
+        self._data["user_debates"][str(user_id)] = {
+            "report": report,
+            "expires": (datetime.now() + timedelta(hours=DEBATE_SNAPSHOT_HOURS)).isoformat(),
+        }
+        self._prune_expired_debate_snapshots()
+        self._save()
+        logger.info("Снимок дебатов сохранён в cache.json user=%s", user_id)
+
+    def get_user_debate_snapshot(self, user_id: int) -> str | None:
+        self.reload_from_disk()
+        self._prune_expired_debate_snapshots()
+        ud = self._data.get("user_debates", {}).get(str(user_id))
+        if not isinstance(ud, dict):
+            return None
+        try:
+            exp = datetime.fromisoformat(ud.get("expires", "2000-01-01"))
+        except Exception:
+            return None
+        if datetime.now() > exp:
+            return None
+        r = ud.get("report")
+        return r if isinstance(r, str) and r.strip() else None
 
     def clear_cache(self):
         self._data = {}
