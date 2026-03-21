@@ -52,6 +52,7 @@ from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
 from github_export import export_to_github, push_digest_cache
 from github_export import get_previous_digest, push_digest_cache
+from debate_storage import save_debate_redis, get_debate_redis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -424,6 +425,10 @@ async def send_daily_digest_bundle(
     except Exception as e:
         logger.warning("save_debate_session: %s", e)
     try:
+        await save_debate_redis(user_id, report)
+    except Exception as e:
+        logger.warning("save_debate_redis: %s", e)
+    try:
         storage.save_user_debate_snapshot(user_id, report)
     except Exception as e:
         logger.warning("save_user_debate_snapshot: %s", e)
@@ -520,13 +525,17 @@ async def handle_debate_page(callback: CallbackQuery):
 
     cache = debate_cache.get(user_id)
     if not cache:
-        storage.reload_from_disk()
+        report_redis = await get_debate_redis(user_id)
+        cache = hydrate_debate_from_report(report_redis) if report_redis else None
+        if cache:
+            debate_cache[user_id] = cache
+    if not cache:
         report_db = await get_debate_session(user_id)
         cache = hydrate_debate_from_report(report_db) if report_db else None
         if cache:
             debate_cache[user_id] = cache
-
     if not cache:
+        storage.reload_from_disk()
         snap = storage.get_user_debate_snapshot(user_id)
         cache = hydrate_debate_from_report(snap) if snap else None
         if cache:
@@ -542,7 +551,8 @@ async def handle_debate_page(callback: CallbackQuery):
 
     if not cache:
         logger.warning(
-            "debate hydrate miss user_id=%s (нет данных в RAM/SQLite/cache.json/last_report)",
+            "debate hydrate miss user_id=%s (RAM/Redis/SQLite/cache.json/last_report). "
+            "Подключи Redis (REDIS_URL) если несколько воркеров.",
             user_id,
         )
         await callback.answer("❌ Дебаты устарели, запусти /daily заново")

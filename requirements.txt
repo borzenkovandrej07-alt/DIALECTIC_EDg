@@ -19,6 +19,9 @@ aiosqlite==0.20.0
 # Переменные окружения
 python-dotenv==1.0.1
 
-matplotlib        
+matplotlib
+
+# Redis (опционально: REDIS_URL для дебатов при нескольких воркерах/рестартах)
+redis>=5.0
 
 # v4
