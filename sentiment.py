@@ -352,12 +352,14 @@ def analyze_and_filter(
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(
-                    asyncio.run,
-                    analyze_and_filter_async(news_text, market_data)
-                )
-                return future.result(timeout=60)
+
+            def _run_in_fresh_loop() -> tuple[SentimentResult, str]:
+                # корутину создаём только внутри воркера — не тащим её между потоками
+                return asyncio.run(analyze_and_filter_async(news_text, market_data))
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_run_in_fresh_loop)
+                return future.result(timeout=120)
         else:
             return loop.run_until_complete(
                 analyze_and_filter_async(news_text, market_data)

@@ -1,5 +1,5 @@
 """
-Dialectic Edge v6.0 — UX апгрейд.
+Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 - Одно сообщение вместо 6 (краткая выжимка + Synth)
 - Кнопка "📖 Полные дебаты" — листаешь раунды по одному
 - Простой язык в выводах для обычных людей
@@ -38,10 +38,10 @@ from news_fetcher import NewsFetcher
 from data_sources import fetch_full_context
 from web_search import get_full_realtime_context, search_news_context
 from meta_analyst import get_meta_context
-from sentiment import analyze_and_filter, format_for_agents
+from sentiment import analyze_and_filter_async, format_for_agents
 from agents import DebateOrchestrator
 from report_sanitizer import sanitize_full_report
-from chart_generator import generate_main_chart
+from chart_generator import generate_main_chart, generate_russia_chart
 from storage import Storage
 from database import (
     init_db, upsert_user, get_user, increment_requests,
@@ -60,8 +60,7 @@ from user_profile import (
 from weekly_report import build_weekly_report, send_weekly_reports
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
-from github_export import export_to_github, push_digest_cache
-from github_export import get_previous_digest, push_digest_cache
+from github_export import export_to_github, push_digest_cache, get_previous_digest
 from debate_storage import save_debate_redis, get_debate_redis, ping_redis
 
 logging.basicConfig(
@@ -468,6 +467,20 @@ async def send_digest_chart(
         logger.warning("Карточка-график не отправлена: %s", e)
 
 
+async def send_russia_chart_photo(chat_id: int, report: str) -> None:
+    try:
+        buf = generate_russia_chart(report)
+        if not buf:
+            return
+        raw = buf.getvalue() if hasattr(buf, "getvalue") else buf.read()
+        await bot.send_photo(
+            chat_id,
+            photo=BufferedInputFile(raw, filename="russia_edge.png"),
+        )
+    except Exception as e:
+        logger.warning("Карточка /russia не отправлена: %s", e)
+
+
 async def send_daily_digest_bundle(
     chat_id: int,
     user_id: int,
@@ -819,7 +832,7 @@ async def run_full_analysis(
         news_context += f"\n\n{prev_digest}"
         logger.info("Прошлый анализ передан агентам для сравнения")
 
-    sentiment_result, confidence_instruction = analyze_and_filter(
+    sentiment_result, confidence_instruction = await analyze_and_filter_async(
         news_context, str(live_prices)
     )
     sentiment_block = format_for_agents(sentiment_result, confidence_instruction)
@@ -1041,8 +1054,10 @@ async def cmd_russia(message: Message):
     now_ts = time.time()
     if russia_cache.get("report") and (now_ts - russia_cache.get("ts", 0)) < 7200:
         cached_ru = russia_cache["report"]
-        for chunk in split_message(cached_ru):
+        for i, chunk in enumerate(split_message(cached_ru)):
             await message.answer(chunk, parse_mode="Markdown")
+            if i == 0:
+                await send_russia_chart_photo(message.chat.id, cached_ru)
         await message.answer(
             f"📦 _Кэш от {russia_cache['timestamp']}. Новый через 2ч._",
             parse_mode="Markdown",
@@ -1105,8 +1120,10 @@ async def cmd_russia(message: Message):
 
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
 
-        for chunk in split_message(report):
+        for i, chunk in enumerate(split_message(report)):
             await message.answer(chunk, parse_mode="Markdown")
+            if i == 0:
+                await send_russia_chart_photo(message.chat.id, report)
 
         await message.answer(
             "💬 *Был ли анализ полезным?*",
@@ -1168,8 +1185,10 @@ async def handle_russia_choice(callback: CallbackQuery):
             message_id=wait_msg.message_id
         )
 
-        for chunk in split_message(report):
+        for i, chunk in enumerate(split_message(report)):
             await callback.message.answer(chunk, parse_mode="Markdown")
+            if i == 0:
+                await send_russia_chart_photo(callback.message.chat.id, report)
 
         await callback.message.answer(
             "💬 *Был ли анализ полезным?*",
@@ -1400,7 +1419,7 @@ async def cmd_stats(message: Message):
 async def cmd_help(message: Message):
     await upsert_user(message.from_user.id)
     await message.answer(
-        "📖 *Dialectic Edge v6.0*\n\n"
+        "📖 *Dialectic Edge v7.1*\n\n"
         "*Что нового в v6:*\n"
         "• Один отчёт вместо 6 сообщений\n"
         "• Кнопка 📖 Полные дебаты — листай раунды\n"
@@ -1467,7 +1486,7 @@ async def main():
 
     await init_db()
     await init_profiles_table()
-    logger.info("🚀 Dialectic Edge v6.0 starting...")
+    logger.info("🚀 Dialectic Edge v7.1 starting...")
     if USING_DATA_DIR:
         logger.info(
             "Постоянное хранилище: SQLite=%s | cache.json=%s",
