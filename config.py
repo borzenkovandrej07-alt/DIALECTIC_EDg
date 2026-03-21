@@ -38,8 +38,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 # ID администраторов
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "0").split(",") if x.strip().isdigit()]
 
-# Redis (опционально): снимки дебатов для кнопки «листать» — переживают рестарт и несколько воркеров.
-# Railway: Add-ons → Redis → REDIS_URL подтянется автоматически
+# Redis: снимки дебатов для кнопки «листать» — переживают рестарт и несколько воркеров.
+# Railway: в проекте + New → Database → Redis. В СЕРВИСЕ БОТА: Variables → New Variable →
+# Reference → Redis → REDIS_URL. URL в чат не шли — только в панели Railway.
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 # ─── FRED API ─────────────────────────────────────────────────────────────────

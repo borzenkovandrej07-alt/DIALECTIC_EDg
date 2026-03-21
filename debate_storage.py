@@ -54,3 +54,16 @@ async def get_debate_redis(user_id: int) -> str | None:
     except Exception as e:
         logger.warning("Redis get_debate: %s", e)
         return None
+
+
+async def ping_redis() -> bool:
+    """Проверка при старте бота (логи Railway)."""
+    r = _get_redis()
+    if not r:
+        return False
+    try:
+        await r.ping()
+        return True
+    except Exception as e:
+        logger.warning("Redis PING: %s", e)
+        return False

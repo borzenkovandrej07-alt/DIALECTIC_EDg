@@ -32,6 +32,7 @@ from config import (
     CACHE_FILE,
     DB_PATH,
     USING_DATA_DIR,
+    DEBATE_SNAPSHOT_HOURS,
 )
 from news_fetcher import NewsFetcher
 from data_sources import fetch_full_context
@@ -61,7 +62,7 @@ from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
 from github_export import export_to_github, push_digest_cache
 from github_export import get_previous_digest, push_digest_cache
-from debate_storage import save_debate_redis, get_debate_redis
+from debate_storage import save_debate_redis, get_debate_redis, ping_redis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1439,10 +1440,22 @@ async def main():
             DB_PATH,
             CACHE_FILE,
         )
-    if not REDIS_URL.strip():
+    if REDIS_URL.strip():
+        if await ping_redis():
+            logger.info(
+                "Redis OK — полные дебаты переживут рестарт (TTL ≈ %s ч.)",
+                DEBATE_SNAPSHOT_HOURS,
+            )
+        else:
+            logger.warning(
+                "REDIS_URL задан, но соединение не удалось — проверь Redis-плагин и что "
+                "переменная подцеплена к сервису бота (Variables → shared / Reference)."
+            )
+    else:
         logger.warning(
-            "REDIS_URL не задан — кнопка «Полные дебаты» не переживет другой воркер/рестарт. "
-            "Railway: Add-ons → Redis; при TelegramConflict выключи лишний деплой с тем же BOT_TOKEN."
+            "REDIS_URL нет — после редеплоя кнопка «Полные дебаты» может быть пустой. "
+            "Railway: New → Template → Redis ИЛИ + Database → Redis, затем в сервисе бота "
+            "Variables → New Variable → Reference → Redis → REDIS_URL."
         )
 
     scheduler = Scheduler(
