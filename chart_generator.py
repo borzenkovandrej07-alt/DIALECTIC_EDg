@@ -447,7 +447,7 @@ def generate_russia_chart(russia_report: str):
             for bar, r in zip(bars, ratings):
                 ax1.text(bar.get_width() + 0.05,
                          bar.get_y() + bar.get_height()/2,
-                         "★" * r, va="center", fontsize=8, color=COLORS["gold"])
+                         "*" * r, va="center", fontsize=8, color=COLORS["gold"])
         else:
             ax1.text(0.5, 0.5, "Данные\nне найдены",
                      ha="center", va="center", transform=ax1.transAxes,

@@ -7,6 +7,9 @@ aiogram==3.13.1
 # HTTP клиент (async запросы)
 aiohttp==3.10.5
 
+# CA bundle для HTTPS (Росстат / slim Docker без полного ca-certificates)
+certifi>=2024.0.0
+
 # RSS парсер
 feedparser==6.0.11
 

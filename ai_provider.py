@@ -185,6 +185,7 @@ async def _call_mistral(prompt: str, system: str, temperature: float,
             if "429" in str(e):
                 logger.warning(f"{key_name} лимит — пробую Mistral#2...")
                 last_err = e
+                await asyncio.sleep(2.5)
                 continue
             raise
     raise RuntimeError(f"Все Mistral ключи исчерпаны: {last_err}")
@@ -325,18 +326,29 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
             except Exception as e2:
                 logger.warning(f"[{agent_key}] synth mistral-small ❌ {e2}")
 
-    return await _call_best_available(prompt, system, temperature, agent_key)
+    # После основного маршрута Mistral уже пробовали — не дублировать (лишние 429).
+    # Если agent_key не в AGENT_MODELS — полная цепочка, включая Mistral.
+    return await _call_best_available(
+        prompt, system, temperature, agent_key,
+        skip_mistral=(config is not None),
+    )
 
 
-async def _call_best_available(prompt: str, system: str, temperature: float,
-                                agent_name: str = "general") -> str:
+async def _call_best_available(
+    prompt: str,
+    system: str,
+    temperature: float,
+    agent_name: str = "general",
+    *,
+    skip_mistral: bool = False,
+) -> str:
     """
-    Финальная цепочка fallback:
-    Groq#1+#2 → Mistral Small → OpenRouter/Llama → OpenRouter/Gemma
+    Финальная цепочка fallback.
+    skip_mistral=True — после неудачного основного вызова агента (bull/bear/verifier/synth),
+    чтобы не бить те же ключи Mistral повторно.
     """
     providers = []
-    # Полная цепочка: Mistral x2 → Groq x3 → OpenRouter x2 → Together
-    if MISTRAL_API_KEY or MISTRAL_API_KEY_2:
+    if not skip_mistral and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
         providers.append(("Mistral Small",
             lambda p, s, t: _call_mistral_throttled(p, s, t, agent_key=agent_name)))
 

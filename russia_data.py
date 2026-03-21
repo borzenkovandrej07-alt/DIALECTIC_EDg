@@ -16,7 +16,10 @@ russia_data.py v2.0 — Расширенные источники данных �
 import asyncio
 import logging
 import re
+import socket
+import ssl
 from datetime import datetime
+
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -27,6 +30,23 @@ HEADERS = {
 }
 
 
+def _http_connector() -> aiohttp.BaseConnector:
+    """certifi + IPv4: SSL Росстата и DNS на части Railway/Docker образов."""
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return aiohttp.TCPConnector(ssl=ctx, family=socket.AF_INET)
+    except Exception:
+        return aiohttp.TCPConnector(family=socket.AF_INET)
+
+
+def _session(headers: dict | None = None):
+    return aiohttp.ClientSession(
+        headers=headers if headers is not None else HEADERS,
+        connector=_http_connector(),
+    )
+
+
 # ─── 1. ЦБ РФ — курсы и ставка ───────────────────────────────────────────────
 
 async def fetch_cbr_data() -> str:
@@ -34,7 +54,7 @@ async def fetch_cbr_data() -> str:
 
     try:
         url = "https://www.cbr.ru/scripts/XML_daily.asp"
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with _session() as session:
             async with session.get(url, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
                     text = await resp.text(encoding="windows-1251")
@@ -65,7 +85,7 @@ async def fetch_cbr_data() -> str:
     # Ключевая ставка
     try:
         url = "https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2025&UniDbQuery.To=31.12.2026"
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with _session() as session:
             async with session.get(url, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
                     text = await resp.text()
@@ -97,7 +117,7 @@ async def fetch_cbr_data() -> str:
 async def fetch_moex_data() -> str:
     results = []
 
-    async with aiohttp.ClientSession(headers=HEADERS) as session:
+    async with _session() as session:
 
         # IMOEX индекс
         try:
@@ -223,7 +243,7 @@ async def fetch_urals_oil() -> str:
         return f"{arrow} {val:+.1f}{suffix}"
 
     try:
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with _session() as session:
             brent_data, wti_data = await asyncio.gather(
                 get_oil_price("BZ=F", session),
                 get_oil_price("CL=F", session),
@@ -284,13 +304,17 @@ async def fetch_urals_oil() -> str:
 async def fetch_russia_news() -> str:
     all_news = []
 
+    # У rss.rbc.ru на части хостингов падает DNS — дублируем rssexport.rbc.ru
     rss_feeds = [
-        ("РБК Экономика",    "https://rss.rbc.ru/finances/rss.rss"),
-        ("РБК Бизнес",       "https://rss.rbc.ru/business/rss.rss"),
-        ("РБК Политика",     "https://rss.rbc.ru/politics/rss.rss"),
-        ("Коммерсант",       "https://www.kommersant.ru/RSS/main.xml"),
-        ("Ведомости",        "https://www.vedomosti.ru/rss/news"),
-        ("Интерфакс",        "https://www.interfax.ru/rss.asp"),
+        ("РБК Экономика", "https://rss.rbc.ru/finances/rss.rss",
+         "https://rssexport.rbc.ru/rbcnews/finances/20/full.rss"),
+        ("РБК Бизнес", "https://rss.rbc.ru/business/rss.rss",
+         "https://rssexport.rbc.ru/rbcnews/business/20/full.rss"),
+        ("РБК Политика", "https://rss.rbc.ru/politics/rss.rss",
+         "https://rssexport.rbc.ru/rbcnews/politics/20/full.rss"),
+        ("Коммерсант", "https://www.kommersant.ru/RSS/main.xml", None),
+        ("Ведомости", "https://www.vedomosti.ru/rss/news", None),
+        ("Интерфакс", "https://www.interfax.ru/rss.asp", None),
     ]
 
     # Расширенные ключевые слова — законы, налоги, бизнес, санкции
@@ -311,32 +335,44 @@ async def fetch_russia_news() -> str:
         "аграр", "сельхоз", "it", "технолог",
     ]
 
-    async with aiohttp.ClientSession(headers=HEADERS) as session:
-        for source_name, url in rss_feeds:
-            try:
-                async with session.get(url, timeout=TIMEOUT) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-
-                        # Пробуем CDATA формат
-                        titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', text)
-                        if not titles:
-                            titles = re.findall(r'<title>(.*?)</title>', text)
-
-                        count = 0
-                        for title in titles[1:15]:
-                            title = title.strip()
-                            title = re.sub(r'<[^>]+>', '', title)  # убираем HTML теги
-                            if title and any(kw in title.lower() for kw in keywords):
-                                all_news.append((source_name, title))
-                                count += 1
-                            if count >= 3:
-                                break
-
+    async with _session() as session:
+        for row in rss_feeds:
+            source_name, url = row[0], row[1]
+            alt_url = row[2] if len(row) > 2 else None
+            text = None
+            last_err = None
+            for u in ([url] + ([alt_url] if alt_url else [])):
+                try:
+                    async with session.get(u, timeout=TIMEOUT) as resp:
+                        if resp.status == 200:
+                            text = await resp.text()
+                            break
+                except Exception as e:
+                    last_err = e
+                    continue
+            if not text:
+                logger.warning(f"RSS {source_name} error: {last_err or 'HTTP не 200'}")
                 await asyncio.sleep(0.2)
-            except Exception as e:
-                logger.warning(f"RSS {source_name} error: {e}")
                 continue
+
+            try:
+                titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', text)
+                if not titles:
+                    titles = re.findall(r'<title>(.*?)</title>', text)
+
+                count = 0
+                for title in titles[1:15]:
+                    title = title.strip()
+                    title = re.sub(r'<[^>]+>', '', title)
+                    if title and any(kw in title.lower() for kw in keywords):
+                        all_news.append((source_name, title))
+                        count += 1
+                    if count >= 3:
+                        break
+            except Exception as e:
+                logger.warning(f"RSS {source_name} parse error: {e}")
+
+            await asyncio.sleep(0.2)
 
     if not all_news:
         return ""
@@ -358,7 +394,7 @@ async def fetch_rosstat_inflation() -> str:
     try:
         # Росстат публикует еженедельные данные
         url = "https://rosstat.gov.ru/storage/mediabank/Ind_potreb_cen.htm"
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with _session() as session:
             async with session.get(url, timeout=TIMEOUT) as resp:
                 if resp.status == 200:
                     text = await resp.text()
@@ -399,7 +435,7 @@ async def fetch_ofz_yields() -> str:
     }
     results = []
     try:
-        async with aiohttp.ClientSession() as session:
+        async with _session() as session:
             for isin, name in OFZ_LIST.items():
                 try:
                     url = (
@@ -447,9 +483,8 @@ async def fetch_europe_gas_price() -> str:
     TTF = Dutch TTF Gas (бенчмарк для Европы).
     """
     try:
-        import aiohttp
         url = "https://query1.finance.yahoo.com/v8/finance/chart/TTF=F?interval=1d&range=2d"
-        async with aiohttp.ClientSession() as session:
+        async with _session() as session:
             async with session.get(
                 url, 
                 headers={"User-Agent": "Mozilla/5.0"},

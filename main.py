@@ -7,6 +7,7 @@ Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Optional, Tuple
@@ -1509,6 +1510,15 @@ async def main():
     await init_db()
     await init_profiles_table()
     logger.info("🚀 Dialectic Edge v7.1 starting...")
+    if int(os.getenv("RAILWAY_REPLICA_COUNT", "1") or "1") > 1:
+        logger.warning(
+            "Railway: у сервиса бота >1 реплики — aiogram polling даёт TelegramConflictError. "
+            "Scale → 1 или один процесс с BOT_TOKEN."
+        )
+    logger.info(
+        "Подсказка: TelegramConflictError = второй процесс с тем же BOT_TOKEN "
+        "(лишняя реплика Railway / локальный запуск)."
+    )
     if USING_DATA_DIR:
         logger.info(
             "Постоянное хранилище: SQLite=%s | cache.json=%s",
