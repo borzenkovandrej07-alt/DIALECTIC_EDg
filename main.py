@@ -37,7 +37,8 @@ from database import (
     init_db, upsert_user, get_user, increment_requests,
     get_daily_subscribers, set_daily_sub,
     get_track_record, save_feedback, get_feedback_stats,
-    log_report, get_admin_stats
+    log_report, get_admin_stats,
+    save_debate_session, get_debate_session,
 )
 from tracker import check_pending_predictions, save_predictions_from_report
 from scheduler import Scheduler
@@ -157,7 +158,8 @@ def extract_signal_pct_and_stars(report: str) -> tuple[int, str]:
 
 
 SIGNAL_PCT_EXPLAINED = (
-    "Число % — уверенность FinBERT в тоне новостей (HIGH≈85%, MEDIUM≈55%, LOW≈25%), "
+    "Число % — уверенность FinBERT в тоне новостей "
+    "(EXTREME≈95%, HIGH≈85%, MEDIUM≈55%, LOW≈25%), "
     "не прогноз «рынок пойдёт вверх/вниз». Звёзды — наглядная шкала той же метрики."
 )
 
@@ -374,6 +376,11 @@ async def send_daily_digest_bundle(
     parts = parse_report_parts(report)
     pct_val, stars_str = extract_signal_pct_and_stars(report)
     debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+    try:
+        await save_debate_session(user_id, report)
+    except Exception as e:
+        logger.warning("save_debate_session: %s", e)
+
     messages = build_short_report(parts, stars_str, pct_val)
     logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
     for i, msg in enumerate(messages):
@@ -440,16 +447,50 @@ async def handle_debate_page(callback: CallbackQuery):
         return
 
     _, user_id_str, action = parts[0], parts[1], parts[2]
-    user_id = int(user_id_str)
 
     if action == "noop":
         await callback.answer()
         return
 
-    round_idx = int(action)
+    try:
+        kb_uid = int(user_id_str)
+    except ValueError:
+        await callback.answer()
+        return
 
-    # Берём дебаты из кэша
+    if kb_uid != callback.from_user.id:
+        await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
+        return
+
+    user_id = callback.from_user.id
+    try:
+        round_idx = int(action)
+    except ValueError:
+        await callback.answer()
+        return
+
+    def _hydrate_from_report(text: str) -> dict | None:
+        if not text or not text.strip():
+            return None
+        p = parse_report_parts(text)
+        if not p.get("rounds"):
+            return None
+        return {"rounds": p["rounds"], "full": text}
+
     cache = debate_cache.get(user_id)
+    if not cache:
+        report_db = await get_debate_session(user_id)
+        cache = _hydrate_from_report(report_db) if report_db else None
+        if cache:
+            debate_cache[user_id] = cache
+
+    if not cache:
+        cached = storage.get_cached_report()
+        rep = cached.get("report") if cached else None
+        cache = _hydrate_from_report(rep) if rep else None
+        if cache:
+            debate_cache[user_id] = cache
+
     if not cache:
         await callback.answer("❌ Дебаты устарели, запусти /daily заново")
         return

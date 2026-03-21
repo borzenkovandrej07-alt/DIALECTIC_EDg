@@ -78,6 +78,14 @@ async def init_db():
             )
         """)
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS debate_sessions (
+                user_id    INTEGER PRIMARY KEY,
+                report     TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
         await db.commit()
 
     logger.info("✅ База данных инициализирована")
@@ -124,6 +132,29 @@ async def reset_daily_counts():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET requests_today = 0")
         await db.commit()
+
+
+async def save_debate_session(user_id: int, report: str):
+    """Снимок отчёта для листания дебатов после рестарта / другого воркера."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO debate_sessions (user_id, report, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                report = excluded.report,
+                updated_at = datetime('now')
+        """, (user_id, report))
+        await db.commit()
+
+
+async def get_debate_session(user_id: int) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT report FROM debate_sessions WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
 
 
 async def get_daily_subscribers() -> list[dict]:
