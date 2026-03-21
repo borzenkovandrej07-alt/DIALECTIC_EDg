@@ -1,18 +1,14 @@
 """
 ai_provider.py — Мультипровайдер с роутингом по агентам.
 
-ИСПРАВЛЕНО v3:
-- Bull/Verifier → Mistral Small (основной, не тратит Groq лимит)
-- OpenRouter: Llama 3.3 70B (основной) → Gemma 3 27B (запасной)
-- Добавлен MODELS_USED — трекинг какие модели участвовали в анализе
-- GROQ_API_KEY_2 — второй аккаунт, автопереключение при 429
-- Throttle 3 сек + Lock для параллельных вызовов
+Переменные окружения (Railway / .env):
+  AI_DEBATE_PRIMARY — кто первым отвечает в дебатах:
+      mistral (по умолчанию) | groq | openrouter | together | gemini
+  GROQ_MODEL, OPENROUTER_MODEL, TOGETHER_MODEL — модели для соответствующего primary
+  OPENROUTER_SYNTH_MODEL — опционально, иначе как OPENROUTER_MODEL
+  MISTRAL_SYNTH_MODEL — для synth при primary=mistral (по умолчанию mistral-large-latest)
 
-Агенты:
-  🐂 Bull      → Mistral Small  → Groq#1 → Groq#2 → OpenRouter/Llama → OpenRouter/Gemma
-  🐻 Bear      → Mistral Small  → Groq#1 → Groq#2 → OpenRouter/Llama → OpenRouter/Gemma
-  🔍 Verifier  → Mistral Small  → Groq#1 → Groq#2 → OpenRouter/Llama → OpenRouter/Gemma
-  ⚖️ Synth     → Mistral Large  → Mistral Small → Groq#1 → Groq#2 → OpenRouter/Llama
+Fallback после ошибки primary: остальные провайдеры по цепочке (без повтора того же API).
 """
 
 import logging
@@ -44,6 +40,19 @@ GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 GROQ_API_KEY_2     = os.getenv("GROQ_API_KEY_2", "")   # второй аккаунт
 GROQ_API_KEY_3     = os.getenv("GROQ_API_KEY_3", "")   # третий аккаунт
 GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL         = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"
+).strip() or "meta-llama/llama-3.3-70b-instruct:free"
+OPENROUTER_SYNTH_MODEL = os.getenv("OPENROUTER_SYNTH_MODEL", "").strip() or OPENROUTER_MODEL
+
+TOGETHER_MODEL = os.getenv(
+    "TOGETHER_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+).strip() or "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip() or "gemini-1.5-flash"
 
 
 # ── Трекинг моделей для честного лейбла в отчёте ─────────────────────────────
@@ -62,6 +71,85 @@ def _track_model(agent_key: str, provider: str, model: str):
     logger.info(f"[{agent_key}] использует: {label}")
 
 
+def _debate_primary_env() -> str:
+    return os.getenv("AI_DEBATE_PRIMARY", "mistral").strip().lower() or "mistral"
+
+
+def _can_use_primary(name: str) -> bool:
+    if name == "mistral":
+        return bool(MISTRAL_API_KEY or MISTRAL_API_KEY_2)
+    if name == "groq":
+        return bool(GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3)
+    if name == "openrouter":
+        return bool(OPENROUTER_API_KEY or OPENROUTER_API_KEY_2)
+    if name == "together":
+        return bool(TOGETHER_API_KEY or TOGETHER_API_KEY_2)
+    if name == "gemini":
+        return bool(GEMINI_API_KEY)
+    return False
+
+
+def _resolve_agent_models() -> dict:
+    """Кто первым обрабатывает дебаты (остальное — fallback в _call_best_available)."""
+    want = _debate_primary_env()
+    if want not in ("mistral", "groq", "openrouter", "together", "gemini"):
+        logger.warning("AI_DEBATE_PRIMARY=%s неизвестен — использую mistral", want)
+        want = "mistral"
+    if not _can_use_primary(want):
+        logger.warning(
+            "AI_DEBATE_PRIMARY=%s недоступен (нет ключа) — откат на mistral/groq по наличию ключей",
+            want,
+        )
+        if _can_use_primary("mistral"):
+            want = "mistral"
+        elif _can_use_primary("groq"):
+            want = "groq"
+        elif _can_use_primary("openrouter"):
+            want = "openrouter"
+        elif _can_use_primary("together"):
+            want = "together"
+        elif _can_use_primary("gemini"):
+            want = "gemini"
+        else:
+            want = next(
+                (n for n in ("groq", "openrouter", "together", "gemini", "mistral")
+                 if _can_use_primary(n)),
+                "mistral",
+            )
+
+    mm = os.getenv("MISTRAL_MODEL", MISTRAL_MODEL).strip() or MISTRAL_MODEL
+    syn_m = os.getenv("MISTRAL_SYNTH_MODEL", "mistral-large-latest").strip() or "mistral-large-latest"
+
+    if want == "groq":
+        m = {"bull": {"provider": "groq", "model": GROQ_MODEL},
+             "verifier": {"provider": "groq", "model": GROQ_MODEL},
+             "bear": {"provider": "groq", "model": GROQ_MODEL},
+             "synth": {"provider": "groq", "model": GROQ_MODEL}}
+    elif want == "openrouter":
+        m = {"bull": {"provider": "openrouter", "model": OPENROUTER_MODEL},
+             "verifier": {"provider": "openrouter", "model": OPENROUTER_MODEL},
+             "bear": {"provider": "openrouter", "model": OPENROUTER_MODEL},
+             "synth": {"provider": "openrouter", "model": OPENROUTER_SYNTH_MODEL}}
+    elif want == "together":
+        m = {"bull": {"provider": "together", "model": TOGETHER_MODEL},
+             "verifier": {"provider": "together", "model": TOGETHER_MODEL},
+             "bear": {"provider": "together", "model": TOGETHER_MODEL},
+             "synth": {"provider": "together", "model": TOGETHER_MODEL}}
+    elif want == "gemini":
+        m = {"bull": {"provider": "gemini", "model": GEMINI_MODEL},
+             "verifier": {"provider": "gemini", "model": GEMINI_MODEL},
+             "bear": {"provider": "gemini", "model": GEMINI_MODEL},
+             "synth": {"provider": "gemini", "model": GEMINI_MODEL}}
+    else:
+        m = {"bull": {"provider": "mistral", "model": mm},
+             "verifier": {"provider": "mistral", "model": mm},
+             "bear": {"provider": "mistral", "model": mm},
+             "synth": {"provider": "mistral", "model": syn_m}}
+
+    logger.info("Дебаты: первичный провайдер = %s (AI_DEBATE_PRIMARY)", want)
+    return m
+
+
 def get_models_summary() -> str:
     if not MODELS_USED:
         return "🐂 Bull | 🐻 Bear | 🔍 Verifier | ⚖️ Synth"
@@ -77,13 +165,8 @@ def get_models_summary() -> str:
     )
 
 
-# ── Модели по агентам ──────────────────────────────────────────────────────────
-AGENT_MODELS = {
-    "bull":     {"provider": "mistral", "model": "mistral-small-latest"},
-    "verifier": {"provider": "mistral", "model": "mistral-small-latest"},
-    "bear":     {"provider": "mistral", "model": "mistral-small-latest"},
-    "synth":    {"provider": "mistral", "model": "mistral-large-latest"},
-}
+# ── Модели по агентам (первый ход дебатов) ────────────────────────────────────
+AGENT_MODELS = _resolve_agent_models()
 
 _AGENT_MAX_TOKENS = {
     "bull":     2500,   # увеличено — 4 возможности Russia Edge не обрезаются
@@ -134,7 +217,7 @@ async def _call_groq(prompt: str, system: str, temperature: float,
     if not GROQ_API_KEY and not GROQ_API_KEY_2 and not GROQ_API_KEY_3:
         raise ValueError("Нет GROQ_API_KEY")
 
-    m = model or "llama-3.3-70b-versatile"
+    m = model or GROQ_MODEL
     keys_to_try = []
     if GROQ_API_KEY:   keys_to_try.append(("Groq#1", GROQ_API_KEY))
     if GROQ_API_KEY_2: keys_to_try.append(("Groq#2", GROQ_API_KEY_2))
@@ -191,41 +274,112 @@ async def _call_mistral(prompt: str, system: str, temperature: float,
     raise RuntimeError(f"Все Mistral ключи исчерпаны: {last_err}")
 
 
+_OR_HEADERS = {
+    "HTTP-Referer": "https://dialectic-edge.bot",
+    "X-Title": "Dialectic Edge",
+}
+
+
+async def _call_openrouter_model(
+    prompt: str,
+    system: str,
+    temperature: float,
+    model: str,
+    agent_key: str = None,
+) -> str:
+    """OpenRouter: KEY_1 → KEY_2 при 429/402."""
+    keys_try = []
+    if OPENROUTER_API_KEY:
+        keys_try.append(("OpenRouter", OPENROUTER_API_KEY))
+    if OPENROUTER_API_KEY_2:
+        keys_try.append(("OpenRouter#2", OPENROUTER_API_KEY_2))
+    if not keys_try:
+        raise ValueError("Нет OPENROUTER_API_KEY")
+    last_err = None
+    for key_name, key in keys_try:
+        try:
+            result = await _call_openai_style(
+                OPENROUTER_URL, key, model,
+                prompt, system, temperature, key_name,
+                extra_headers=_OR_HEADERS,
+                agent_key=agent_key,
+            )
+            if agent_key:
+                _track_model(agent_key, key_name, model)
+            return result
+        except RuntimeError as e:
+            err = str(e)
+            if "429" in err or "402" in err:
+                logger.warning("%s лимит OpenRouter — следующий ключ...", key_name)
+                last_err = e
+                continue
+            raise
+    raise RuntimeError(f"Все OpenRouter ключи исчерпаны: {last_err}")
+
+
 async def _call_openrouter_llama(prompt: str, system: str, temperature: float,
                                   agent_key: str = None) -> str:
-    if not OPENROUTER_API_KEY:
-        raise ValueError("Нет OPENROUTER_API_KEY")
-    m = "meta-llama/llama-3.3-70b-instruct:free"
-    result = await _call_openai_style(
-        OPENROUTER_URL, OPENROUTER_API_KEY, m,
-        prompt, system, temperature, "OpenRouter",
-        extra_headers={"HTTP-Referer": "https://dialectic-edge.bot", "X-Title": "Dialectic Edge"},
-        agent_key=agent_key
+    return await _call_openrouter_model(
+        prompt, system, temperature,
+        "meta-llama/llama-3.3-70b-instruct:free",
+        agent_key,
     )
-    if agent_key:
-        _track_model(agent_key, "OpenRouter", m)
-    return result
 
 
 async def _call_openrouter_gemma(prompt: str, system: str, temperature: float,
                                   agent_key: str = None) -> str:
-    if not OPENROUTER_API_KEY:
-        raise ValueError("Нет OPENROUTER_API_KEY")
-    m = "google/gemma-3-27b-it:free"
-    result = await _call_openai_style(
-        OPENROUTER_URL, OPENROUTER_API_KEY, m,
-        prompt, system, temperature, "OpenRouter",
-        extra_headers={"HTTP-Referer": "https://dialectic-edge.bot", "X-Title": "Dialectic Edge"},
-        agent_key=agent_key
+    return await _call_openrouter_model(
+        prompt, system, temperature,
+        "google/gemma-3-27b-it:free",
+        agent_key,
     )
-    if agent_key:
-        _track_model(agent_key, "OpenRouter", m)
-    return result
 
 
-async def _call_together(prompt: str, system: str, temperature: float, agent_key: str = None) -> str:
+async def _call_gemini(
+    prompt: str, system: str, temperature: float, agent_key: str = None
+) -> str:
+    if not GEMINI_API_KEY:
+        raise ValueError("Нет GEMINI_API_KEY")
+    m = GEMINI_MODEL
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
+    max_tok = _AGENT_MAX_TOKENS.get(agent_key, MAX_TOKENS_PER_AGENT)
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": min(temperature, 1.0),
+            "maxOutputTokens": max_tok,
+        },
+    }
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    params = {"key": GEMINI_API_KEY}
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, params=params, json=body, timeout=TIMEOUT) as resp:
+            raw = await resp.text()
+            if resp.status != 200:
+                raise RuntimeError(f"Gemini HTTP {resp.status}: {raw[:400]}")
+            data = await resp.json()
+            cand = data.get("candidates") or []
+            if not cand:
+                raise RuntimeError(f"Gemini: нет candidates — {raw[:250]}")
+            parts = cand[0].get("content", {}).get("parts") or []
+            if not parts or not parts[0].get("text"):
+                raise RuntimeError("Gemini: пустой текст")
+            out = parts[0]["text"].strip()
+            if agent_key:
+                _track_model(agent_key, "Gemini", m)
+            return out
+
+
+async def _call_together(
+    prompt: str,
+    system: str,
+    temperature: float,
+    model: str = None,
+    agent_key: str = None,
+) -> str:
     """Together AI — KEY_1 → KEY_2 при 429."""
-    m = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+    m = model or TOGETHER_MODEL
     keys_to_try = []
     if TOGETHER_API_KEY:   keys_to_try.append(("Together#1", TOGETHER_API_KEY))
     if TOGETHER_API_KEY_2: keys_to_try.append(("Together#2", TOGETHER_API_KEY_2))
@@ -251,25 +405,6 @@ async def _call_together(prompt: str, system: str, temperature: float, agent_key
                 continue
             raise
     raise RuntimeError(f"Все Together ключи исчерпаны: {last_err}")
-
-
-async def _call_openrouter_llama2(prompt: str, system: str, temperature: float, agent_key: str = None) -> str:
-    """OpenRouter резервный ключ / Llama."""
-    if not OPENROUTER_API_KEY_2:
-        raise ValueError("Нет OPENROUTER_API_KEY_2")
-    m = "meta-llama/llama-3.3-70b-instruct:free"
-    result = await _call_openai_style(
-        OPENROUTER_URL, OPENROUTER_API_KEY_2, m,
-        prompt, system, temperature, "OpenRouter#2",
-        extra_headers={
-            "HTTP-Referer": "https://dialectic-edge.bot",
-            "X-Title": "Dialectic Edge"
-        },
-        agent_key=agent_key
-    )
-    if agent_key:
-        _track_model(agent_key, "OpenRouter#2", m)
-    return result
 
 
 # ── Throttle для Mistral ──────────────────────────────────────────────────────
@@ -308,6 +443,16 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
                 result = await _call_mistral_throttled(prompt, system, temperature, model, agent_key=agent_key)
             elif provider == "groq":
                 result = await _call_groq(prompt, system, temperature, model, agent_key=agent_key)
+            elif provider == "openrouter":
+                result = await _call_openrouter_model(
+                    prompt, system, temperature, model, agent_key=agent_key
+                )
+            elif provider == "together":
+                result = await _call_together(
+                    prompt, system, temperature, model, agent_key=agent_key
+                )
+            elif provider == "gemini":
+                result = await _call_gemini(prompt, system, temperature, agent_key=agent_key)
             else:
                 raise ValueError(f"Неизвестный провайдер: {provider}")
             logger.info(f"[{agent_key}] → {provider}/{model} ✅")
@@ -315,8 +460,13 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
         except Exception as e:
             logger.warning(f"[{agent_key}] → {provider}/{model} ❌ {e}")
 
-        # Synth: Mistral Large → Mistral Small
-        if agent_key == "synth" and "large" in model:
+        # Synth: только для Mistral Large → пробуем Small
+        if (
+            agent_key == "synth"
+            and provider == "mistral"
+            and model
+            and "large" in model.lower()
+        ):
             try:
                 result = await _call_mistral_throttled(
                     prompt, system, temperature, "mistral-small-latest", agent_key=agent_key
@@ -326,11 +476,10 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
             except Exception as e2:
                 logger.warning(f"[{agent_key}] synth mistral-small ❌ {e2}")
 
-    # После основного маршрута Mistral уже пробовали — не дублировать (лишние 429).
-    # Если agent_key не в AGENT_MODELS — полная цепочка, включая Mistral.
+    skip_p = frozenset({config["provider"]} if config else [])
     return await _call_best_available(
         prompt, system, temperature, agent_key,
-        skip_mistral=(config is not None),
+        skip_providers=skip_p,
     )
 
 
@@ -340,35 +489,36 @@ async def _call_best_available(
     temperature: float,
     agent_name: str = "general",
     *,
-    skip_mistral: bool = False,
+    skip_providers: frozenset | None = None,
 ) -> str:
     """
-    Финальная цепочка fallback.
-    skip_mistral=True — после неудачного основного вызова агента (bull/bear/verifier/synth),
-    чтобы не бить те же ключи Mistral повторно.
+    Цепочка fallback. skip_providers — не вызывать тот же API повторно
+    (primary уже отработал или упал).
     """
+    skip = set(skip_providers or [])
+
     providers = []
-    if not skip_mistral and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
+    if "mistral" not in skip and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
         providers.append(("Mistral Small",
             lambda p, s, t: _call_mistral_throttled(p, s, t, agent_key=agent_name)))
 
-    if GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3:
+    if "groq" not in skip and (GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3):
         providers.append(("Groq/Llama",
             lambda p, s, t: _call_groq(p, s, t, agent_key=agent_name)))
 
-    if OPENROUTER_API_KEY:
+    if "openrouter" not in skip and (OPENROUTER_API_KEY or OPENROUTER_API_KEY_2):
         providers.append(("OpenRouter/Llama",
             lambda p, s, t: _call_openrouter_llama(p, s, t, agent_key=agent_name)))
         providers.append(("OpenRouter/Gemma",
             lambda p, s, t: _call_openrouter_gemma(p, s, t, agent_key=agent_name)))
 
-    if OPENROUTER_API_KEY_2:
-        providers.append(("OpenRouter#2/Llama",
-            lambda p, s, t: _call_openrouter_llama2(p, s, t, agent_key=agent_name)))
-
-    if TOGETHER_API_KEY or TOGETHER_API_KEY_2:
+    if "together" not in skip and (TOGETHER_API_KEY or TOGETHER_API_KEY_2):
         providers.append(("Together/Llama",
             lambda p, s, t: _call_together(p, s, t, agent_key=agent_name)))
+
+    if "gemini" not in skip and GEMINI_API_KEY:
+        providers.append(("Gemini",
+            lambda p, s, t: _call_gemini(p, s, t, agent_key=agent_name)))
 
     if not providers:
         raise ValueError("Нет API ключей! Добавь GROQ_API_KEY и MISTRAL_API_KEY в Railway")
@@ -408,7 +558,7 @@ class AgentProvider:
 
     async def complete(self, prompt: str, system: str = "", temperature: float = None) -> str:
         t = temperature or AGENT_TEMPERATURE
-        return await _call_best_available(prompt, system, t, "general")
+        return await _call_best_available(prompt, system, t, "general", skip_providers=frozenset())
 
 
 ai = AgentProvider()
