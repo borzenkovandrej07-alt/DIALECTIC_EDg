@@ -1136,6 +1136,11 @@ async def cmd_russia(message: Message):
         # Запускаем диалектический анализ
         report = await run_russia_analysis(global_report, russia_context)
 
+        # Санитайзер для russia — убирает галлюцинации (ставки банков и тд)
+        report, _san_lines_ru = sanitize_full_report(report)
+        if _san_lines_ru:
+            logger.info("Russia пост-фильтр: удалено строк: %d", _san_lines_ru)
+
         # Кэшируем
         from datetime import datetime
         import time
