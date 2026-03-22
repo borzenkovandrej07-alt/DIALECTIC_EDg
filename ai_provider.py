@@ -93,7 +93,7 @@ def _can_use_primary(name: str) -> bool:
 def _resolve_agent_models() -> dict:
     """Кто первым обрабатывает дебаты (остальное — fallback в _call_best_available)."""
     want = _debate_primary_env()
-    if want not in ("mistral", "groq", "openrouter", "together", "gemini"):
+    if want not in ("mistral", "groq", "openrouter", "together", "gemini", "mixed"):
         logger.warning("AI_DEBATE_PRIMARY=%s неизвестен — использую mistral", want)
         want = "mistral"
     if not _can_use_primary(want):
@@ -141,6 +141,21 @@ def _resolve_agent_models() -> dict:
              "verifier": {"provider": "gemini", "model": GEMINI_MODEL},
              "bear": {"provider": "gemini", "model": GEMINI_MODEL},
              "synth": {"provider": "gemini", "model": GEMINI_MODEL}}
+    elif want == "mixed":
+        # Умное распределение — каждый агент на свой провайдер
+        # Bull + Bear → Groq (быстрые, много вызовов)
+        # Verifier → OpenRouter или Together (экономим Groq TPM)
+        # Synth → Mistral Large (самый важный, качественный)
+        bull_p = "groq"       if _can_use_primary("groq")       else "mistral"
+        bear_p = "together"   if _can_use_primary("together")   else "groq"
+        ver_p  = "openrouter" if _can_use_primary("openrouter") else "groq"
+        syn_p  = "mistral"    if _can_use_primary("mistral")    else "groq"
+        m = {
+            "bull":     {"provider": bull_p, "model": GROQ_MODEL},
+            "bear":     {"provider": bear_p, "model": TOGETHER_MODEL if bear_p == "together" else GROQ_MODEL},
+            "verifier": {"provider": ver_p,  "model": OPENROUTER_MODEL if ver_p == "openrouter" else GROQ_MODEL},
+            "synth":    {"provider": syn_p,  "model": syn_m if syn_p == "mistral" else GROQ_MODEL},
+        }
     else:
         m = {"bull": {"provider": "mistral", "model": mm},
              "verifier": {"provider": "mistral", "model": mm},
@@ -238,34 +253,25 @@ async def _call_groq(prompt: str, system: str, temperature: float,
         except RuntimeError as e:
             err_s = str(e)
             if "429" in err_s:
-                # Сразу переходим на следующий ключ — не ждём!
-                # Если это последний ключ — тогда ждём и повторяем
-                current_idx = keys_to_try.index((key_name, key))
-                has_next = current_idx < len(keys_to_try) - 1
-                if has_next:
-                    logger.warning(f"{key_name} лимит → сразу пробую следующий ключ")
-                    last_err = e
-                else:
-                    # Последний ключ — ждём и повторяем
-                    wait_m = re.search(r"try again in ([\d.]+)\s*s", err_s, re.I)
-                    if wait_m:
-                        sec = min(30.0, float(wait_m.group(1)) + 1.0)
-                        logger.warning(
-                            "%s последний ключ — жду %.1fs...",
-                            key_name, sec,
+                wait_m = re.search(r"try again in ([\d.]+)\s*s", err_s, re.I)
+                if wait_m:
+                    sec = min(45.0, float(wait_m.group(1)) + 1.0)
+                    logger.warning(
+                        "%s TPM лимит Groq — жду %.1fs и повторяю тот же ключ...",
+                        key_name, sec,
+                    )
+                    await asyncio.sleep(sec)
+                    try:
+                        result = await _call_openai_style(
+                            GROQ_URL, key, m, prompt, system, temperature,
+                            key_name, agent_key=agent_key,
                         )
-                        await asyncio.sleep(sec)
-                        try:
-                            result = await _call_openai_style(
-                                GROQ_URL, key, m, prompt, system, temperature,
-                                key_name, agent_key=agent_key,
-                            )
-                            if agent_key:
-                                _track_model(agent_key, key_name, m)
-                            logger.info(f"Groq {key_name} ✅ (после паузы)")
-                            return result
-                        except RuntimeError as e2:
-                            last_err = e2
+                        if agent_key:
+                            _track_model(agent_key, key_name, m)
+                        logger.info(f"Groq {key_name} ✅ (после паузы)")
+                        return result
+                    except RuntimeError as e2:
+                        last_err = e2
                 logger.warning(f"{key_name} лимит исчерпан, пробую следующий ключ...")
                 last_err = e
                 continue
