@@ -3,12 +3,14 @@ ai_provider.py — Мультипровайдер с роутингом по а�
 
 Переменные окружения (Railway / .env):
   AI_DEBATE_PRIMARY — кто первым отвечает в дебатах:
-      mistral (по умолчанию) | groq | openrouter | together | gemini
+      cerebras | mistral | groq | openrouter | together | gemini | mixed
+  CEREBRAS_API_KEY — бесплатен! Получи на https://www.cerebras.ai/
   GROQ_MODEL, OPENROUTER_MODEL, TOGETHER_MODEL — модели для соответствующего primary
   OPENROUTER_SYNTH_MODEL — опционально, иначе как OPENROUTER_MODEL
   MISTRAL_SYNTH_MODEL — для synth при primary=mistral (по умолчанию mistral-large-latest)
 
-Fallback после ошибки primary: остальные провайдеры по цепочке (без повтора того же API).
+Fallback цепь: Cerebras → Groq → Mistral → OpenRouter → Together → Gemini
+Цепочка кэйсов автоматическая при rate limits (429/402).
 """
 
 import logging
@@ -55,12 +57,17 @@ TOGETHER_MODEL = os.getenv(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip() or "gemini-1.5-flash"
 
+# ── Cerebras (бесплатно!) ───────────────────────────────────────────────────────
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+CEREBRAS_MODEL   = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b").strip() or "llama-3.3-70b"
+CEREBRAS_URL     = "https://api.cerebras.ai/v1/chat/completions"
 
 # ── Трекинг моделей для честного лейбла в отчёте ─────────────────────────────
 MODELS_USED: dict = {}  # {"bull": "Mistral Small", "synth": "Mistral Large", ...}
 
 def _track_model(agent_key: str, provider: str, model: str):
     labels = {
+        "llama-3.3-70b":                          "Cerebras/Llama 3.3 70B 🚀",
         "mistral-small-latest":                    "Mistral Small",
         "mistral-large-latest":                    "Mistral Large",
         "llama-3.3-70b-versatile":                 "Groq/Llama 3.3 70B",
@@ -77,6 +84,8 @@ def _debate_primary_env() -> str:
 
 
 def _can_use_primary(name: str) -> bool:
+    if name == "cerebras":
+        return bool(CEREBRAS_API_KEY)
     if name == "mistral":
         return bool(MISTRAL_API_KEY or MISTRAL_API_KEY_2)
     if name == "groq":
@@ -93,15 +102,17 @@ def _can_use_primary(name: str) -> bool:
 def _resolve_agent_models() -> dict:
     """Кто первым обрабатывает дебаты (остальное — fallback в _call_best_available)."""
     want = _debate_primary_env()
-    if want not in ("mistral", "groq", "openrouter", "together", "gemini", "mixed"):
-        logger.warning("AI_DEBATE_PRIMARY=%s неизвестен — использую mistral", want)
-        want = "mistral"
+    if want not in ("cerebras", "mistral", "groq", "openrouter", "together", "gemini", "mixed"):
+        logger.warning("AI_DEBATE_PRIMARY=%s неизвестен — использую cerebras/mistral", want)
+        want = "cerebras" if _can_use_primary("cerebras") else "mistral"
     if want != "mixed" and not _can_use_primary(want):
         logger.warning(
-            "AI_DEBATE_PRIMARY=%s недоступен (нет ключа) — откат на mistral/groq по наличию ключей",
+            "AI_DEBATE_PRIMARY=%s недоступен (нет ключа) — откат на cerebras/mistral/groq",
             want,
         )
-        if _can_use_primary("mistral"):
+        if _can_use_primary("cerebras"):
+            want = "cerebras"
+        elif _can_use_primary("mistral"):
             want = "mistral"
         elif _can_use_primary("groq"):
             want = "groq"
@@ -113,7 +124,7 @@ def _resolve_agent_models() -> dict:
             want = "gemini"
         else:
             want = next(
-                (n for n in ("groq", "openrouter", "together", "gemini", "mistral")
+                (n for n in ("cerebras", "groq", "openrouter", "together", "gemini", "mistral")
                  if _can_use_primary(n)),
                 "mistral",
             )
@@ -121,7 +132,12 @@ def _resolve_agent_models() -> dict:
     mm = os.getenv("MISTRAL_MODEL", MISTRAL_MODEL).strip() or MISTRAL_MODEL
     syn_m = os.getenv("MISTRAL_SYNTH_MODEL", "mistral-large-latest").strip() or "mistral-large-latest"
 
-    if want == "groq":
+    if want == "cerebras":
+        m = {"bull": {"provider": "cerebras", "model": CEREBRAS_MODEL},
+             "verifier": {"provider": "cerebras", "model": CEREBRAS_MODEL},
+             "bear": {"provider": "cerebras", "model": CEREBRAS_MODEL},
+             "synth": {"provider": "cerebras", "model": CEREBRAS_MODEL}}
+    elif want == "groq":
         m = {"bull": {"provider": "groq", "model": GROQ_MODEL},
              "verifier": {"provider": "groq", "model": GROQ_MODEL},
              "bear": {"provider": "groq", "model": GROQ_MODEL},
@@ -142,12 +158,14 @@ def _resolve_agent_models() -> dict:
              "bear": {"provider": "gemini", "model": GEMINI_MODEL},
              "synth": {"provider": "gemini", "model": GEMINI_MODEL}}
     elif want == "mixed":
-        bull_p = "groq"       if _can_use_primary("groq")       else "mistral"
-        bear_p = "together"   if _can_use_primary("together")   else "groq"
-        ver_p  = "openrouter" if _can_use_primary("openrouter") else "groq"
-        syn_p  = "mistral"    if _can_use_primary("mistral")    else "groq"
+        bull_p = "cerebras"   if _can_use_primary("cerebras")   else "groq" if _can_use_primary("groq") else "mistral"
+        bear_p = "groq"       if _can_use_primary("groq")       else "cerebras" if _can_use_primary("cerebras") else "mistral"
+        ver_p  = "cerebras"   if _can_use_primary("cerebras")   else "openrouter" if _can_use_primary("openrouter") else "groq"
+        syn_p  = "mistral"    if _can_use_primary("mistral")    else "cerebras" if _can_use_primary("cerebras") else "groq"
     
         def _model_for(p):
+            if p == "cerebras":
+                return CEREBRAS_MODEL
             if p == "groq":
                 return GROQ_MODEL
             if p == "together":
@@ -234,6 +252,28 @@ async def _call_openai_style(
 
 
 # ── Провайдеры ────────────────────────────────────────────────────────────────
+
+async def _call_cerebras(prompt: str, system: str, temperature: float,
+                         model: str = None, agent_key: str = None) -> str:
+    """Cerebras — бесплатная быстрая API."""
+    if not CEREBRAS_API_KEY:
+        raise ValueError("Нет CEREBRAS_API_KEY")
+    
+    m = model or CEREBRAS_MODEL
+    try:
+        result = await _call_openai_style(
+            CEREBRAS_URL, CEREBRAS_API_KEY, m,
+            prompt, system, temperature, "Cerebras",
+            agent_key=agent_key
+        )
+        if agent_key:
+            _track_model(agent_key, "Cerebras", m)
+        logger.info(f"Cerebras ✅")
+        return result
+    except RuntimeError as e:
+        logger.warning(f"Cerebras ❌: {e}")
+        raise
+
 
 async def _call_groq(prompt: str, system: str, temperature: float,
                      model: str = None, agent_key: str = None) -> str:
@@ -492,7 +532,9 @@ async def _call_for_agent(agent_key: str, prompt: str, system: str, temperature:
         provider = config["provider"]
         model    = config["model"]
         try:
-            if provider == "mistral":
+            if provider == "cerebras":
+                result = await _call_cerebras(prompt, system, temperature, model, agent_key=agent_key)
+            elif provider == "mistral":
                 result = await _call_mistral_throttled(prompt, system, temperature, model, agent_key=agent_key)
             elif provider == "groq":
                 result = await _call_groq(prompt, system, temperature, model, agent_key=agent_key)
@@ -545,19 +587,23 @@ async def _call_best_available(
     skip_providers: frozenset | None = None,
 ) -> str:
     """
-    Цепочка fallback. skip_providers — не вызывать тот же API повторно
-    (primary уже отработал или упал).
+    Цепочка fallback: Cerebras → Groq → Mistral → OpenRouter → Together → Gemini
+    skip_providers — не вызывать тот же API повторно (primary уже отработал или упал).
     """
     skip = set(skip_providers or [])
 
     providers = []
-    if "mistral" not in skip and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
-        providers.append(("Mistral Small",
-            lambda p, s, t: _call_mistral_throttled(p, s, t, agent_key=agent_name)))
+    if "cerebras" not in skip and CEREBRAS_API_KEY:
+        providers.append(("Cerebras/Llama 3.3 70B",
+            lambda p, s, t: _call_cerebras(p, s, t, agent_key=agent_name)))
 
     if "groq" not in skip and (GROQ_API_KEY or GROQ_API_KEY_2 or GROQ_API_KEY_3):
         providers.append(("Groq/Llama",
             lambda p, s, t: _call_groq(p, s, t, agent_key=agent_name)))
+
+    if "mistral" not in skip and (MISTRAL_API_KEY or MISTRAL_API_KEY_2):
+        providers.append(("Mistral Small",
+            lambda p, s, t: _call_mistral_throttled(p, s, t, agent_key=agent_name)))
 
     if "openrouter" not in skip and (OPENROUTER_API_KEY or OPENROUTER_API_KEY_2):
         providers.append(("OpenRouter/Llama",
@@ -574,7 +620,7 @@ async def _call_best_available(
             lambda p, s, t: _call_gemini(p, s, t, agent_key=agent_name)))
 
     if not providers:
-        raise ValueError("Нет API ключей! Добавь GROQ_API_KEY и MISTRAL_API_KEY в Railway")
+        raise ValueError("Нет API ключей! Добавь CEREBRAS_API_KEY, GROQ_API_KEY и/или MISTRAL_API_KEY")
 
     last_error = None
     for name, caller in providers:
