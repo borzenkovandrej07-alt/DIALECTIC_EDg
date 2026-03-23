@@ -8,9 +8,8 @@ Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 import asyncio
 import logging
 import os
-import re
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -35,34 +34,52 @@ from config import (
     USING_DATA_DIR,
     DEBATE_SNAPSHOT_HOURS,
 )
-from news_fetcher import NewsFetcher
-from data_sources import fetch_full_context
-from web_search import get_full_realtime_context, search_news_context
-from meta_analyst import get_meta_context
-from sentiment import analyze_and_filter_async, format_for_agents
-from agents import DebateOrchestrator
+from web_search import get_full_realtime_context
 from report_sanitizer import sanitize_full_report
 from chart_generator import generate_main_chart, generate_russia_chart
 from storage import Storage
+from analysis_service import run_full_analysis as analysis_service_run_full_analysis
 from database import (
     init_db, upsert_user, get_user, increment_requests,
-    get_daily_subscribers, set_daily_sub,
+    set_daily_sub,
     get_track_record, save_feedback, get_feedback_stats,
-    log_report, get_admin_stats,
-    save_debate_session, get_debate_session,
 )
-from tracker import check_pending_predictions, save_predictions_from_report
+from tracker import check_pending_predictions
 from scheduler import Scheduler
 from user_profile import (
-    init_profiles_table, save_profile, get_profile,
-    build_profile_instruction, format_profile_card,
-    RISK_PROFILES, HORIZONS, MARKETS
+    init_profiles_table, get_profile,
+    RISK_PROFILES, HORIZONS
 )
-from weekly_report import build_weekly_report, send_weekly_reports
+from weekly_report import build_weekly_report
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
-from github_export import export_to_github, push_digest_cache, get_previous_digest
-from debate_storage import save_debate_redis, get_debate_redis, ping_redis
+from debate_storage import ping_redis
+
+# Phase 3 Handler Imports — Market, Debate, Profile, Admin
+from refactor.handlers import (
+    handle_market_command,
+    store_and_link_debate,
+    handle_debate_navigation_callback,
+    show_profile_settings,
+    handle_profile_callback,
+    setup_admins,
+    handle_stats_command,
+    handle_health_command,
+    handle_logs_command,
+    handle_sysinfo_command,
+)
+
+# Phase 4 Provider Imports — AI, Cache, Database, Market Data, News, Storage
+from refactor.handlers.utils import (
+    build_short_report,
+    clean_markdown,
+    debate_plain_text,
+    extract_signal_pct_and_stars,
+    hydrate_debate_from_report,
+    main_report_keyboard,
+    parse_report_parts,
+    split_message,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,9 +87,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
+bot: Optional[Bot] = None
 dp = Dispatcher()
-fetcher = NewsFetcher()
 storage = Storage()
 
 FREE_DAILY_LIMIT = 5
@@ -81,83 +97,19 @@ scheduler: Scheduler = None
 
 # Хранилище дебатов для листания по кнопкам
 # {user_id: {"rounds": [...], "full_report": str}}
-debate_cache: dict = {}
 
 # Кэш РФ анализа (обновляется вместе с /daily)
 russia_cache: dict = {}  # {"report": str, "timestamp": str}
 
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────────
-
-def clean_markdown(text: str) -> str:
-    lines = text.split("\n")
-    clean_lines = []
-    for line in lines:
-        if line.count("*") % 2 != 0:
-            line = line.replace("*", "")
-        if line.count("_") % 2 != 0:
-            line = line.replace("_", "")
-        if line.count("`") % 2 != 0:
-            line = line.replace("`", "")
-        clean_lines.append(line)
-    return "\n".join(clean_lines)
+def get_bot() -> Bot:
+    global bot
+    if bot is None:
+        bot = Bot(token=BOT_TOKEN)
+    return bot
 
 
-def debate_plain_text(text: str) -> str:
-    """
-    Текст раунда дебатов без parse_mode: ответы моделей часто ломают Telegram Markdown
-    (незакрытые *, _, ссылки) → Bad Request: can't parse entities.
-    """
-    t = clean_markdown(text)
-    t = re.sub(r"[*_`#]", "", t)
-    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)
-    t = re.sub(r"\n{3,}", "\n\n", t)
-    return t.strip()
-
-
-def strip_digest_summary_text(text: str) -> str:
-    """Убирает ###, **, ` и линии --- из краткой выжимки Bull/Bear в шапке дайджеста."""
-    if not text or not text.strip():
-        return text
-    out: list[str] = []
-    for line in text.split("\n"):
-        s = line.strip()
-        if not s:
-            continue
-        if re.match(r"^[-_*═─]{3,}\s*$", s):
-            continue
-        s = re.sub(r"^#{1,6}\s*", "", s)
-        s = re.sub(r"\*+", "", s)
-        s = re.sub(r"_+", "", s)
-        s = re.sub(r"`+", "", s)
-        s = s.strip()
-        if s:
-            out.append(s)
-    return "\n".join(out) if out else text.strip()
-
-
-def split_message(text: str, max_len: int = 3800) -> list:
-    # Агрессивно чистим весь markdown — убираем *, _, `, #
-    import re
-    text = re.sub(r'[*_`#]', '', text)
-    # Убираем двойные пробелы и лишние пустые строки
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = text.strip()
-
-    if len(text) <= max_len:
-        return [text]
-    chunks = []
-    while len(text) > max_len:
-        split_at = text.rfind("\n", 0, max_len)
-        if split_at == -1 or split_at < max_len // 2:
-            split_at = text.rfind(" ", 0, max_len)
-        if split_at == -1:
-            split_at = max_len
-        chunks.append(text[:split_at].rstrip())
-        text = text[split_at:].lstrip("\n ")
-    if text.strip():
-        chunks.append(text.strip())
-    return chunks
+# ─── Утилиты вынесены в refactor/handlers/utils.py ───────────────────────────────────
 
 
 async def check_limit(user_id: int) -> bool:
@@ -554,30 +506,6 @@ async def send_daily_digest_bundle(
         await send_debates_attachment(chat_id, rounds_out)
 
 
-def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
-    """Клавиатура для листания раундов дебатов."""
-    buttons = []
-
-    nav_row = []
-    if round_idx > 0:
-        nav_row.append(InlineKeyboardButton(
-            text="◀️ Назад",
-            callback_data=f"debate:{user_id}:{round_idx - 1}"
-        ))
-    nav_row.append(InlineKeyboardButton(
-        text=f"📄 {round_idx + 1}/{total_rounds}",
-        callback_data="debate:noop"
-    ))
-    if round_idx < total_rounds - 1:
-        nav_row.append(InlineKeyboardButton(
-            text="Вперёд ▶️",
-            callback_data=f"debate:{user_id}:{round_idx + 1}"
-        ))
-
-    buttons.append(nav_row)
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
 def main_report_keyboard(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
     """Клавиатура под основным отчётом."""
     buttons = []
@@ -603,6 +531,20 @@ async def handle_debate_page(callback: CallbackQuery):
     if len(parts) < 3:
         await callback.answer()
         return
+    if parts[1] == "noop" or parts[2] == "noop":
+        await callback.answer()
+        return
+    try:
+        kb_uid = int(parts[1])
+        round_idx = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+    if kb_uid != callback.from_user.id:
+        await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
+        return
+    await handle_debate_navigation_callback(callback, callback.from_user.id, round_idx)
+    return
 
     _, user_id_str, action = parts[0], parts[1], parts[2]
 
@@ -805,7 +747,7 @@ async def handle_profile(callback: CallbackQuery):
 
 # ─── Ядро анализа ─────────────────────────────────────────────────────────────
 
-async def run_full_analysis(
+async def legacy_run_full_analysis(
     user_id: int,
     custom_news: str = "",
     custom_mode: bool = False
@@ -933,7 +875,7 @@ async def run_full_analysis(
 # ─── /daily ───────────────────────────────────────────────────────────────────
 
 async def run_daily_analysis(user_id: int) -> str:
-    report, _ = await run_full_analysis(user_id)
+    report, _ = await analysis_service_run_full_analysis(user_id)
     return report
 
 
@@ -946,7 +888,7 @@ async def deliver_scheduled_daily(user_id: int) -> None:
             prices = cached.get("prices") or {}
             await send_daily_digest_bundle(user_id, user_id, report, prices)
             return
-        report, prices = await run_full_analysis(user_id)
+        report, prices = await analysis_service_run_full_analysis(user_id)
         await send_daily_digest_bundle(user_id, user_id, report, prices)
     except Exception as e:
         logger.warning("Рассылка дайджеста user %s: %s", user_id, e)
@@ -992,7 +934,7 @@ async def cmd_daily(message: Message):
 
     try:
         await increment_requests(user_id)
-        report, prices = await run_full_analysis(user_id)
+        report, prices = await analysis_service_run_full_analysis(user_id)
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
@@ -1042,7 +984,7 @@ async def cmd_analyze(message: Message):
 
     try:
         await increment_requests(user_id)
-        report, prices = await run_full_analysis(
+        report, prices = await analysis_service_run_full_analysis(
             user_id, custom_news=user_news, custom_mode=True
         )
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
@@ -1260,6 +1202,20 @@ async def cmd_markets(message: Message):
 
 # ─── /trackrecord ─────────────────────────────────────────────────────────────
 
+@dp.message(Command("market"))
+async def cmd_market(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+    if not await check_limit(user_id):
+        await message.answer(
+            f"в›” *Р›РёРјРёС‚* вЂ” {FREE_DAILY_LIMIT} Р·Р°РїСЂРѕСЃРѕРІ/РґРµРЅСЊ (free)",
+            parse_mode="Markdown"
+        )
+        return
+    await increment_requests(user_id)
+    await handle_market_command(message, message.text or "/market")
+
+
 @dp.message(Command("trackrecord"))
 async def cmd_trackrecord(message: Message):
     await upsert_user(message.from_user.id)
@@ -1473,6 +1429,8 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
+    await handle_stats_command(message)
+    return
     if message.from_user.id not in ADMIN_IDS:
         return
     stats    = await get_admin_stats()
@@ -1498,6 +1456,21 @@ async def cmd_admin(message: Message):
 
 # ─── Фидбек ───────────────────────────────────────────────────────────────────
 
+@dp.message(Command("health"))
+async def cmd_health(message: Message):
+    await handle_health_command(message)
+
+
+@dp.message(Command("logs"))
+async def cmd_logs(message: Message):
+    await handle_logs_command(message)
+
+
+@dp.message(Command("sysinfo"))
+async def cmd_sysinfo(message: Message):
+    await handle_sysinfo_command(message)
+
+
 @dp.callback_query(F.data.startswith("fb:"))
 async def handle_feedback(callback: CallbackQuery):
     _, rating_str, report_type = callback.data.split(":")
@@ -1514,6 +1487,7 @@ async def main():
 
     await init_db()
     await init_profiles_table()
+    setup_admins(ADMIN_IDS)
     logger.info("🚀 Dialectic Edge v7.1 starting...")
     if int(os.getenv("RAILWAY_REPLICA_COUNT", "1") or "1") > 1:
         logger.warning(
