@@ -1,29 +1,29 @@
-"""
-Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
+"""Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 - Одно сообщение вместо 6 (краткая выжимка + Synth)
 - Кнопка "📖 Полные дебаты" — листаешь раунды по одному
 - Простой язык в выводах для обычных людей
 """
+
 import re
 import asyncio
 import logging
 import os
 from datetime import datetime
 from typing import Optional, Tuple
-
+ 
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
-
+ 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, BufferedInputFile,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
-
+ 
 from config import (
     BOT_TOKEN,
     ADMIN_IDS,
@@ -41,6 +41,7 @@ from storage import Storage
 from analysis_service import run_full_analysis as analysis_service_run_full_analysis
 from database import (
     init_db, upsert_user, get_user, increment_requests,
+    save_debate_session,
     set_daily_sub,
     get_track_record, save_feedback, get_feedback_stats,
 )
@@ -53,8 +54,8 @@ from user_profile import (
 from weekly_report import build_weekly_report
 from russia_data import fetch_russia_context
 from russia_agents import run_russia_analysis
-from debate_storage import ping_redis
-
+from debate_storage import ping_redis, save_debate_redis
+ 
 # Phase 3 Handler Imports — Market, Debate, Profile, Admin
 from refactor.handlers import (
     handle_market_command,
@@ -68,7 +69,7 @@ from refactor.handlers import (
     handle_logs_command,
     handle_sysinfo_command,
 )
-
+ 
 # Phase 4 Provider Imports — AI, Cache, Database, Market Data, News, Storage
 from refactor.handlers.utils import (
     build_short_report,
@@ -79,29 +80,29 @@ from refactor.handlers.utils import (
     main_report_keyboard,
     parse_report_parts,
     split_message,
+    strip_digest_summary_text,
 )
-
+ 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
-
+ 
 bot: Optional[Bot] = None
 dp = Dispatcher()
 storage = Storage()
-
+ 
 FREE_DAILY_LIMIT = 5
-
+ 
 scheduler: Scheduler = None
-
+ 
 # Хранилище дебатов для листания по кнопкам
 # {user_id: {"rounds": [...], "full_report": str}}
-
+ 
 # Кэш РФ анализа (обновляется вместе с /daily)
 russia_cache: dict = {}  # {"report": str, "timestamp": str}
 debate_cache: dict = {}  # {user_id: {"rounds": [...], "full": str}}
-
 
 def get_bot() -> Bot:
     global bot
