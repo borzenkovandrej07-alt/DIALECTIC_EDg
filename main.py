@@ -100,6 +100,7 @@ scheduler: Scheduler = None
 
 # Кэш РФ анализа (обновляется вместе с /daily)
 russia_cache: dict = {}  # {"report": str, "timestamp": str}
+debate_cache: dict = {}  # {user_id: {"rounds": [...], "full": str}}
 
 
 def get_bot() -> Bot:
