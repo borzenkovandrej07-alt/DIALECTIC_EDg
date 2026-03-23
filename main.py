@@ -5,13 +5,11 @@ Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 - Простой язык в выводах для обычных людей
 """
 
-import re
 import asyncio
 import logging
 import os
-from typing import Tuple, Optional
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -1486,8 +1484,8 @@ async def handle_feedback(callback: CallbackQuery):
 
 async def main():
     global scheduler
-    global bot          # ← добавь
-    bot = get_bot()     # ← добавь
+    global bot
+    bot = get_bot()
 
     await init_db()
     await init_profiles_table()
