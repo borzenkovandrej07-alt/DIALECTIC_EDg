@@ -635,6 +635,106 @@ def calc_budget_balance(urals_price: float, budget_price: float = 69.7) -> str:
 
 # ─── 6. Главная функция ───────────────────────────────────────────────────────
 
+
+
+async def fetch_laws() -> str:
+    """
+    Парсит новые законы и законопроекты РФ из открытых RSS источников.
+    Источники: Консультант+, Гарант, Госдума, Интерфакс-право
+    """
+    import re as _re
+
+    law_feeds = [
+        ("Консультант+ Законы",  "https://www.consultant.ru/rss/hotdocs.xml"),
+        ("Гарант Новости",       "https://www.garant.ru/files/rss/prime.xml"),
+        ("Госдума",              "http://api.duma.gov.ru/api/transcript/last.xml"),
+        ("Интерфакс Право",      "https://www.interfax.ru/rss_legal.asp"),
+        ("ТАСС Экономика",       "https://tass.ru/rss/v2.xml"),
+    ]
+
+    # Ключевые слова — законы которые влияют на бизнес и инвесторов
+    law_keywords = [
+        "закон", "законопроект", "поправк", "налог", "ндс", "ндфл",
+        "страховые взносы", "пенсионн", "тариф", "пошлин",
+        "санкц", "ограничен", "запрет", "льгот", "субсиди",
+        "дивиденд", "акциз", "ввоз", "вывоз", "экспорт", "импорт",
+        "малый бизнес", "ип ", "самозанят", "патент",
+        "мосбирж", "ценные бумаги", "облигац", "акци",
+        "цб рф", "банк", "кредит", "ипотек",
+        "санкц", "конфискац", "штраф", "ответственност",
+    ]
+
+    found_laws = []
+
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession() as session:
+        for source_name, url in law_feeds:
+            try:
+                async with session.get(url, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        continue
+                    text = await resp.text(errors='replace')
+
+                    # Парсим RSS вручную (без lxml)
+                    items = _re.findall(
+                        r'<item[^>]*>(.*?)</item>',
+                        text, _re.DOTALL | _re.IGNORECASE
+                    )
+                    if not items:
+                        # Пробуем entry (Atom)
+                        items = _re.findall(
+                            r'<entry[^>]*>(.*?)</entry>',
+                            text, _re.DOTALL | _re.IGNORECASE
+                        )
+
+                    count = 0
+                    for item in items[:15]:  # берём первые 15
+                        # Извлекаем заголовок
+                        title_m = _re.search(
+                            r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>',
+                            item, _re.DOTALL | _re.IGNORECASE
+                        )
+                        if not title_m:
+                            continue
+                        title = title_m.group(1).strip()
+                        title = _re.sub(r'<[^>]+>', '', title).strip()
+                        if not title or len(title) < 10:
+                            continue
+
+                        # Фильтруем по ключевым словам
+                        title_lower = title.lower()
+                        if any(kw in title_lower for kw in law_keywords):
+                            found_laws.append(f"• [{source_name}] {title}")
+                            count += 1
+                            if count >= 3:
+                                break
+
+                    if count:
+                        logger.info(f"Законы {source_name}: {count} найдено")
+
+            except Exception as e:
+                logger.debug(f"Laws {source_name}: {e}")
+                continue
+
+    if not found_laws:
+        return ""
+
+    # Дедупликация похожих заголовков
+    unique_laws = []
+    seen = set()
+    for law in found_laws:
+        # Берём первые 40 символов как ключ
+        key = law[20:60].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            unique_laws.append(law)
+
+    laws_text = "\n".join(unique_laws[:10])  # максимум 10 законов
+    return f"""=== НОВЫЕ ЗАКОНЫ И РЕГУЛЯТОРИКА ===
+{laws_text}
+
+⚠️ Источники: Консультант+, Гарант, Госдума, Интерфакс-право"""
+
 async def fetch_russia_context() -> str:
     """Собирает все РФ данные параллельно."""
     logger.info("🇷🇺 Собираю расширенный контекст РФ...")
@@ -647,11 +747,12 @@ async def fetch_russia_context() -> str:
         fetch_russia_news(),
         fetch_ofz_yields(),
         fetch_europe_gas_price(),
+        fetch_laws(),
         return_exceptions=True
     )
 
     sections = []
-    labels = ["ЦБ РФ", "Мосбиржа", "Нефть Urals", "Инфляция РФ", "Новости РФ", "ОФЗ", "Газ TTF"]
+    labels = ["ЦБ РФ", "Мосбиржа", "Нефть Urals", "Инфляция РФ", "Новости РФ", "ОФЗ", "Газ TTF", "Законы"]
     for label, result in zip(labels, results):
         if isinstance(result, str) and result.strip():
             sections.append(result)
