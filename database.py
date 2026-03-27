@@ -269,11 +269,11 @@ async def import_forecasts_from_markdown():
                 pnl_pct = 0.0
             if "неверно" in result_text:
                 result = "loss"
+            elif "осторожность" in result_text:
+                result = "caution"
+                pnl_pct = 100.0
             elif "верно" in result_text or "точ" in result_text:
                 result = "win"
-            elif "осторожность" in result_text:
-                result = "win"
-                pnl_pct = 100.0
             else:
                 result = "win"
             date_obj = datetime.strptime(date_str, "%d.%m.%Y")
@@ -326,6 +326,7 @@ async def get_track_record() -> dict:
                 COUNT(*) as total,
                 SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result = 'caution' THEN 1 ELSE 0 END) as cautions,
                 SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END) as pending,
                 AVG(CASE WHEN result != 'pending' THEN pnl_pct END) as avg_pnl,
                 MAX(pnl_pct) as best_call,

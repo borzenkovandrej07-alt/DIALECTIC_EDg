@@ -1260,6 +1260,7 @@ async def cmd_trackrecord(message: Message):
         total   = stats.get("total") or 0
         wins    = stats.get("wins") or 0
         losses  = stats.get("losses") or 0
+        cautions = stats.get("cautions") or 0
         pending = stats.get("pending") or 0
         avg_pnl = stats.get("avg_pnl") or 0
         best    = stats.get("best_call") or 0
@@ -1292,20 +1293,22 @@ async def cmd_trackrecord(message: Message):
                 )
             return
 
-        finished  = wins + losses
-        winrate   = (wins / finished * 100) if finished > 0 else 0
-        wr_emoji  = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
+        finished  = wins + losses + cautions
+        winrate   = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+        accuracy_with_caution = ((wins + cautions) / finished * 100) if finished > 0 else 0
+        wr_emoji  = "🟢" if accuracy_with_caution >= 55 else "🟡" if accuracy_with_caution >= 45 else "🔴"
         pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
 
         lines = [
             "📊 *TRACK RECORD АГЕНТОВ*\n",
             f"*Всего прогнозов:* {total}",
-            f"*Завершено:* {finished} | ⏳ Ждут: {pending}",
+            f"*Завершено:* {wins+losses+cautions} | ✅ {wins} | ⚠️ {cautions} | ❌ {losses} | ⏳ {pending}",
         ]
 
         if finished > 0:
             lines += [
-                f"*Winrate:* {wr_emoji} *{winrate:.0f}%* ({wins}✅ / {losses}❌)",
+                f"*Точность:* {wr_emoji} *{accuracy_with_caution:.0f}%* (с осторожностью)",
+                f"*Точность (без осторожности):* {winrate:.0f}%",
                 f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*",
             ]
             if best:               lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
@@ -1321,9 +1324,31 @@ async def cmd_trackrecord(message: Message):
                 )
 
         if recent:
+            lines.append("\n*📈 График P&L:*")
+            pnl_values = [r.get("pnl_pct", 0) for r in recent[:20] if r.get("pnl_pct") is not None]
+            if pnl_values:
+                max_pnl = max(max(pnl_values), 1)
+                min_pnl = min(min(pnl_values), -1)
+                range_pnl = max_pnl - min_pnl
+                chart_width = 20
+                for pnl in pnl_values:
+                    pos = int((pnl - min_pnl) / range_pnl * chart_width) if range_pnl > 0 else chart_width // 2
+                    bar = "█" * pos + "▄" + "░" * (chart_width - pos - 1)
+                    emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                    lines.append(f"{emoji} {pnl:+5.0f}% |{bar}|")
+                lines.append("           └" + "┴" * 10 + "┘")
+
             lines.append("\n*📋 История прогнозов:*")
             for r in recent[:15]:
-                emoji = "✅" if r["result"] == "win" else "❌"
+                result = r.get("result", "")
+                if result == "win":
+                    emoji = "✅"
+                elif result == "loss":
+                    emoji = "❌"
+                elif result == "caution":
+                    emoji = "⚠️"
+                else:
+                    emoji = "❓"
                 pnl = r.get("pnl_pct") or 0
                 asset = r.get("asset", "")
                 direction = r.get("direction", "")
