@@ -665,7 +665,9 @@ async def cmd_start(message: Message):
         "• /profile — настрой риск-профиль (важно сделать первым)\n"
         "• /daily — дайджест рынков\n"
         "• /analyze [текст] — анализ новости\n"
-        "• /trackrecord — история точности агентов\n"
+        "• /trackrecord — история точности (всё)\n"
+        "• /trackrecordglobal — Global прогнозы\n"
+        "• /trackrecordrussia — Россия Edge 🇷🇺\n"
         "• /weeklyreport — отчёт за неделю\n"
         "• /subscribe — авторассылка\n"
         "• /markets — текущие цены\n"
@@ -1359,7 +1361,16 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         lines.append(
             "\n⚠️ _Прошлые результаты не гарантируют будущих. Не финансовый совет._"
         )
-        await message.answer("\n".join(lines), parse_mode="Markdown")
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🌍 Global", callback_data="cmd_trackrecordglobal"),
+                InlineKeyboardButton(text="🇷🇺 Россия", callback_data="cmd_trackrecordrussia"),
+                InlineKeyboardButton(text="📊 Всё", callback_data="cmd_trackrecord"),
+            ]
+        ])
+        
+        await message.answer("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as e:
         logger.error(f"Trackrecord error: {e}", exc_info=True)
@@ -1481,7 +1492,9 @@ async def cmd_stats(message: Message):
         f"Прогнозов: {tr_s.get('total',0)} | Winrate: {tr_wr:.0f}%\n\n"
         f"*Оценки пользователей:*\n"
         f"Оценок: {total_fb} | Позитивных: {satisfaction:.0f}%\n\n"
-        f"• /trackrecord — полная история точности\n"
+        f"• /trackrecord — история точности (всё)\n"
+        f"• /trackrecordglobal — Global\n"
+        f"• /trackrecordrussia — Россия Edge 🇷🇺\n"
         f"• /weeklyreport — отчёт за неделю\n"
         f"• /profile — изменить профиль",
         parse_mode="Markdown"
@@ -1506,7 +1519,9 @@ async def cmd_help(message: Message):
         "• `/daily force` — принудительно новый AI-прогон\n"
         "• `/analyze [текст]` — анализ новости\n"
         "• `/markets` — живые цены\n"
-        "• `/trackrecord` — история точности\n"
+        "• `/trackrecord` — история точности (всё)\n"
+        "• `/trackrecordglobal` — Global\n"
+        "• `/trackrecordrussia` — Россия Edge 🇷🇺\n"
         "• `/weeklyreport` — отчёт за неделю\n"
         "• `/subscribe on 08:00` — авторассылка\n"
         "• `/russia` — анализ для российского рынка 🇷🇺\n"
@@ -1569,6 +1584,24 @@ async def handle_feedback(callback: CallbackQuery):
     emoji = "🙏 Спасибо!" if int(rating_str) == 1 else "📝 Учтём!"
     await callback.answer(emoji)
     await callback.message.edit_reply_markup(reply_markup=None)
+
+
+@dp.callback_query(F.data == "cmd_trackrecordglobal")
+async def cb_trackrecord_global(callback: CallbackQuery):
+    await callback.answer()
+    await _cmd_trackrecord(callback.message, report_type="global", title="GLOBAL")
+
+
+@dp.callback_query(F.data == "cmd_trackrecordrussia")
+async def cb_trackrecord_russia(callback: CallbackQuery):
+    await callback.answer()
+    await _cmd_trackrecord(callback.message, report_type="russia", title="РОССИЯ EDGE")
+
+
+@dp.callback_query(F.data == "cmd_trackrecord")
+async def cb_trackrecord_all(callback: CallbackQuery):
+    await callback.answer()
+    await _cmd_trackrecord(callback.message, report_type=None, title="АГЕНТОВ (ВСЕ)")
 
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
