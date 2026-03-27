@@ -45,6 +45,7 @@ from database import (
     save_debate_session,
     set_daily_sub,
     get_track_record, save_feedback, get_feedback_stats,
+    import_forecasts_from_markdown,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
@@ -1265,12 +1266,30 @@ async def cmd_trackrecord(message: Message):
         worst   = stats.get("worst_call") or 0
 
         if total == 0:
-            await message.answer(
-                "📊 *Track Record*\n\n"
-                "_Прогнозы накапливаются. Запусти /daily — агенты начнут делать прогнозы._\n\n"
-                "Через 1-2 недели активного использования здесь появится реальная статистика.",
-                parse_mode="Markdown"
-            )
+            # SQLite пустая (Railway редеплой) — пробуем прочитать с GitHub
+            github_url = ""
+            try:
+                from config import GITHUB_REPO
+                if GITHUB_REPO:
+                    github_url = f"https://github.com/{GITHUB_REPO}/blob/main/FORECASTS.md"
+            except Exception:
+                pass
+
+            if github_url:
+                await message.answer(
+                    "📊 *Track Record*\n\n"
+                    "_База данных обнулилась после перезапуска бота._\n\n"
+                    f"📎 Актуальная статистика прогнозов хранится на GitHub:\n{github_url}\n\n"
+                    "_После следующего /daily прогнозы начнут накапливаться заново._",
+                    parse_mode="Markdown"
+                )
+            else:
+                await message.answer(
+                    "📊 *Track Record*\n\n"
+                    "_Прогнозы накапливаются. Запусти /daily — агенты начнут делать прогнозы._\n\n"
+                    "Через 1-2 недели активного использования здесь появится реальная статистика.",
+                    parse_mode="Markdown"
+                )
             return
 
         finished  = wins + losses
@@ -1519,6 +1538,7 @@ async def main():
     bot = get_bot()
 
     await init_db()
+    await import_forecasts_from_markdown()
     await init_profiles_table()
     setup_admins(ADMIN_IDS)
     logger.info("🚀 Dialectic Edge v7.1 starting...")

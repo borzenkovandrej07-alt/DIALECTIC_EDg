@@ -229,6 +229,76 @@ async def update_prediction_result(
         await db.commit()
 
 
+async def import_forecasts_from_markdown():
+    """Импорт прогнозов из локального FORECASTS.md в SQLite."""
+    import re
+    import os
+    forecast_path = os.path.join(os.path.dirname(__file__), "FORECASTS.md")
+    if not os.path.exists(forecast_path):
+        logger.warning("FORECASTS.md не найден")
+        return
+
+    with open(forecast_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    predictions = []
+    table_match = re.search(r"\| № \| Дата \|.*?\n\|[-|]+\|.*?\n((?:\|.*?\n)+)", content, re.DOTALL)
+    if not table_match:
+        logger.warning("Таблица прогнозов не найдена в FORECASTS.md")
+        return
+
+    rows = table_match.group(1).strip().split("\n")
+    for row in rows:
+        parts = [p.strip() for p in row.split("|")[1:-1]]
+        if len(parts) < 8:
+            continue
+        try:
+            date_str = parts[1]
+            asset = parts[3].strip()
+            direction = parts[4].strip()
+            result_text = parts[6].strip().lower()
+            if "верно" in result_text or "точ" in result_text:
+                result = "win"
+                pnl_pct = 100.0
+            elif "неверно" in result_text:
+                result = "loss"
+                pnl_pct = -100.0
+            else:
+                result = "win"
+                pnl_pct = 0
+            date_obj = datetime.strptime(date_str, "%d.%m.%Y")
+            created_at = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+            predictions.append({
+                "created_at": created_at,
+                "asset": asset,
+                "direction": direction,
+                "result": result,
+                "pnl_pct": pnl_pct
+            })
+        except Exception as e:
+            logger.debug(f"Ошибка парсинга строки: {e}")
+
+    if predictions:
+        async with aiosqlite.connect(DB_PATH) as db:
+            for p in predictions:
+                await db.execute("""
+                    INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    p["created_at"],
+                    p["asset"],
+                    p["direction"],
+                    None,
+                    None,
+                    p["result"],
+                    p["pnl_pct"]
+                ))
+            await db.commit()
+        logger.info(f"✅ Импортировано {len(predictions)} прогнозов из FORECASTS.md")
+    else:
+        logger.warning("Не удалось распарсить прогнозы из FORECASTS.md")
+
+
 async def get_track_record() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
