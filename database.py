@@ -51,7 +51,10 @@ async def init_db():
                 result       TEXT DEFAULT 'pending',
                 result_price REAL,
                 result_at    TEXT,
-                pnl_pct      REAL
+                pnl_pct      REAL,
+                prediction_type TEXT,
+                forecast     TEXT,
+                fact         TEXT
             )
         """)
 
@@ -254,8 +257,10 @@ async def import_forecasts_from_markdown():
             continue
         try:
             date_str = parts[1]
+            pred_type = parts[2].strip()
             asset = parts[3].strip()
-            direction = parts[4].strip()
+            forecast = parts[4].strip()
+            fact = parts[5].strip()
             result_text = parts[6].strip().lower()
             accuracy_text = parts[7].strip().replace("%", "").replace("*", "")
             try:
@@ -276,9 +281,12 @@ async def import_forecasts_from_markdown():
             predictions.append({
                 "created_at": created_at,
                 "asset": asset,
-                "direction": direction,
+                "direction": forecast,
                 "result": result,
-                "pnl_pct": pnl_pct
+                "pnl_pct": pnl_pct,
+                "prediction_type": pred_type,
+                "forecast": forecast,
+                "fact": fact
             })
         except Exception as e:
             logger.debug(f"Ошибка парсинга строки: {e}")
@@ -289,8 +297,8 @@ async def import_forecasts_from_markdown():
             await db.commit()
             for p in predictions:
                 await db.execute("""
-                    INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct, prediction_type, forecast, fact)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     p["created_at"],
                     p["asset"],
@@ -298,7 +306,10 @@ async def import_forecasts_from_markdown():
                     None,
                     None,
                     p["result"],
-                    p["pnl_pct"]
+                    p["pnl_pct"],
+                    p.get("prediction_type", ""),
+                    p.get("forecast", ""),
+                    p.get("fact", "")
                 ))
             await db.commit()
         logger.info(f"✅ Импортировано {len(predictions)} прогнозов из FORECASTS.md")
@@ -325,11 +336,11 @@ async def get_track_record() -> dict:
             stats = dict(await cursor.fetchone())
 
         async with db.execute("""
-            SELECT asset, direction, entry_price, result, pnl_pct, created_at
+            SELECT asset, direction, entry_price, result, pnl_pct, created_at, prediction_type, forecast, fact
             FROM predictions
             WHERE result != 'pending'
             ORDER BY created_at DESC
-            LIMIT 10
+            LIMIT 50
         """) as cursor:
             recent = [dict(r) for r in await cursor.fetchall()]
 

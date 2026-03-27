@@ -1321,13 +1321,15 @@ async def cmd_trackrecord(message: Message):
                 )
 
         if recent:
-            lines.append("\n*📋 Последние сигналы:*")
-            for r in recent[:5]:
+            lines.append("\n*📋 История прогнозов:*")
+            for r in recent[:15]:
                 emoji = "✅" if r["result"] == "win" else "❌"
-                pnl   = r.get("pnl_pct") or 0
+                pnl = r.get("pnl_pct") or 0
+                asset = r.get("asset", "")
+                direction = r.get("direction", "")
+                date = (r.get("created_at") or "")[:10]
                 lines.append(
-                    f"{emoji} {r['asset']} {r['direction']} "
-                    f"→ *{pnl:+.1f}%* _{(r.get('created_at') or '')[:10]}_"
+                    f"{emoji} {date} | {asset[:12]:12} | {direction[:15]:15} | {pnl:+.0f}%"
                 )
 
         lines.append(
