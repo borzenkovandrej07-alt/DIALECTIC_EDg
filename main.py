@@ -22,7 +22,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, BufferedInputFile,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 )
 
 from config import (
@@ -1606,10 +1606,29 @@ async def cb_trackrecord_all(callback: CallbackQuery):
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
+async def set_bot_commands(bot: Bot):
+    from aiogram.types import BotCommand
+    commands = [
+        BotCommand(command="start", description="Перезапуск бота"),
+        BotCommand(command="help", description="Справка"),
+        BotCommand(command="daily", description="Дайджест рынков"),
+        BotCommand(command="trackrecordglobal", description="🌍 Global прогнозы"),
+        BotCommand(command="trackrecordrussia", description="🇷🇺 Россия Edge"),
+        BotCommand(command="trackrecord", description="📊 Вся статистика"),
+        BotCommand(command="markets", description="Текущие цены"),
+        BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
+        BotCommand(command="profile", description="Настройки профиля"),
+        BotCommand(command="subscribe", description="Авторассылка"),
+    ]
+    await bot.set_my_commands(commands)
+
+
 async def main():
     global scheduler
     global bot
     bot = get_bot()
+    
+    await set_bot_commands(bot)
 
     await init_db()
     await import_forecasts_from_markdown()
