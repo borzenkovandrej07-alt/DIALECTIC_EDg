@@ -257,15 +257,20 @@ async def import_forecasts_from_markdown():
             asset = parts[3].strip()
             direction = parts[4].strip()
             result_text = parts[6].strip().lower()
-            if "верно" in result_text or "точ" in result_text:
+            accuracy_text = parts[7].strip().replace("%", "").replace("*", "")
+            try:
+                pnl_pct = float(accuracy_text)
+            except:
+                pnl_pct = 0.0
+            if "неверно" in result_text:
+                result = "loss"
+            elif "верно" in result_text or "точ" in result_text:
+                result = "win"
+            elif "осторожность" in result_text:
                 result = "win"
                 pnl_pct = 100.0
-            elif "неверно" in result_text:
-                result = "loss"
-                pnl_pct = -100.0
             else:
                 result = "win"
-                pnl_pct = 0
             date_obj = datetime.strptime(date_str, "%d.%m.%Y")
             created_at = date_obj.strftime("%Y-%m-%d %H:%M:%S")
             predictions.append({
@@ -280,6 +285,8 @@ async def import_forecasts_from_markdown():
 
     if predictions:
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM predictions WHERE created_at LIKE '2026-03-%'")
+            await db.commit()
             for p in predictions:
                 await db.execute("""
                     INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct)
