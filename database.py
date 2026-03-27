@@ -54,7 +54,8 @@ async def init_db():
                 pnl_pct      REAL,
                 prediction_type TEXT,
                 forecast     TEXT,
-                fact         TEXT
+                fact         TEXT,
+                report_type  TEXT DEFAULT 'global'
             )
         """)
 
@@ -278,6 +279,12 @@ async def import_forecasts_from_markdown():
                 result = "win"
             date_obj = datetime.strptime(date_str, "%d.%m.%Y")
             created_at = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+            
+            if "russia" in pred_type.lower() or "edge" in pred_type.lower():
+                report_type = "russia"
+            else:
+                report_type = "global"
+                
             predictions.append({
                 "created_at": created_at,
                 "asset": asset,
@@ -286,7 +293,8 @@ async def import_forecasts_from_markdown():
                 "pnl_pct": pnl_pct,
                 "prediction_type": pred_type,
                 "forecast": forecast,
-                "fact": fact
+                "fact": fact,
+                "report_type": report_type
             })
         except Exception as e:
             logger.debug(f"Ошибка парсинга строки: {e}")
@@ -297,8 +305,8 @@ async def import_forecasts_from_markdown():
             await db.commit()
             for p in predictions:
                 await db.execute("""
-                    INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct, prediction_type, forecast, fact)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct, prediction_type, forecast, fact, report_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     p["created_at"],
                     p["asset"],
@@ -309,7 +317,8 @@ async def import_forecasts_from_markdown():
                     p["pnl_pct"],
                     p.get("prediction_type", ""),
                     p.get("forecast", ""),
-                    p.get("fact", "")
+                    p.get("fact", ""),
+                    p.get("report_type", "global")
                 ))
             await db.commit()
         logger.info(f"✅ Импортировано {len(predictions)} прогнозов из FORECASTS.md")
@@ -317,11 +326,15 @@ async def import_forecasts_from_markdown():
         logger.warning("Не удалось распарсить прогнозы из FORECASTS.md")
 
 
-async def get_track_record() -> dict:
+async def get_track_record(report_type: str = None) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        async with db.execute("""
+        where_clause = ""
+        if report_type:
+            where_clause = f" AND report_type = '{report_type}'"
+
+        async with db.execute(f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) as wins,
@@ -332,26 +345,26 @@ async def get_track_record() -> dict:
                 MAX(pnl_pct) as best_call,
                 MIN(pnl_pct) as worst_call
             FROM predictions
-            WHERE result != 'expired'
+            WHERE result != 'expired'{where_clause}
         """) as cursor:
             stats = dict(await cursor.fetchone())
 
-        async with db.execute("""
+        async with db.execute(f"""
             SELECT asset, direction, entry_price, result, pnl_pct, created_at, prediction_type, forecast, fact
             FROM predictions
-            WHERE result != 'pending'
+            WHERE result != 'pending'{where_clause}
             ORDER BY created_at DESC
             LIMIT 50
         """) as cursor:
             recent = [dict(r) for r in await cursor.fetchall()]
 
-        async with db.execute("""
+        async with db.execute(f"""
             SELECT asset,
                 COUNT(*) as calls,
                 SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
                 AVG(pnl_pct) as avg_pnl
             FROM predictions
-            WHERE result IN ('win','loss')
+            WHERE result IN ('win','loss'){where_clause}
             GROUP BY asset
             HAVING calls >= 2
             ORDER BY avg_pnl DESC

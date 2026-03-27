@@ -1248,11 +1248,10 @@ async def cmd_market(message: Message):
     await handle_market_command(message, message.text or "/market")
 
 
-@dp.message(Command("trackrecord"))
-async def cmd_trackrecord(message: Message):
+async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ"):
     await upsert_user(message.from_user.id)
     try:
-        data     = await get_track_record()
+        data     = await get_track_record(report_type)
         stats    = data["stats"]
         recent   = data["recent"]
         by_asset = data["by_asset"]
@@ -1300,7 +1299,7 @@ async def cmd_trackrecord(message: Message):
         pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
 
         lines = [
-            "📊 *TRACK RECORD АГЕНТОВ*\n",
+            f"📊 *TRACK RECORD {title}*\n",
             f"*Всего прогнозов:* {total}",
             f"*Завершено:* {wins+losses+cautions} | ✅ {wins} | ⚠️ {cautions} | ❌ {losses} | ⏳ {pending}",
         ]
@@ -1365,6 +1364,21 @@ async def cmd_trackrecord(message: Message):
     except Exception as e:
         logger.error(f"Trackrecord error: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.message(Command("trackrecord"))
+async def cmd_trackrecord(message: Message):
+    await _cmd_trackrecord(message, report_type=None, title="АГЕНТОВ (ВСЕ)")
+
+
+@dp.message(Command("trackrecordglobal"))
+async def cmd_trackrecord_global(message: Message):
+    await _cmd_trackrecord(message, report_type="global", title="GLOBAL")
+
+
+@dp.message(Command("trackrecordrussia"))
+async def cmd_trackrecord_russia(message: Message):
+    await _cmd_trackrecord(message, report_type="russia", title="РОССИЯ EDGE")
 
 
 # ─── /weeklyreport ────────────────────────────────────────────────────────────
