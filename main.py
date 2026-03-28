@@ -1432,14 +1432,16 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         lines.append("")
         lines.append("═" * 36)
         lines.append("📋 ПРОГНОЗЫ")
-        lines.append("═" * 36)
-        lines.append(f"{'Дата':<8} {'Актив':<10} {'Направление':<14} {'Рез.':<6} {'P&L'}")
-        lines.append("─" * 36)
+        lines.append("═" * 50)
+        lines.append("📋 ПРОГНОЗЫ (полный список)")
+        lines.append("═" * 50)
+        lines.append(f"{'Дата':<8} | {'Актив':<12} | {'Направление':<22} | P&L")
+        lines.append("─" * 50)
 
-        for p in predictions[:15]:
+        for p in predictions:
             date = p["date"][-5:] if p["date"] else ""
-            asset = p["asset"][:8] if p["asset"] else ""
-            direction = p["direction"][:12] if p["direction"] else ""
+            asset = p["asset"][:10] if p["asset"] else ""
+            direction = p["direction"][:20] if p["direction"] else ""
             result = p["result"]
             pnl = p["pnl"]
             
@@ -1452,10 +1454,8 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             else:
                 res_emoji = "⏳"
             
-            lines.append(f"{date:<8} {asset:<10} {direction:<14} {res_emoji:<6} {pnl:+.1f}%")
-
-        if len(predictions) > 15:
-            lines.append(f"... и ещё {len(predictions) - 15} прогнозов")
+            direction_short = direction[:20] if direction else ""
+            lines.append(f"{date} | {asset:<10} | {direction_short:<20} | {pnl:+.1f}% {res_emoji}")
         
         lines.append("")
         lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
