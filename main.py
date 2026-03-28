@@ -1255,14 +1255,30 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
     try:
         import os
         import re
+        import aiohttp
 
         forecast_path = os.path.join(os.path.dirname(__file__), "FORECASTS.md")
-        if not os.path.exists(forecast_path):
+        content = None
+        
+        if os.path.exists(forecast_path):
+            with open(forecast_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        
+        if not content or "Всего прогнозов | 0" in content:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://raw.githubusercontent.com/borzenkovandrej07-alt/DIALECTIC_EDg/main/FORECASTS.md",
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as resp:
+                        if resp.status == 200:
+                            content = await resp.text()
+            except Exception as e:
+                logger.warning(f"Failed to fetch FORECASTS.md from GitHub: {e}")
+        
+        if not content:
             await message.answer("📊 Файл FORECASTS.md не найден. Запусти /daily для создания прогнозов.")
             return
-
-        with open(forecast_path, "r", encoding="utf-8") as f:
-            content = f.read()
 
         stats = {}
         table_match = re.search(r'## 🎯 Общая статистика\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
