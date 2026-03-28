@@ -1121,16 +1121,25 @@ async def cmd_russia(message: Message):
 
         await send_russia_chart_photo(message.chat.id, report)
         
-        # Парсим секции для навигации
+        # Парсим секции для навигации (пробуем разные разделители)
         opportunities = ""
         risks = ""
         synthesis = ""
         
-        sections = report.split("─" * 30)
-        if len(sections) >= 4:
-            opportunities = sections[1].strip() if len(sections) > 1 else ""
-            risks = sections[2].strip() if len(sections) > 2 else ""
-            synthesis = sections[3].strip() if len(sections) > 3 else ""
+        # Пробуем разные разделители
+        for sep in ["─" * 30, "---", "___"]:
+            sections = report.split(sep)
+            if len(sections) >= 4:
+                opportunities = sections[1].strip() if len(sections) > 1 else ""
+                risks = sections[2].strip() if len(sections) > 2 else ""
+                synthesis = sections[3].strip() if len(sections) > 3 else ""
+                break
+        
+        # Если не получилось парсить — сохраняем весь отчёт
+        if not opportunities and not risks:
+            opportunities = "Раздел возможностей"
+            risks = "Раздел рисков"
+            synthesis = synthesis if synthesis else "Раздел итогов"
         
         # Сохраняем секции в кэш для навигации
         russia_cache["sections"] = {
@@ -1188,17 +1197,24 @@ async def handle_russia_nav(callback: CallbackQuery):
     data = callback.data.split(":")
     section = data[1] if len(data) > 1 else "full"
     
-    sections = russia_cache.get("sections", {})
+    # Проверяем есть ли кэш
+    if not russia_cache.get("report"):
+        await callback.message.answer(
+            "⚠️ Нет сохранённого отчёта.\nЗапусти /russia сначала!",
+            parse_mode="Markdown"
+        )
+        return
     
+    sections = russia_cache.get("sections", {})
     full_report = russia_cache.get("report", "")
     
     text = ""
     if section == "opp":
-        text = sections.get("opportunities", "Раздел не найден")
+        text = sections.get("opportunities", "Раздел не найден. Запусти /russia заново.")
     elif section == "risk":
-        text = sections.get("risks", "Раздел не найден")
+        text = sections.get("risks", "Раздел не найден. Запусти /russia заново.")
     elif section == "synth":
-        text = sections.get("synthesis", "Раздел не найден")
+        text = sections.get("synthesis", "Раздел не найден. Запусти /russia заново.")
     elif section == "full":
         text = full_report[:3500] if full_report else "Отчёт не найден. Запусти /russia заново."
     else:
