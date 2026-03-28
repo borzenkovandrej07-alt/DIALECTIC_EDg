@@ -1531,6 +1531,14 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         if filter_type and filter_type != "all":
             filter_label = f" [{filter_type.upper()}]"
         
+        def make_bar(value: int, total: int, length: int = 10) -> str:
+            if total == 0:
+                return "░" * length
+            pct = value / total
+            filled = int(pct * length)
+            return "█" * filled + "░" * (length - filled)
+
+        finished = wins + losses + cautions
         lines = [
             f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD{filter_label}",
             f"_{period}_" if period else f"_{last_update}_",
@@ -1538,12 +1546,19 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             "═" * 40,
             "🎯 ОБЩАЯ СТАТИСТИКА",
             "═" * 40,
-            f"Всего прогнозов:      {total}",
-            f"✅ Верно:              {wins}",
-            f"⚠️ Осторожность:       {cautions}",
-            f"❌ Неверно:            {losses}",
-            "",
         ]
+
+        if finished > 0:
+            win_bar = make_bar(wins, finished)
+            loss_bar = make_bar(losses, finished)
+            caution_bar = make_bar(cautions, finished)
+            
+            lines.extend([
+                f"✅ WIN   [{win_bar}] {wins}/{finished} ({wins*100//finished}%)",
+                f"⚠️ CAUT  [{caution_bar}] {cautions}/{finished} ({cautions*100//finished}%)",
+                f"❌ LOSS  [{loss_bar}] {losses}/{finished} ({losses*100//finished}%)",
+                "",
+            ])
 
         wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
         if winrate > 0:
