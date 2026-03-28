@@ -1250,10 +1250,24 @@ async def cmd_market(message: Message):
     await handle_market_command(message, message.text or "/market")
 
 
+def parse_table(text: str) -> list:
+    lines = []
+    for line in text.strip().split('\n'):
+        line = line.strip()
+        if not line or line.startswith('|---'):
+            continue
+        if line.startswith('|'):
+            parts = [p.strip() for p in line.split('|')[1:-1]]
+            if parts and any(parts):
+                lines.append(parts)
+    return lines
+
+
 async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ"):
     await upsert_user(message.from_user.id)
     try:
         import aiohttp
+        import re
 
         content = None
         try:
@@ -1271,107 +1285,136 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             await message.answer("📊 Не удалось загрузить FORECASTS.md")
             return
 
-        import re
+        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "рбк", "офз", "usd/rub"]
 
-        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "рбк", "офз"]
+        last_update_match = re.search(r'Последнее обновление:\s*(\d{2}\.\d{2}\.\d{4})', content)
+        last_update = last_update_match.group(1) if last_update_match else "—"
+
+        header_match = re.search(r'## 🎯 Общая статистика\n((?:\|[^\n]+\n)+)', content)
+        stats_table = parse_table(header_match.group(1)) if header_match else []
         
-        stats = {"total": 0, "wins": 0, "losses": 0, "pending": 0}
-        
-        table_match = re.search(r'## 🎯 Общая статистика\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
-        if table_match:
-            rows = table_match.group(1).strip().split('\n')
-            for row in rows:
-                cols = [c.strip().replace("*", "").replace("%", "").replace("+", "") for c in row.split('|')[1:-1]]
-                if len(cols) >= 2:
-                    key = cols[0]
-                    val = cols[1].strip()
-                    try:
-                        val_num = float(val) if "." in val else int(val)
-                    except:
-                        val_num = 0
-                    
-                    if "Всего" in key:
-                        stats["total"] = int(val_num)
-                    elif "Прибыль" in key or "Верно" in key:
-                        stats["wins"] = int(val_num)
-                    elif "Убыто" in key or "Неверно" in key:
-                        stats["losses"] = int(val_num)
-                    elif "Открыт" in key:
-                        stats["pending"] = int(val_num)
+        stats = {}
+        for row in stats_table:
+            if len(row) >= 2:
+                key = row[0].replace("*", "").strip()
+                val = row[1].replace("*", "").replace("%", "").replace("+", "").strip()
+                try:
+                    if "." in val:
+                        stats[key] = float(val)
+                    else:
+                        stats[key] = int(val)
+                except:
+                    stats[key] = 0
+
+        total = stats.get("Всего прогнозов", 0)
+        wins = stats.get("Прибыльных", 0)
+        losses = stats.get("Убыточных", 0)
+        pending = stats.get("Открытых", 0)
+
+        pred_match = re.search(r'## 📋 Последние закрытые прогнозы\n((?:\|[^\n]+\n)+)', content)
+        all_predictions = parse_table(pred_match.group(1)) if pred_match else []
 
         predictions = []
-        pred_match = re.search(r'## 📋 Последние закрытые прогнозы\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
-        if pred_match:
-            for row in pred_match.group(1).strip().split('\n'):
-                cols = [c.strip() for c in row.split('|')[1:-1]]
-                if len(cols) >= 5:
-                    asset = cols[0]
-                    direction = cols[1]
-                    result = cols[3]
-                    pnl_str = cols[4].replace("+", "").replace("%", "").strip()
-                    try:
-                        pnl = float(pnl_str)
-                    except:
-                        pnl = 0
-                    
-                    is_russia = any(kw in asset.lower() for kw in russia_keywords)
-                    
-                    if report_type == "global" and is_russia:
-                        continue
-                    if report_type == "russia" and not is_russia:
-                        continue
-                    
-                    predictions.append({"asset": asset, "direction": direction, "result": result, "pnl": pnl, "is_russia": is_russia})
+        for row in all_predictions:
+            if len(row) >= 5:
+                asset = row[1]
+                direction = row[2]
+                result = row[4].replace("*", "").strip()
+                pnl_str = row[5].replace("*", "").replace("%", "").replace("+", "").strip()
+                try:
+                    pnl = float(pnl_str)
+                except:
+                    pnl = 0
+                
+                is_russia = any(kw in asset.lower() for kw in russia_keywords)
+                
+                if report_type == "global" and is_russia:
+                    continue
+                if report_type == "russia" and not is_russia:
+                    continue
+                
+                predictions.append({
+                    "date": row[0],
+                    "asset": asset,
+                    "direction": direction,
+                    "result": result,
+                    "pnl": pnl,
+                    "is_russia": is_russia
+                })
 
-        total = len(predictions)
-        wins = sum(1 for p in predictions if "WIN" in p["result"] or "верно" in p["result"].lower())
-        losses = total - wins
-        winrate = (wins / total * 100) if total > 0 else 0
+        if not report_type:
+            total = len(predictions)
+            wins = sum(1 for p in predictions if "WIN" in p["result"])
+            losses = sum(1 for p in predictions if "LOSS" in p["result"])
+            pending = 0
+            total = wins + losses
 
-        if stats["total"] == 0:
+        winrate = stats.get("Точность", (wins / total * 100) if total > 0 else 0)
+        avg_pnl = stats.get("Средний P&L", 0)
+        best_call = stats.get("Лучший сигнал", 0)
+        worst_call = stats.get("Худший сигнал", 0)
+
+        if total == 0:
             await message.answer(
-                f"📊 TRACK RECORD\n\nПрогнозов пока нет.\nЗапусти /daily — агенты начнут делать прогнозы.",
+                "📊 TRACK RECORD\n\nПрогнозов пока нет.\nЗапусти /daily — агенты начнут делать прогнозы.",
                 parse_mode="Markdown"
             )
             return
 
-        if report_type:
-            total = stats["total"]
-            wins = stats["wins"]
-            losses = stats["losses"]
-            pending = stats["pending"]
-            winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-
         icon = "🌍" if report_type == "global" else "🇷🇺" if report_type == "russia" else "📊"
         
         lines = [
-            f"{icon} TRACK RECORD {title}",
-            "=" * 30,
-            f"Всего прогнозов: {total}",
-            f"Завершено: {wins + losses} | Ждут: {pending}",
+            f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD",
+            f"_{last_update}_",
+            "",
+            "═" * 32,
+            "🎯 ОБЩАЯ СТАТИСТИКА",
+            "═" * 32,
+            f"Всего прогнозов:    {total}",
+            f"Прибыльных:         {wins} ✅",
+            f"Убыточных:          {losses} ❌",
+            f"В ожидании:         {pending} ⏳",
+            "",
         ]
 
         wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
-        lines.append(f"Точность: {wr_emoji} {winrate:.1f}% ({wins} WIN / {losses} LOSS)")
+        lines.append(f"Точность:           {wr_emoji} {winrate:.1f}%")
+        
+        if avg_pnl:
+            pnl_emoji = "🟢" if avg_pnl > 0 else "🔴"
+            lines.append(f"Средний P&L:        {pnl_emoji} {avg_pnl:+.1f}%")
+        
+        if best_call:
+            lines.append(f"Лучший сигнал:      🏆 +{best_call:.1f}%")
+        if worst_call:
+            lines.append(f"Худший сигнал:      💀 {worst_call:.1f}%")
 
-        if predictions:
-            lines.append("\n📋 Последние прогнозы:")
-            for p in predictions[:10]:
-                asset = p["asset"][:12]
-                direction = p["direction"][:12]
-                result = p["result"]
-                pnl = p["pnl"]
-                
-                if "WIN" in result or "верно" in result.lower():
-                    emoji = "✅"
-                elif "LOSS" in result or "неверно" in result.lower():
-                    emoji = "❌"
-                else:
-                    emoji = "⚠️"
-                
-                lines.append(f"{emoji} {asset} | {direction} | {pnl:+.1f}%")
+        lines.append("")
+        lines.append("═" * 32)
+        lines.append("📋 ПОСЛЕДНИЕ ПРОГНОЗЫ")
+        lines.append("═" * 32)
+        lines.append(f"{'Дата':<12} {'Актив':<12} {'Результат':<10} {'P&L'}")
+        lines.append("─" * 32)
 
-        lines.append("\n⚠️ Прошлые результаты не гарантируют будущих.")
+        for p in predictions[:12]:
+            date = p["date"][-5:]
+            asset = p["asset"][:10]
+            result = p["result"]
+            pnl = p["pnl"]
+            
+            if "WIN" in result:
+                res_emoji = "✅"
+            elif "LOSS" in result:
+                res_emoji = "❌"
+            elif "CAUTION" in result:
+                res_emoji = "⚠️"
+            else:
+                res_emoji = "⏳"
+            
+            lines.append(f"{date:<12} {asset:<12} {res_emoji:<10} {pnl:+.1f}%")
+
+        lines.append("")
+        lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
