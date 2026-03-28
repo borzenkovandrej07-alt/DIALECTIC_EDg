@@ -1235,6 +1235,71 @@ async def cmd_markets(message: Message):
         )
 
 
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    await upsert_user(message.from_user.id)
+    wait_msg = await message.answer("⏳ Загружаю...")
+    try:
+        prices, _ = await get_full_realtime_context()
+        
+        now = datetime.now().strftime("%d.%m %H:%M UTC")
+        
+        lines = [
+            f"📊 СТАТУС РЫНКОВ",
+            f"_{now}_",
+            "",
+            "═" * 28,
+            "💰 КРИПТА",
+            "═" * 28,
+        ]
+        
+        for k, label, icon in [
+            ("BTC", "Bitcoin", "₿"),
+            ("ETH", "Ethereum", "Ξ"),
+            ("SOL", "Solana", "◎")
+        ]:
+            if k in prices:
+                p = prices[k]
+                price = p.get("price", 0)
+                change = p.get("change_24h", 0)
+                emoji = "🟢" if change >= 0 else "🔴"
+                lines.append(f"{icon} {label}:   ${price:,.0f}  {emoji} {change:+.1f}%")
+        
+        lines.extend(["", "═" * 28, "🌍 ФОНДОВЫЕ", "═" * 28])
+        
+        for k, label in [("SPX", "S&P 500"), ("NDX", "Nasdaq"), ("VIX", "VIX")]:
+            if k in prices:
+                p = prices[k]
+                price = p.get("price", 0)
+                change = p.get("change_24h", 0)
+                emoji = "🟢" if change >= 0 else "🔴"
+                lines.append(f"{label:<10} {price:,.0f}  {emoji} {change:+.1f}%")
+        
+        if "MACRO" in prices:
+            m = prices["MACRO"]
+            fng = m.get("fng", {})
+            fv = fng.get("val", "N/A")
+            fs = fng.get("status", "")
+            lines.extend(["", "═" * 28, "📈 МАКРО", "═" * 28])
+            lines.append(f"Fear&Greed: {fv}/100 ({fs})")
+            lines.append(f"Ставка ФРС: {m.get('fed_rate', 'N/A')}%")
+        
+        lines.extend(["", "═" * 28, "⚠️ НЕ ЯВЛЯЕТСЯ ФИНАНСОВЫМ СОВЕТОМ", "═" * 28])
+        
+        await bot.edit_message_text(
+            "\n".join(lines),
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+
 # ─── /trackrecord ─────────────────────────────────────────────────────────────
 
 @dp.message(Command("market"))
@@ -1918,6 +1983,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="trackrecordrussia", description="🇷🇺 Россия Edge"),
         BotCommand(command="trackrecord", description="📊 Вся статистика"),
         BotCommand(command="markets", description="Текущие цены"),
+        BotCommand(command="status", description="Краткий статус"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
         BotCommand(command="profile", description="Настройки профиля"),
         BotCommand(command="subscribe", description="Авторассылка"),
