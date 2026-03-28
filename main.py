@@ -1634,6 +1634,7 @@ async def cmd_weekly(message: Message):
 
 
 # ─── /subscribe ───────────────────────────────────────────────────────────────
+from datetime import datetime
 
 @dp.message(Command("subscribe"))
 async def cmd_subscribe(message: Message):
@@ -1642,39 +1643,117 @@ async def cmd_subscribe(message: Message):
     user      = await get_user(user_id)
     is_subbed = user.get("daily_sub", 0) if user else 0
     sub_time  = user.get("sub_time", "08:00") if user else "08:00"
-    parts     = message.text.split()
+    
+    from datetime import datetime
+    current_utc = datetime.utcnow().strftime("%H:%M UTC")
 
-    if len(parts) == 1:
-        status = f"✅ Активна (каждый день в *{sub_time} UTC*)" if is_subbed else "❌ Отключена"
-        await message.answer(
-            f"📬 *Авторассылка*\nСтатус: {status}\n\n"
-            f"• `/subscribe on` — включить в 08:00 UTC\n"
-            f"• `/subscribe on 09:30` — своё время\n"
-            f"• `/subscribe off` — отключить",
-            parse_mode="Markdown"
-        )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🌅 06:00 UTC", callback_data="sub_time:06:00"),
+            InlineKeyboardButton(text="🌅 08:00 UTC", callback_data="sub_time:08:00"),
+        ],
+        [
+            InlineKeyboardButton(text="☀️ 10:00 UTC", callback_data="sub_time:10:00"),
+            InlineKeyboardButton(text="☀️ 12:00 UTC", callback_data="sub_time:12:00"),
+        ],
+        [
+            InlineKeyboardButton(text="💬 Своё время", callback_data="sub_time:custom"),
+        ],
+        [
+            InlineKeyboardButton(text="❌ Отключить", callback_data="sub_time:off"),
+        ]
+    ])
+
+    if is_subbed:
+        status = f"✅ Активна в {sub_time} UTC"
+    else:
+        status = "❌ Отключена"
+
+    await message.answer(
+        f"📬 *Авторассылка*\n"
+        f"Статус: {status}\n\n"
+        f"⏰ Сейчас: {current_utc}\n\n"
+        f"🌍 *Важно:* Бот работает по UTC.\n"
+        f"Если тебе нужно 10:00 МСК → выбирай 07:00 UTC\n"
+        f"Если нужно 10:00 Киев → выбирай 08:00 UTC\n\n"
+        f"Выбери время:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data.startswith("sub_time:"))
+async def cb_subscribe(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    data = callback.data.split(":")
+    
+    if len(data) < 2:
         return
-
-    action   = parts[1].lower()
-    time_str = parts[2] if len(parts) > 2 else "08:00"
-    try:
-        h, m = time_str.split(":")
-        assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
-        time_str = f"{int(h):02d}:{int(m):02d}"
-    except Exception:
-        await message.answer("❌ Формат: HH:MM, например `08:30`", parse_mode="Markdown")
-        return
-
-    if action == "on":
-        await set_daily_sub(user_id, True, time_str)
-        await message.answer(
-            f"✅ *Подписка активна*\nКаждый день в *{time_str} UTC*\n\n"
-            f"Отключить: `/subscribe off`",
-            parse_mode="Markdown"
-        )
-    elif action == "off":
+    
+    action = data[1]
+    
+    if action == "off":
         await set_daily_sub(user_id, False)
-        await message.answer("❌ *Подписка отключена*", parse_mode="Markdown")
+        await callback.message.edit_text(
+            "❌ *Подписка отключена*",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if action == "custom":
+        await callback.message.edit_text(
+            "💬 *Введи время в формате HH:MM*\n\n"
+            "Например: `09:30`\n\n"
+            "Напоминаю: бот работает по UTC!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    time_str = action
+    await set_daily_sub(user_id, True, time_str)
+    
+    await callback.message.edit_text(
+        f"✅ *Подписка активана*\n\n"
+        f"📬 Ежедневно в *{time_str} UTC*\n\n"
+        f"❌ Отключить: нажми кнопку ниже",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отключить подписку", callback_data="sub_time:off")]
+        ])
+    )
+
+
+@dp.message()
+async def handle_custom_time(message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        return
+    
+    text = message.text.strip()
+    
+    if ":" not in text or len(text) != 5:
+        await message.answer("❌ Формат: HH:MM (например 09:30)")
+        return
+    
+    try:
+        h, m = text.split(":")
+        h, m = int(h), int(m)
+        assert 0 <= h <= 23 and 0 <= m <= 59
+    except:
+        await message.answer("❌ Некорректное время. Пример: 09:30")
+        return
+    
+    time_str = f"{h:02d}:{m:02d}"
+    await set_daily_sub(user_id, True, time_str)
+    
+    await message.answer(
+        f"✅ *Подписка активана*\n\n"
+        f"📬 Ежедневно в *{time_str} UTC*",
+        parse_mode="Markdown"
+    )
 
 
 # ─── /stats ───────────────────────────────────────────────────────────────────
