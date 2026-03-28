@@ -1537,9 +1537,6 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             lines.append("═" * 50)
             for prob in problems:
                 lines.append(f"• {prob['date']} | {prob['problem']} | {prob['status']}")
-            
-            direction_short = direction[:20] if direction else ""
-            lines.append(f"{date} | {asset:<10} | {direction_short:<20} | {pnl:+.1f}% {res_emoji}")
         
         lines.append("")
         lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
