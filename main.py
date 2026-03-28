@@ -1250,19 +1250,6 @@ async def cmd_market(message: Message):
     await handle_market_command(message, message.text or "/market")
 
 
-def parse_table(text: str) -> list:
-    lines = []
-    for line in text.strip().split('\n'):
-        line = line.strip()
-        if not line or line.startswith('|---'):
-            continue
-        if line.startswith('|'):
-            parts = [p.strip() for p in line.split('|')[1:-1]]
-            if parts and any(parts):
-                lines.append(parts)
-    return lines
-
-
 async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ"):
     await upsert_user(message.from_user.id)
     try:
@@ -1285,74 +1272,100 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             await message.answer("📊 Не удалось загрузить FORECASTS.md")
             return
 
-        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "рбк", "офз", "usd/rub"]
+        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "рбк", "офз", "usd/rub", "нефть"]
 
         last_update_match = re.search(r'Последнее обновление:\s*(\d{2}\.\d{2}\.\d{4})', content)
         last_update = last_update_match.group(1) if last_update_match else "—"
 
-        header_match = re.search(r'## 🎯 Общая статистика\n((?:\|[^\n]+\n)+)', content)
-        stats_table = parse_table(header_match.group(1)) if header_match else []
+        total = 0
+        wins = 0
+        losses = 0
+        pending = 0
+        winrate = 0
+        avg_pnl = 0
+        best_call = 0
+        worst_call = 0
+
+        stats_match = re.search(r'\*\*Всего прогнозов\*\*.*?(\d+)', content)
+        if stats_match:
+            total = int(stats_match.group(1))
         
-        stats = {}
-        for row in stats_table:
-            if len(row) >= 2:
-                key = row[0].replace("*", "").strip()
-                val = row[1].replace("*", "").replace("%", "").replace("+", "").strip()
-                try:
-                    if "." in val:
-                        stats[key] = float(val)
-                    else:
-                        stats[key] = int(val)
-                except:
-                    stats[key] = 0
-
-        total = stats.get("Всего прогнозов", 0)
-        wins = stats.get("Прибыльных", 0)
-        losses = stats.get("Убыточных", 0)
-        pending = stats.get("Открытых", 0)
-
-        pred_match = re.search(r'## 📋 Последние закрытые прогнозы\n((?:\|[^\n]+\n)+)', content)
-        all_predictions = parse_table(pred_match.group(1)) if pred_match else []
+        wins_match = re.search(r'\*\*Прибыльных\*\*.*?(\d+)', content)
+        if wins_match:
+            wins = int(wins_match.group(1))
+        
+        losses_match = re.search(r'\*\*Убыточных\*\*.*?(\d+)', content)
+        if losses_match:
+            losses = int(losses_match.group(1))
+        
+        pending_match = re.search(r'\*\*Открытых\*\*.*?(\d+)', content)
+        if pending_match:
+            pending = int(pending_match.group(1))
+        
+        winrate_match = re.search(r'\*\*Точность\*\*.*?(\d+\.?\d*)%', content)
+        if winrate_match:
+            winrate = float(winrate_match.group(1))
+        
+        pnl_match = re.search(r'\*\*Средний P&L\*\*.*?([+-]?\d+\.?\d*)%', content)
+        if pnl_match:
+            avg_pnl = float(pnl_match.group(1))
+        
+        best_match = re.search(r'\*\*Лучший сигнал\*\*.*?([+-]?\d+\.?\d*)%', content)
+        if best_match:
+            best_call = float(best_match.group(1))
+        
+        worst_match = re.search(r'\*\*Худший сигнал\*\*.*?([+-]?\d+\.?\d*)%', content)
+        if worst_match:
+            worst_call = float(worst_match.group(1))
 
         predictions = []
-        for row in all_predictions:
-            if len(row) >= 5:
-                asset = row[1]
-                direction = row[2]
-                result = row[4].replace("*", "").strip()
-                pnl_str = row[5].replace("*", "").replace("%", "").replace("+", "").strip()
-                try:
-                    pnl = float(pnl_str)
-                except:
-                    pnl = 0
-                
-                is_russia = any(kw in asset.lower() for kw in russia_keywords)
-                
-                if report_type == "global" and is_russia:
-                    continue
-                if report_type == "russia" and not is_russia:
-                    continue
-                
-                predictions.append({
-                    "date": row[0],
-                    "asset": asset,
-                    "direction": direction,
-                    "result": result,
-                    "pnl": pnl,
-                    "is_russia": is_russia
-                })
+        lines = content.split('\n')
+        in_predictions = False
+        for i, line in enumerate(lines):
+            if 'Последние закрытые прогнозы' in line:
+                in_predictions = True
+                continue
+            if in_predictions and line.strip().startswith('|') and '---' not in line:
+                parts = [p.strip() for p in line.split('|')[1:-1]]
+                if len(parts) >= 6:
+                    date = parts[0]
+                    asset = parts[1]
+                    direction = parts[2]
+                    result = parts[4]
+                    pnl_str = parts[5].replace('+', '').replace('%', '').strip()
+                    
+                    try:
+                        pnl = float(pnl_str)
+                    except:
+                        pnl = 0
+                    
+                    is_russia = any(kw in asset.lower() for kw in russia_keywords)
+                    
+                    if report_type == "global" and is_russia:
+                        continue
+                    if report_type == "russia" and not is_russia:
+                        continue
+                    
+                    predictions.append({
+                        "date": date,
+                        "asset": asset,
+                        "direction": direction,
+                        "result": result,
+                        "pnl": pnl,
+                        "is_russia": is_russia
+                    })
+                elif '---' in line or line.strip() == '':
+                    if len(predictions) > 0:
+                        break
 
         if not report_type:
             total = len(predictions)
             wins = sum(1 for p in predictions if "WIN" in p["result"])
             losses = sum(1 for p in predictions if "LOSS" in p["result"])
             pending = 0
-            total = wins + losses
-
-        winrate = stats.get("Точность", (wins / total * 100) if total > 0 else 0)
-        avg_pnl = stats.get("Средний P&L", 0)
-        best_call = stats.get("Лучший сигнал", 0)
-        worst_call = stats.get("Худший сигнал", 0)
+            total = wins + losses if (wins + losses) > 0 else len(predictions)
+            if total > 0:
+                winrate = (wins / total * 100)
 
         if total == 0:
             await message.answer(
