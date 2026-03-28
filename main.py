@@ -51,7 +51,8 @@ from tracker import check_pending_predictions
 from scheduler import Scheduler
 from user_profile import (
     init_profiles_table, get_profile,
-    RISK_PROFILES, HORIZONS
+    RISK_PROFILES, HORIZONS,
+    format_profile_card, save_profile
 )
 from weekly_report import build_weekly_report
 from russia_data import fetch_russia_context
