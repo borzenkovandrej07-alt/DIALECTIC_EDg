@@ -1552,35 +1552,27 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             win_bar = make_bar(wins, finished)
             loss_bar = make_bar(losses, finished)
             caution_bar = make_bar(cautions, finished)
-            
             lines.extend([
                 f"✅ WIN   [{win_bar}] {wins}/{finished} ({wins*100//finished}%)",
                 f"⚠️ CAUT  [{caution_bar}] {cautions}/{finished} ({cautions*100//finished}%)",
                 f"❌ LOSS  [{loss_bar}] {losses}/{finished} ({losses*100//finished}%)",
-                "",
             ])
 
         wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
         if winrate > 0:
-            lines.append(f"Точность (с осторожностью): {wr_emoji} {winrate:.1f}%")
-        if winrate_conservative > 0:
-            lines.append(f"Точность (только направление): {winrate_conservative:.1f}%")
+            lines.append(f"Точность: {wr_emoji} {winrate:.1f}%")
         if protection > 0:
             prot_emoji = "🟢" if protection >= 90 else "🟡"
-            lines.append(f"🛡️ Защита капитала:    {prot_emoji} {protection:.1f}%")
+            lines.append(f"🛡️ Защита: {prot_emoji} {protection:.1f}%")
 
         if categories:
             lines.append("")
-            lines.append("═" * 40)
-            lines.append("📈 ТОЧНОСТЬ ПО КАТЕГОРИЯМ")
-            lines.append("═" * 40)
+            lines.append("📈 КАТЕГОРИИ")
             for cat in categories[:6]:
                 lines.append(f"  {cat['name']}: {cat['accuracy']}")
 
         lines.append("")
-        lines.append("═" * 50)
-        lines.append("📝 ВСЕ ПРОГНОЗЫ")
-        lines.append("═" * 50)
+        lines.append("📝 ПРОГНОЗЫ")
         
         for p in predictions:
             date = p.get("date", "")[:5]
@@ -1601,31 +1593,23 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
 
         if errors:
             lines.append("")
-            lines.append("═" * 50)
-            lines.append("❌ РАЗБОР ОШИБОК")
-            lines.append("═" * 50)
+            lines.append("❌ ОШИБКИ")
             for err in errors:
                 lines.append(f"• {err['date']} | {err['asset']}")
                 lines.append(f"  Прогноз: {err['forecast']}")
                 lines.append(f"  Факт:    {err['fact']}")
-                lines.append("")
 
         if caution_notes:
             lines.append("")
-            lines.append("═" * 50)
-            lines.append("⚠️ ПРАВИЛЬНАЯ ОСТОРОЖНОСТЬ")
-            lines.append("═" * 50)
+            lines.append("⚠️ ОСТОРОЖНОСТЬ")
             for note in caution_notes:
                 lines.append(f"• {note['date']} | {note['asset']}")
                 lines.append(f"  Прогноз: {note['forecast']}")
                 lines.append(f"  Почему:  {note.get('why', 'верно')}")
-                lines.append("")
 
         if problems:
             lines.append("")
-            lines.append("═" * 50)
-            lines.append("⚠️ ИЗВЕСТНЫЕ ПРОБЛЕМЫ")
-            lines.append("═" * 50)
+            lines.append("⚠️ ПРОБЛЕМЫ")
             for prob in problems:
                 lines.append(f"• {prob['date']} | {prob['problem']} | {prob['status']}")
         
