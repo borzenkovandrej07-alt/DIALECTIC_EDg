@@ -1253,31 +1253,94 @@ async def cmd_market(message: Message):
 async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ"):
     await upsert_user(message.from_user.id)
     try:
-        tr = await get_track_record(report_type)
-        stats = tr.get("stats", {})
-        recent = tr.get("recent", [])
-        by_asset = tr.get("by_asset", [])
+        import aiohttp
 
-        total = stats.get("total", 0) or 0
-        wins = stats.get("wins", 0) or 0
-        losses = stats.get("losses", 0) or 0
-        cautions = stats.get("cautions", 0) or 0
-        pending = stats.get("pending", 0) or 0
-        avg_pnl = stats.get("avg_pnl", 0) or 0
-        best_call = stats.get("best_call", 0) or 0
-        worst_call = stats.get("worst_call", 0) or 0
+        content = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://raw.githubusercontent.com/borzenkovandrej07-alt/DIALECTIC_EDg/main/FORECASTS.md",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        content = await resp.text()
+        except Exception as e:
+            logger.warning(f"Failed to fetch FORECASTS.md: {e}")
+        
+        if not content:
+            await message.answer("📊 Не удалось загрузить FORECASTS.md")
+            return
 
-        if total == 0:
+        import re
+
+        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "рбк", "офз"]
+        
+        stats = {"total": 0, "wins": 0, "losses": 0, "pending": 0}
+        
+        table_match = re.search(r'## 🎯 Общая статистика\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
+        if table_match:
+            rows = table_match.group(1).strip().split('\n')
+            for row in rows:
+                cols = [c.strip().replace("*", "").replace("%", "").replace("+", "") for c in row.split('|')[1:-1]]
+                if len(cols) >= 2:
+                    key = cols[0]
+                    val = cols[1].strip()
+                    try:
+                        val_num = float(val) if "." in val else int(val)
+                    except:
+                        val_num = 0
+                    
+                    if "Всего" in key:
+                        stats["total"] = int(val_num)
+                    elif "Прибыль" in key or "Верно" in key:
+                        stats["wins"] = int(val_num)
+                    elif "Убыто" in key or "Неверно" in key:
+                        stats["losses"] = int(val_num)
+                    elif "Открыт" in key:
+                        stats["pending"] = int(val_num)
+
+        predictions = []
+        pred_match = re.search(r'## 📋 Последние закрытые прогнозы\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
+        if pred_match:
+            for row in pred_match.group(1).strip().split('\n'):
+                cols = [c.strip() for c in row.split('|')[1:-1]]
+                if len(cols) >= 5:
+                    asset = cols[0]
+                    direction = cols[1]
+                    result = cols[3]
+                    pnl_str = cols[4].replace("+", "").replace("%", "").strip()
+                    try:
+                        pnl = float(pnl_str)
+                    except:
+                        pnl = 0
+                    
+                    is_russia = any(kw in asset.lower() for kw in russia_keywords)
+                    
+                    if report_type == "global" and is_russia:
+                        continue
+                    if report_type == "russia" and not is_russia:
+                        continue
+                    
+                    predictions.append({"asset": asset, "direction": direction, "result": result, "pnl": pnl, "is_russia": is_russia})
+
+        total = len(predictions)
+        wins = sum(1 for p in predictions if "WIN" in p["result"] or "верно" in p["result"].lower())
+        losses = total - wins
+        winrate = (wins / total * 100) if total > 0 else 0
+
+        if stats["total"] == 0:
             await message.answer(
-                f"📊 TRACK RECORD {title}\n\n"
-                "Прогнозов пока нет.\n"
-                "Запусти /daily — агенты начнут делать прогнозы.",
+                f"📊 TRACK RECORD\n\nПрогнозов пока нет.\nЗапусти /daily — агенты начнут делать прогнозы.",
                 parse_mode="Markdown"
             )
             return
 
-        finished = wins + losses + cautions
-        winrate = (wins / finished * 100) if finished > 0 else 0
+        if report_type:
+            total = stats["total"]
+            wins = stats["wins"]
+            losses = stats["losses"]
+            pending = stats["pending"]
+            winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
         icon = "🌍" if report_type == "global" else "🇷🇺" if report_type == "russia" else "📊"
         
@@ -1285,48 +1348,26 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             f"{icon} TRACK RECORD {title}",
             "=" * 30,
             f"Всего прогнозов: {total}",
-            f"Завершено: {finished} | Ждут: {pending}",
+            f"Завершено: {wins + losses} | Ждут: {pending}",
         ]
 
         wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
-        pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
-
         lines.append(f"Точность: {wr_emoji} {winrate:.1f}% ({wins} WIN / {losses} LOSS)")
-        if cautions > 0:
-            lines.append(f"Осторожно: {cautions}")
-        if avg_pnl != 0:
-            lines.append(f"Средний P&L: {pnl_emoji} {avg_pnl:+.1f}%")
-        if best_call > 0:
-            lines.append(f"Лучший: +{best_call:.1f}%")
-        if worst_call < 0:
-            lines.append(f"Худший: {worst_call:.1f}%")
 
-        if by_asset:
-            lines.append("\n📈 По активам:")
-            for a in by_asset[:5]:
-                asset = a.get("asset", "?")
-                calls = a.get("calls", 0)
-                a_wins = a.get("wins", 0)
-                a_wr = (a_wins / calls * 100) if calls > 0 else 0
-                a_pnl = a.get("avg_pnl", 0) or 0
-                lines.append(f"  {asset}: {a_wr:.0f}% ({a_wins}/{calls}) | P&L: {a_pnl:+.1f}%")
-
-        if recent:
+        if predictions:
             lines.append("\n📋 Последние прогнозы:")
-            for r in recent[:8]:
-                asset = r.get("asset", "?")[:12]
-                direction = r.get("direction", "")[:15]
-                result = r.get("result", "")
-                pnl = r.get("pnl_pct", 0) or 0
+            for p in predictions[:10]:
+                asset = p["asset"][:12]
+                direction = p["direction"][:12]
+                result = p["result"]
+                pnl = p["pnl"]
                 
-                if result == "win":
+                if "WIN" in result or "верно" in result.lower():
                     emoji = "✅"
-                elif result == "loss":
+                elif "LOSS" in result or "неверно" in result.lower():
                     emoji = "❌"
-                elif result == "caution":
-                    emoji = "⚠️"
                 else:
-                    emoji = "⏳"
+                    emoji = "⚠️"
                 
                 lines.append(f"{emoji} {asset} | {direction} | {pnl:+.1f}%")
 
