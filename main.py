@@ -1279,84 +1279,151 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
 
         total = 0
         wins = 0
+        cautions = 0
         losses = 0
-        pending = 0
         winrate = 0
-        avg_pnl = 0
-        best_call = 0
-        worst_call = 0
+        winrate_conservative = 0
+        protection = 0
+        period = ""
 
-        stats_match = re.search(r'\*\*Всего прогнозов\*\*.*?(\d+)', content)
-        if stats_match:
-            total = int(stats_match.group(1))
+        total_match = re.search(r'Всего прогнозов.*?\|.*?(\d+)', content)
+        if total_match:
+            total = int(total_match.group(1))
         
-        wins_match = re.search(r'\*\*Прибыльных\*\*.*?(\d+)', content)
+        wins_match = re.search(r'✅ Верно.*?\|.*?(\d+)', content)
         if wins_match:
             wins = int(wins_match.group(1))
         
-        losses_match = re.search(r'\*\*Убыточных\*\*.*?(\d+)', content)
+        cautions_match = re.search(r'⚠️ Правильная осторожность.*?\|.*?(\d+)', content)
+        if cautions_match:
+            cautions = int(cautions_match.group(1))
+        
+        losses_match = re.search(r'❌ Неверно.*?\|.*?(\d+)', content)
         if losses_match:
             losses = int(losses_match.group(1))
         
-        pending_match = re.search(r'\*\*Открытых\*\*.*?(\d+)', content)
-        if pending_match:
-            pending = int(pending_match.group(1))
-        
-        winrate_match = re.search(r'\*\*Точность\*\*.*?(\d+\.?\d*)%', content)
+        winrate_match = re.search(r'Точность \(с осторожностью\).*?\*\*(\d+\.?\d*)%', content)
         if winrate_match:
             winrate = float(winrate_match.group(1))
         
-        pnl_match = re.search(r'\*\*Средний P&L\*\*.*?([+-]?\d+\.?\d*)%', content)
-        if pnl_match:
-            avg_pnl = float(pnl_match.group(1))
+        winrate_conservative_match = re.search(r'Точность \(только направление\).*?\*\*(\d+\.?\d*)%', content)
+        if winrate_conservative_match:
+            winrate_conservative = float(winrate_conservative_match.group(1))
         
-        best_match = re.search(r'\*\*Лучший сигнал\*\*.*?([+-]?\d+\.?\d*)%', content)
-        if best_match:
-            best_call = float(best_match.group(1))
+        protection_match = re.search(r'Защита капитала.*?\*\*(\d+\.?\d*)%', content)
+        if protection_match:
+            protection = float(protection_match.group(1))
         
-        worst_match = re.search(r'\*\*Худший сигнал\*\*.*?([+-]?\d+\.?\d*)%', content)
-        if worst_match:
-            worst_call = float(worst_match.group(1))
+        period_match = re.search(r'Период.*?(\d{2}\.\d{2}\.\d{4}.*\d{2}\.\d{2}\.\d{4})', content)
+        if period_match:
+            period = period_match.group(1)
+
+        categories = []
+        in_categories = False
+        for line in content.split('\n'):
+            if '## 📋 Точность по категориям' in line:
+                in_categories = True
+                continue
+            if in_categories and line.strip().startswith('|') and '---' not in line and 'Категория' not in line:
+                parts = [p.strip() for p in line.split('|')[1:-1]]
+                if len(parts) >= 3:
+                    categories.append({"name": parts[0], "stats": parts[1], "accuracy": parts[2]})
+            elif in_categories and (line.strip().startswith('##') or line.strip() == ''):
+                if len(categories) > 0:
+                    break
 
         predictions = []
-        lines = content.split('\n')
+        errors = []
+        caution_notes = []
+        problems = []
+        
         in_predictions = False
-        for i, line in enumerate(lines):
-            if 'Последние закрытые прогнозы' in line:
+        in_errors = False
+        in_caution = False
+        in_problems = False
+        
+        for line in content.split('\n'):
+            if '## 📝 Все прогнозы' in line:
                 in_predictions = True
+                in_errors = False
+                in_caution = False
+                in_problems = False
                 continue
-            if in_predictions and line.strip().startswith('|') and '---' not in line:
+            if '## ❌ Разбор ошибок' in line:
+                in_predictions = False
+                in_errors = True
+                in_caution = False
+                in_problems = False
+                continue
+            if '## ⚠️ Примечание по "правильной осторожности"' in line:
+                in_predictions = False
+                in_errors = False
+                in_caution = True
+                in_problems = False
+                continue
+            if '## ⚠️ Известные проблемы' in line:
+                in_predictions = False
+                in_errors = False
+                in_caution = False
+                in_problems = True
+                continue
+            
+            if line.strip().startswith('|') and '---' not in line:
                 parts = [p.strip() for p in line.split('|')[1:-1]]
-                if len(parts) >= 6:
-                    date = parts[0]
-                    asset = parts[1]
-                    direction = parts[2]
-                    result = parts[4]
-                    pnl_str = parts[5].replace('+', '').replace('%', '').strip()
-                    
+                
+                if in_predictions and len(parts) >= 7:
                     try:
-                        pnl = float(pnl_str)
+                        num = parts[0]
+                        date = parts[1]
+                        pred_type = parts[2]
+                        asset = parts[3]
+                        forecast = parts[4]
+                        fact = parts[5]
+                        result = parts[6]
+                        
+                        is_russia = pred_type == "Russia Edge" or any(kw in asset.lower() for kw in russia_keywords)
+                        
+                        if report_type == "global" and is_russia:
+                            pass
+                        elif report_type == "russia" and not is_russia:
+                            pass
+                        else:
+                            predictions.append({
+                                "num": num,
+                                "date": date,
+                                "type": pred_type,
+                                "asset": asset,
+                                "forecast": forecast[:30],
+                                "fact": fact[:30],
+                                "result": result,
+                                "is_russia": is_russia
+                            })
                     except:
-                        pnl = 0
-                    
-                    is_russia = any(kw in asset.lower() for kw in russia_keywords)
-                    
-                    if report_type == "global" and is_russia:
-                        continue
-                    if report_type == "russia" and not is_russia:
-                        continue
-                    
-                    predictions.append({
-                        "date": date,
-                        "asset": asset,
-                        "direction": direction,
-                        "result": result,
-                        "pnl": pnl,
-                        "is_russia": is_russia
+                        pass
+                
+                elif in_errors and len(parts) >= 4:
+                    errors.append({
+                        "date": parts[0],
+                        "asset": parts[1],
+                        "forecast": parts[2],
+                        "fact": parts[3]
                     })
-                elif '---' in line or line.strip() == '':
-                    if len(predictions) > 0:
-                        break
+                
+                elif in_caution and len(parts) >= 5:
+                    caution_notes.append({
+                        "date": parts[0],
+                        "asset": parts[1],
+                        "forecast": parts[2],
+                        "fact": parts[3],
+                        "why": parts[4]
+                    })
+                
+                elif in_problems and len(parts) >= 3:
+                    problems.append({
+                        "date": parts[0],
+                        "problem": parts[1],
+                        "status": parts[2]
+                    })
 
         if filter_type and filter_type != "all":
             filtered = []
@@ -1371,12 +1438,9 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             predictions = filtered
 
         total = len(predictions)
-        wins = sum(1 for p in predictions if "WIN" in p["result"])
-        losses = sum(1 for p in predictions if "LOSS" in p["result"])
-        pending = 0
-        total = wins + losses if (wins + losses) > 0 else len(predictions)
-        if total > 0:
-            winrate = wins / total * 100
+        wins = sum(1 for p in predictions if "Верно" in p["result"])
+        cautions = sum(1 for p in predictions if "Осторожность" in p["result"])
+        losses = sum(1 for p in predictions if "Неверно" in p["result"])
 
         if total == 0:
             await message.answer(
@@ -1393,66 +1457,86 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         
         lines = [
             f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD{filter_label}",
-            f"_{last_update}_",
+            f"_{period}_" if period else f"_{last_update}_",
             "",
-            "═" * 32,
+            "═" * 40,
             "🎯 ОБЩАЯ СТАТИСТИКА",
-            "═" * 32,
-            f"Всего прогнозов:    {total}",
-            f"Прибыльных:         {wins} ✅",
-            f"Убыточных:          {losses} ❌",
-            f"В ожидании:         {pending} ⏳",
+            "═" * 40,
+            f"Всего прогнозов:      {total}",
+            f"✅ Верно:              {wins}",
+            f"⚠️ Осторожность:       {cautions}",
+            f"❌ Неверно:            {losses}",
             "",
         ]
 
         wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
-        lines.append(f"Точность:           {wr_emoji} {winrate:.1f}%")
-        
-        if predictions:
-            pnls = [p["pnl"] for p in predictions if p["pnl"]]
-            if pnls:
-                calc_avg_pnl = sum(pnls) / len(pnls)
-                pnl_emoji = "🟢" if calc_avg_pnl > 0 else "🔴"
-                lines.append(f"Средний P&L:        {pnl_emoji} {calc_avg_pnl:+.1f}%")
-                
-                best = max(pnls)
-                worst = min(pnls)
-                if best > 0:
-                    lines.append(f"Лучший сигнал:      🏆 +{best:.1f}%")
-                if worst < 0:
-                    lines.append(f"Худший сигнал:      💀 {worst:.1f}%")
-        elif avg_pnl:
-            pnl_emoji = "🟢" if avg_pnl > 0 else "🔴"
-            lines.append(f"Средний P&L:        {pnl_emoji} {avg_pnl:+.1f}%")
-            if best_call:
-                lines.append(f"Лучший сигнал:      🏆 +{best_call:.1f}%")
-            if worst_call:
-                lines.append(f"Худший сигнал:      💀 {worst_call:.1f}%")
+        if winrate > 0:
+            lines.append(f"Точность (с осторожностью): {wr_emoji} {winrate:.1f}%")
+        if winrate_conservative > 0:
+            lines.append(f"Точность (только направление): {winrate_conservative:.1f}%")
+        if protection > 0:
+            prot_emoji = "🟢" if protection >= 90 else "🟡"
+            lines.append(f"🛡️ Защита капитала:    {prot_emoji} {protection:.1f}%")
+
+        if categories:
+            lines.append("")
+            lines.append("═" * 40)
+            lines.append("📈 ТОЧНОСТЬ ПО КАТЕГОРИЯМ")
+            lines.append("═" * 40)
+            for cat in categories[:6]:
+                lines.append(f"  {cat['name']}: {cat['accuracy']}")
 
         lines.append("")
-        lines.append("═" * 36)
-        lines.append("📋 ПРОГНОЗЫ")
         lines.append("═" * 50)
-        lines.append("📋 ПРОГНОЗЫ (полный список)")
+        lines.append("📝 ВСЕ ПРОГНОЗЫ")
         lines.append("═" * 50)
-        lines.append(f"{'Дата':<8} | {'Актив':<12} | {'Направление':<22} | P&L")
-        lines.append("─" * 50)
-
+        
         for p in predictions:
-            date = p["date"][-5:] if p["date"] else ""
-            asset = p["asset"][:10] if p["asset"] else ""
-            direction = p["direction"][:20] if p["direction"] else ""
-            result = p["result"]
-            pnl = p["pnl"]
+            date = p.get("date", "")[:5]
+            asset = p.get("asset", "")[:12]
+            forecast = p.get("forecast", "")[:20]
+            result = p.get("result", "")
             
-            if "WIN" in result:
+            if "Верно" in result:
                 res_emoji = "✅"
-            elif "LOSS" in result:
+            elif "Неверно" in result:
                 res_emoji = "❌"
-            elif "CAUTION" in result:
+            elif "Осторожность" in result:
                 res_emoji = "⚠️"
             else:
                 res_emoji = "⏳"
+            
+            lines.append(f"{date} | {asset:<12} | {forecast:<20} | {res_emoji}")
+
+        if errors:
+            lines.append("")
+            lines.append("═" * 50)
+            lines.append("❌ РАЗБОР ОШИБОК")
+            lines.append("═" * 50)
+            for err in errors:
+                lines.append(f"• {err['date']} | {err['asset']}")
+                lines.append(f"  Прогноз: {err['forecast']}")
+                lines.append(f"  Факт:    {err['fact']}")
+                lines.append("")
+
+        if caution_notes:
+            lines.append("")
+            lines.append("═" * 50)
+            lines.append("⚠️ ПРАВИЛЬНАЯ ОСТОРОЖНОСТЬ")
+            lines.append("═" * 50)
+            for note in caution_notes:
+                lines.append(f"• {note['date']} | {note['asset']}")
+                lines.append(f"  Прогноз: {note['forecast']}")
+                lines.append(f"  Почему:  {note.get('why', 'верно')}")
+                lines.append("")
+
+        if problems:
+            lines.append("")
+            lines.append("═" * 50)
+            lines.append("⚠️ ИЗВЕСТНЫЕ ПРОБЛЕМЫ")
+            lines.append("═" * 50)
+            for prob in problems:
+                lines.append(f"• {prob['date']} | {prob['problem']} | {prob['status']}")
             
             direction_short = direction[:20] if direction else ""
             lines.append(f"{date} | {asset:<10} | {direction_short:<20} | {pnl:+.1f}% {res_emoji}")
