@@ -24,7 +24,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Raw URL — без API ключа, бесплатно
-FORECASTS_RAW = "https://raw.githubusercontent.com/{repo}/main/FORECASTS.md"
+DIGEST_CACHE_RAW = "https://raw.githubusercontent.com/{repo}/main/DIGEST_CACHE.md"
 
 # Минимум дней подряд для алерта
 MIN_STREAK = 3
@@ -49,12 +49,12 @@ def _parse_direction(asset: str, direction: str) -> Optional[str]:
     return None
 
 
-async def fetch_forecast_history(github_repo: str) -> list[dict]:
+async def fetch_verdict_history(github_repo: str) -> list[dict]:
     """
-    Читает FORECASTS.md и возвращает историю прогнозов:
-    [{"date": "22.03.2026", "direction": "BULLISH", "asset": "BTC"}, ...]
+    Читает DIGEST_CACHE.md и возвращает историю вердиктов:
+    [{"date": "22.03.2026", "direction": "BULLISH", "summary": "..."}, ...]
     """
-    url = FORECASTS_RAW.format(repo=github_repo)
+    url = DIGEST_CACHE_RAW.format(repo=github_repo)
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -64,49 +64,53 @@ async def fetch_forecast_history(github_repo: str) -> list[dict]:
                 headers={"User-Agent": "Mozilla/5.0"}
             ) as resp:
                 if resp.status != 200:
-                    logger.warning(f"FORECASTS fetch: status {resp.status}")
+                    logger.warning(f"DIGEST_CACHE fetch: status {resp.status}")
                     return []
                 content = await resp.text()
     except Exception as e:
-        logger.warning(f"FORECASTS fetch error: {e}")
+        logger.warning(f"DIGEST_CACHE fetch error: {e}")
         return []
 
-    forecasts = []
-    in_forecasts = False
+    verdicts = []
+    blocks = re.split(r"\n## 📊 ", content)
     
-    for line in content.split('\n'):
-        if '## 📝 Все прогнозы' in line:
-            in_forecasts = True
+    for block in blocks:
+        if not block.strip() or block.startswith("#"):
             continue
-        if in_forecasts and line.strip().startswith('|') and '---' not in line:
-            parts = [p.strip() for p in line.split('|')[1:-1]]
-            if len(parts) >= 7:
-                try:
-                    num = parts[0]
-                    date = parts[1]
-                    asset = parts[3]
-                    direction = parts[4]
-                    result = parts[6]
-                    
-                    direction_type = _parse_direction(asset, direction)
-                    
-                    if direction_type and direction_type != "NEUTRAL":
-                        forecasts.append({
-                            "date": date,
-                            "asset": asset,
-                            "direction": direction_type,
-                            "result": result,
-                        })
-                except:
-                    pass
-        elif in_forecasts and line.strip().startswith('##'):
-            break
+        
+        lines = block.strip().split("\n")
+        date_line = lines[0].strip() if lines else ""
+        date_m = re.match(r"(\d{2}\.\d{2}\.\d{4})", date_line)
+        if not date_m:
+            continue
+        date_str = date_m.group(1)
+        
+        direction = None
+        for line in lines:
+            if "ВЕРДИКТ" in line.upper() or "Вердикт" in line:
+                if "БЫЧ" in line.upper() or "BULL" in line.upper() or "🐂" in line:
+                    direction = "BULLISH"
+                elif "МЕДВЕЖ" in line.upper() or "BEAR" in line.upper() or "🐻" in line:
+                    direction = "BEARISH"
+                elif "NEUTRAL" in line.upper() or "CASH" in line.upper() or "НЕЙТРАЛЬН" in line.upper():
+                    direction = "NEUTRAL"
+                break
+        
+        if not direction:
+            direction = _parse_direction(block, block)
+        
+        if direction and direction != "NEUTRAL":
+            verdicts.append({
+                "date": date_str,
+                "direction": direction,
+                "raw": block[:300],
+            })
 
-    logger.info(f"Прогнозов найдено в истории: {len(forecasts)}")
-    return forecasts[:14]  # последние 14 дней
+    logger.info(f"Вердиктов найдено: {len(verdicts)}")
+    return verdicts[:10]
 
 
-def analyze_streak(forecasts: list[dict]) -> dict:
+def analyze_streak(verdicts: list[dict]) -> dict:
     """
     Считает серию одного направления.
     Возвращает:
@@ -118,18 +122,16 @@ def analyze_streak(forecasts: list[dict]) -> dict:
         "dates": ["22.03", "21.03", "20.03"]
     }
     """
-    if not forecasts:
+    if not verdicts:
         return {"streak": 0, "direction": None, "alert": False}
 
-    first_direction = forecasts[0]["direction"]
+    first_direction = verdicts[0]["direction"]
     streak = 0
-    assets = []
     dates = []
 
-    for v in forecasts:
+    for v in verdicts:
         if v["direction"] == first_direction:
             streak += 1
-            assets.append(v["asset"])
             dates.append(v["date"][-5:])
         else:
             break
@@ -138,7 +140,6 @@ def analyze_streak(forecasts: list[dict]) -> dict:
         "streak": streak,
         "direction": first_direction,
         "alert": streak >= MIN_STREAK,
-        "assets": assets[:5],
         "dates": dates[:3],
     }
 
@@ -163,7 +164,6 @@ def build_alert_text(streak_info: dict, btc_now: Optional[float]) -> str:
     """Формирует текст алерта. НЕ торговый сигнал — информация."""
     direction = streak_info["direction"]
     streak = streak_info["streak"]
-    assets = streak_info["assets"]
     dates = streak_info["dates"]
 
     emoji = "🐂" if direction == "BULLISH" else "🐻"
@@ -175,7 +175,6 @@ def build_alert_text(streak_info: dict, btc_now: Optional[float]) -> str:
         "",
         f"*{streak} дней подряд* — анализ показывает *{direction_ru}* настрой",
         f"Период: {' → '.join(reversed(dates))}" if dates else "",
-        f"Активы: {', '.join(assets[:4])}" if assets else "",
     ]
 
     if btc_now:
@@ -244,12 +243,12 @@ class AlertSystem:
         if not subscribers:
             return 0
 
-        forecasts = await fetch_forecast_history(self.github_repo)
-        if not forecasts:
-            logger.info("Alert: история прогнозов пуста")
+        verdicts = await fetch_verdict_history(self.github_repo)
+        if not verdicts:
+            logger.info("Alert: история вердиктов пуста")
             return 0
 
-        streak_info = analyze_streak(forecasts)
+        streak_info = analyze_streak(verdicts)
         logger.info(
             f"Alert check: серия {streak_info['streak']} × {streak_info['direction']}, "
             f"алерт={'да' if streak_info['alert'] else 'нет'}"
