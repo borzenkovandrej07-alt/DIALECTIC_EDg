@@ -1298,10 +1298,15 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                     elif "Открытых" in key:
                         stats["pending"] = int(val) if val.isdigit() else 0
                     elif "Точность" in key and "%" in cols[1]:
-                        stats["winrate"] = float(val)
-                    elif "Средний P&L" in key or "Средний P" in key:
+                        val_clean = val.replace("*", "").replace("%", "").strip()
                         try:
-                            stats["avg_pnl"] = float(val)
+                            stats["winrate"] = float(val_clean)
+                        except:
+                            stats["winrate"] = 0
+                    elif "Средний P&L" in key or "Средний P" in key:
+                        val_clean = val.replace("*", "").replace("+", "").replace("%", "").strip()
+                        try:
+                            stats["avg_pnl"] = float(val_clean)
                         except:
                             stats["avg_pnl"] = 0
 
