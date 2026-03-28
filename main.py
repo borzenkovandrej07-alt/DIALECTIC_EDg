@@ -1675,7 +1675,7 @@ async def cmd_subscribe(message: Message):
         f"⏰ Сейчас: {current_utc}\n\n"
         f"🌍 *Важно:* Бот работает по UTC.\n"
         f"Если тебе нужно 10:00 МСК → выбирай 07:00 UTC\n"
-        f"Если нужно 10:00 Киев → выбирай 08:00 UTC\n\n"
+        f"Если нужно 10:00 (Минск/Алматы) → выбирай 07:00-08:00 UTC\n\n"
         f"Выбери время:",
         parse_mode="Markdown",
         reply_markup=keyboard
