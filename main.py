@@ -1253,115 +1253,102 @@ async def cmd_market(message: Message):
 async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ"):
     await upsert_user(message.from_user.id)
     try:
-        data     = await get_track_record(report_type)
-        stats    = data["stats"]
-        recent   = data["recent"]
-        by_asset = data["by_asset"]
+        import os
+        import re
 
-        total   = stats.get("total") or 0
-        wins    = stats.get("wins") or 0
-        losses  = stats.get("losses") or 0
-        cautions = stats.get("cautions") or 0
-        pending = stats.get("pending") or 0
-        avg_pnl = stats.get("avg_pnl") or 0
-        best    = stats.get("best_call") or 0
-        worst   = stats.get("worst_call") or 0
-
-        if total == 0:
-            # SQLite пустая (Railway редеплой) — пробуем прочитать с GitHub
-            github_url = ""
-            try:
-                from config import GITHUB_REPO
-                if GITHUB_REPO:
-                    github_url = f"https://github.com/{GITHUB_REPO}/blob/main/FORECASTS.md"
-            except Exception:
-                pass
-
-            if github_url:
-                await message.answer(
-                    "📊 *Track Record*\n\n"
-                    "_База данных обнулилась после перезапуска бота._\n\n"
-                    f"📎 Актуальная статистика прогнозов хранится на GitHub:\n{github_url}\n\n"
-                    "_После следующего /daily прогнозы начнут накапливаться заново._",
-                    parse_mode="Markdown"
-                )
-            else:
-                await message.answer(
-                    "📊 *Track Record*\n\n"
-                    "_Прогнозы накапливаются. Запусти /daily — агенты начнут делать прогнозы._\n\n"
-                    "Через 1-2 недели активного использования здесь появится реальная статистика.",
-                    parse_mode="Markdown"
-                )
+        forecast_path = os.path.join(os.path.dirname(__file__), "FORECASTS.md")
+        if not os.path.exists(forecast_path):
+            await message.answer("📊 Файл FORECASTS.md не найден. Запусти /daily для создания прогнозов.")
             return
 
-        finished  = wins + losses + cautions
-        winrate   = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-        accuracy_with_caution = ((wins + cautions) / finished * 100) if finished > 0 else 0
-        wr_emoji  = "🟢" if accuracy_with_caution >= 55 else "🟡" if accuracy_with_caution >= 45 else "🔴"
+        with open(forecast_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        stats = {}
+        table_match = re.search(r'## 🎯 Общая статистика\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
+        if table_match:
+            rows = table_match.group(1).strip().split('\n')
+            for row in rows:
+                cols = [c.strip() for c in row.split('|')[1:-1]]
+                if len(cols) >= 2:
+                    key = cols[0]
+                    val = cols[1].replace("%", "").replace("+", "").strip()
+                    if "Всего прогнозов" in key:
+                        stats["total"] = int(val) if val.isdigit() else 0
+                    elif "Прибыльных" in key or "Верно" in key:
+                        stats["wins"] = int(val) if val.isdigit() else 0
+                    elif "Убыточных" in key or "Неверно" in key:
+                        stats["losses"] = int(val) if val.isdigit() else 0
+                    elif "Открытых" in key:
+                        stats["pending"] = int(val) if val.isdigit() else 0
+                    elif "Точность" in key and "%" in cols[1]:
+                        stats["winrate"] = float(val)
+                    elif "Средний P&L" in key or "Средний P" in key:
+                        try:
+                            stats["avg_pnl"] = float(val)
+                        except:
+                            stats["avg_pnl"] = 0
+
+        last_update = re.search(r'Последнее обновление:\s*(\d{2}\.\d{2}\.\d{4})', content)
+
+        total = stats.get("total", 0)
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        pending = stats.get("pending", 0)
+        winrate = stats.get("winrate", 0)
+        avg_pnl = stats.get("avg_pnl", 0)
+
+        if total == 0:
+            await message.answer(
+                "📊 *Track Record*\n\n"
+                "_Прогнозы накапливаются. Запусти /daily — агенты начнут делать прогнозы._\n\n"
+                "Через 1-2 недели активного использования здесь появится реальная статистика.",
+                parse_mode="Markdown"
+            )
+            return
+
+        lines = [f"📊 *TRACK RECORD {title}*"]
+        if last_update:
+            lines.append(f"_Обновено: {last_update.group(1)}_")
+
+        finished = wins + losses
+        lines.extend([
+            f"*Всего прогнозов:* {total}",
+            f"*Завершено:* {finished} | ⏳ Ждут: {pending}",
+        ])
+
+        wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
         pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
 
-        lines = [
-            f"📊 *TRACK RECORD {title}*\n",
-            f"*Всего прогнозов:* {total}",
-            f"*Завершено:* {wins+losses+cautions} | ✅ {wins} | ⚠️ {cautions} | ❌ {losses} | ⏳ {pending}",
-        ]
-
         if finished > 0:
-            lines += [
-                f"*Точность:* {wr_emoji} *{accuracy_with_caution:.0f}%* (с осторожностью)",
-                f"*Точность (без осторожности):* {winrate:.0f}%",
-                f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*",
-            ]
-            if best:               lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
-            if worst and worst < 0: lines.append(f"*Худший:* 💥 {worst:.1f}%")
+            lines.append(f"*Точность:* {wr_emoji} *{winrate:.1f}%* ({wins}✅ / {losses}❌)")
+            if avg_pnl != 0:
+                lines.append(f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*")
 
-        if by_asset:
-            lines.append("\n*🏆 Топ активов:*")
-            for a in by_asset[:3]:
-                wr = (a['wins'] / a['calls'] * 100) if a['calls'] else 0
-                lines.append(
-                    f"• {a['asset']}: {wr:.0f}% winrate "
-                    f"({a['calls']} сигналов, avg {a['avg_pnl']:+.1f}%)"
-                )
+        cat_match = re.search(r'## 📋 Точность по категориям\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
+        if cat_match:
+            lines.append("\n*📈 Точность по категориям:*")
+            for row in cat_match.group(1).strip().split('\n')[:5]:
+                cols = [c.strip() for c in row.split('|')[1:-1]]
+                if len(cols) >= 3:
+                    cat = cols[0]
+                    acc = cols[2]
+                    lines.append(f"• {cat}: {acc}")
 
-        if recent:
-            lines.append("\n*📈 График P&L:*")
-            pnl_values = [r.get("pnl_pct", 0) for r in recent[:20] if r.get("pnl_pct") is not None]
-            if pnl_values:
-                max_pnl = max(max(pnl_values), 1)
-                min_pnl = min(min(pnl_values), -1)
-                range_pnl = max_pnl - min_pnl
-                chart_width = 20
-                for pnl in pnl_values:
-                    pos = int((pnl - min_pnl) / range_pnl * chart_width) if range_pnl > 0 else chart_width // 2
-                    bar = "█" * pos + "▄" + "░" * (chart_width - pos - 1)
-                    emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-                    lines.append(f"{emoji} {pnl:+5.0f}% |{bar}|")
-                lines.append("           └" + "┴" * 10 + "┘")
+        recent_match = re.search(r'## 📋 Последние закрытые прогнозы\s*\|[^\n]+\|[^\n]+\|\s*\n((?:\|[^\n]+\|\n)+)', content)
+        if recent_match:
+            lines.append("\n*📋 Последние прогнозы:*")
+            for row in recent_match.group(1).strip().split('\n')[:8]:
+                cols = [c.strip() for c in row.split('|')[1:-1]]
+                if len(cols) >= 4:
+                    asset = cols[0]
+                    direction = cols[1][:15]
+                    result = cols[3]
+                    emoji = "✅" if "WIN" in result or "верно" in result.lower() else "❌"
+                    lines.append(f"{emoji} {asset} {direction}")
 
-            lines.append("\n*📋 История прогнозов:*")
-            for r in recent[:15]:
-                result = r.get("result", "")
-                if result == "win":
-                    emoji = "✅"
-                elif result == "loss":
-                    emoji = "❌"
-                elif result == "caution":
-                    emoji = "⚠️"
-                else:
-                    emoji = "❓"
-                pnl = r.get("pnl_pct") or 0
-                asset = r.get("asset", "")
-                direction = r.get("direction", "")
-                date = (r.get("created_at") or "")[:10]
-                lines.append(
-                    f"{emoji} {date} | {asset[:12]:12} | {direction[:15]:15} | {pnl:+.0f}%"
-                )
+        lines.append("\n⚠️ _Прошлые результаты не гарантируют будущих. Не финансовый совет._")
 
-        lines.append(
-            "\n⚠️ _Прошлые результаты не гарантируют будущих. Не финансовый совет._"
-        )
-        
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🌍 Global", callback_data="cmd_trackrecordglobal"),
