@@ -55,7 +55,7 @@ from user_profile import (
     format_profile_card, save_profile
 )
 from weekly_report import build_weekly_report
-from russia_data import fetch_russia_context
+from russia_data import fetch_russia_context, fetch_cbr_data
 from russia_agents import run_russia_analysis
 from debate_storage import ping_redis, save_debate_redis
 
@@ -1242,6 +1242,7 @@ async def cmd_status(message: Message):
     wait_msg = await message.answer("⏳ Загружаю...")
     try:
         prices, _ = await get_full_realtime_context()
+        cbr_data = await fetch_cbr_data()
         
         now = datetime.now().strftime("%d.%m %H:%M UTC")
         
@@ -1265,10 +1266,12 @@ async def cmd_status(message: Message):
                 lines.append(f"{icon} {label}: ${price:,.0f} {emoji}{change:+.1f}%")
         
         # Валюты
-        lines.append("")
-        lines.append("💵 ВАЛЮТЫ")
-        lines.append("USD/RUB: загружаю...")
-        lines.append("EUR/RUB: загружаю...")
+        if cbr_data:
+            lines.append("")
+            lines.append("💵 ВАЛЮТЫ (ЦБ РФ)")
+            for line in cbr_data.strip().split('\n')[:3]:
+                if line.strip():
+                    lines.append(line)
         
         # Фондовые
         lines.append("")
