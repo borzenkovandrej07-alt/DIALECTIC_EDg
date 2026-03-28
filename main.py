@@ -1560,7 +1560,15 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
-        await message.answer("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
+        full_text = "\n".join(lines)
+        
+        if len(full_text) > 4000:
+            part1 = "\n".join(lines[:40])
+            part2 = "\n".join(lines[40:])
+            await message.answer(part1, parse_mode="Markdown")
+            await message.answer(part2, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await message.answer(full_text, parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as e:
         logger.error(f"Trackrecord error: {e}", exc_info=True)
