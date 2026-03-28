@@ -1358,14 +1358,13 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                     if len(predictions) > 0:
                         break
 
-        if not report_type:
-            total = len(predictions)
-            wins = sum(1 for p in predictions if "WIN" in p["result"])
-            losses = sum(1 for p in predictions if "LOSS" in p["result"])
-            pending = 0
-            total = wins + losses if (wins + losses) > 0 else len(predictions)
-            if total > 0:
-                winrate = (wins / total * 100)
+        total = len(predictions)
+        wins = sum(1 for p in predictions if "WIN" in p["result"])
+        losses = sum(1 for p in predictions if "LOSS" in p["result"])
+        pending = 0
+        total = wins + losses if (wins + losses) > 0 else len(predictions)
+        if total > 0:
+            winrate = wins / total * 100
 
         if total == 0:
             await message.answer(
@@ -1393,14 +1392,26 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
         lines.append(f"Точность:           {wr_emoji} {winrate:.1f}%")
         
-        if avg_pnl:
+        if predictions:
+            pnls = [p["pnl"] for p in predictions if p["pnl"]]
+            if pnls:
+                calc_avg_pnl = sum(pnls) / len(pnls)
+                pnl_emoji = "🟢" if calc_avg_pnl > 0 else "🔴"
+                lines.append(f"Средний P&L:        {pnl_emoji} {calc_avg_pnl:+.1f}%")
+                
+                best = max(pnls)
+                worst = min(pnls)
+                if best > 0:
+                    lines.append(f"Лучший сигнал:      🏆 +{best:.1f}%")
+                if worst < 0:
+                    lines.append(f"Худший сигнал:      💀 {worst:.1f}%")
+        elif avg_pnl:
             pnl_emoji = "🟢" if avg_pnl > 0 else "🔴"
             lines.append(f"Средний P&L:        {pnl_emoji} {avg_pnl:+.1f}%")
-        
-        if best_call:
-            lines.append(f"Лучший сигнал:      🏆 +{best_call:.1f}%")
-        if worst_call:
-            lines.append(f"Худший сигнал:      💀 {worst_call:.1f}%")
+            if best_call:
+                lines.append(f"Лучший сигнал:      🏆 +{best_call:.1f}%")
+            if worst_call:
+                lines.append(f"Худший сигнал:      💀 {worst_call:.1f}%")
 
         lines.append("")
         lines.append("═" * 32)
