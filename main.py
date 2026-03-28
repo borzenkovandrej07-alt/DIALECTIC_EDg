@@ -672,6 +672,7 @@ async def cmd_start(message: Message):
         "• /weeklyreport — отчёт за неделю\n"
         "• /subscribe — авторассылка\n"
         "• /markets — текущие цены\n"
+        "• /status — краткий статус (можно закрепить)\n"
         "• /russia — анализ для российского рынка 🇷🇺\n\n"
         "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
         parse_mode="Markdown"
@@ -1247,44 +1248,50 @@ async def cmd_status(message: Message):
         lines = [
             f"📊 СТАТУС РЫНКОВ",
             f"_{now}_",
-            "",
-            "═" * 28,
-            "💰 КРИПТА",
-            "═" * 28,
+            ""
         ]
         
+        # Крипта
+        lines.append("💰 КРИПТА")
         for k, label, icon in [
             ("BTC", "Bitcoin", "₿"),
             ("ETH", "Ethereum", "Ξ"),
-            ("SOL", "Solana", "◎")
         ]:
             if k in prices:
                 p = prices[k]
                 price = p.get("price", 0)
                 change = p.get("change_24h", 0)
                 emoji = "🟢" if change >= 0 else "🔴"
-                lines.append(f"{icon} {label}:   ${price:,.0f}  {emoji} {change:+.1f}%")
+                lines.append(f"{icon} {label}: ${price:,.0f} {emoji}{change:+.1f}%")
         
-        lines.extend(["", "═" * 28, "🌍 ФОНДОВЫЕ", "═" * 28])
+        # Валюты
+        lines.append("")
+        lines.append("💵 ВАЛЮТЫ")
+        lines.append("USD/RUB: загружаю...")
+        lines.append("EUR/RUB: загружаю...")
         
-        for k, label in [("SPX", "S&P 500"), ("NDX", "Nasdaq"), ("VIX", "VIX")]:
+        # Фондовые
+        lines.append("")
+        lines.append("📈 ИНДЕКСЫ")
+        for k, label in [("SPX", "S&P"), ("NDX", "Nasdaq"), ("VIX", "VIX")]:
             if k in prices:
                 p = prices[k]
                 price = p.get("price", 0)
                 change = p.get("change_24h", 0)
                 emoji = "🟢" if change >= 0 else "🔴"
-                lines.append(f"{label:<10} {price:,.0f}  {emoji} {change:+.1f}%")
+                lines.append(f"{label}: {price:,.0f} {emoji}{change:+.1f}%")
         
+        # Макро
         if "MACRO" in prices:
             m = prices["MACRO"]
             fng = m.get("fng", {})
             fv = fng.get("val", "N/A")
             fs = fng.get("status", "")
-            lines.extend(["", "═" * 28, "📈 МАКРО", "═" * 28])
-            lines.append(f"Fear&Greed: {fv}/100 ({fs})")
-            lines.append(f"Ставка ФРС: {m.get('fed_rate', 'N/A')}%")
+            lines.append("")
+            lines.append(f"F&Greed: {fv}/100 ({fs})")
         
-        lines.extend(["", "═" * 28, "⚠️ НЕ ЯВЛЯЕТСЯ ФИНАНСОВЫМ СОВЕТОМ", "═" * 28])
+        lines.append("")
+        lines.append("⚠️ Не финансовый совет")
         
         await bot.edit_message_text(
             "\n".join(lines),
