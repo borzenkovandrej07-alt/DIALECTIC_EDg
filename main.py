@@ -1250,7 +1250,7 @@ async def cmd_market(message: Message):
     await handle_market_command(message, message.text or "/market")
 
 
-async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ"):
+async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ", filter_type: str = "all"):
     await upsert_user(message.from_user.id)
     try:
         import aiohttp
@@ -1358,6 +1358,18 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                     if len(predictions) > 0:
                         break
 
+        if filter_type and filter_type != "all":
+            filtered = []
+            for p in predictions:
+                result = p["result"].upper()
+                if filter_type == "win" and "WIN" in result:
+                    filtered.append(p)
+                elif filter_type == "loss" and "LOSS" in result:
+                    filtered.append(p)
+                elif filter_type == "caution" and "CAUTION" in result:
+                    filtered.append(p)
+            predictions = filtered
+
         total = len(predictions)
         wins = sum(1 for p in predictions if "WIN" in p["result"])
         losses = sum(1 for p in predictions if "LOSS" in p["result"])
@@ -1375,8 +1387,12 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
 
         icon = "🌍" if report_type == "global" else "🇷🇺" if report_type == "russia" else "📊"
         
+        filter_label = ""
+        if filter_type and filter_type != "all":
+            filter_label = f" [{filter_type.upper()}]"
+        
         lines = [
-            f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD",
+            f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD{filter_label}",
             f"_{last_update}_",
             "",
             "═" * 32,
@@ -1414,15 +1430,16 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                 lines.append(f"Худший сигнал:      💀 {worst_call:.1f}%")
 
         lines.append("")
-        lines.append("═" * 32)
-        lines.append("📋 ПОСЛЕДНИЕ ПРОГНОЗЫ")
-        lines.append("═" * 32)
-        lines.append(f"{'Дата':<12} {'Актив':<12} {'Результат':<10} {'P&L'}")
-        lines.append("─" * 32)
+        lines.append("═" * 36)
+        lines.append("📋 ПРОГНОЗЫ")
+        lines.append("═" * 36)
+        lines.append(f"{'Дата':<8} {'Актив':<10} {'Направление':<14} {'Рез.':<6} {'P&L'}")
+        lines.append("─" * 36)
 
-        for p in predictions[:12]:
-            date = p["date"][-5:]
-            asset = p["asset"][:10]
+        for p in predictions[:15]:
+            date = p["date"][-5:] if p["date"] else ""
+            asset = p["asset"][:8] if p["asset"] else ""
+            direction = p["direction"][:12] if p["direction"] else ""
             result = p["result"]
             pnl = p["pnl"]
             
@@ -1435,24 +1452,62 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             else:
                 res_emoji = "⏳"
             
-            lines.append(f"{date:<12} {asset:<12} {res_emoji:<10} {pnl:+.1f}%")
+            lines.append(f"{date:<8} {asset:<10} {direction:<14} {res_emoji:<6} {pnl:+.1f}%")
 
+        if len(predictions) > 15:
+            lines.append(f"... и ещё {len(predictions) - 15} прогнозов")
+        
         lines.append("")
         lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🌍 Global", callback_data="cmd_trackrecordglobal"),
-                InlineKeyboardButton(text="🇷🇺 Россия", callback_data="cmd_trackrecordrussia"),
-                InlineKeyboardButton(text="📊 Всё", callback_data="cmd_trackrecord"),
-            ]
+        keyboard_buttons = []
+        
+        type_label = {"global": "GLOBAL", "russia": "РОССИЯ", None: "ВСЕ"}.get(report_type, "ВСЕ")
+        
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="🌍 Global", callback_data=f"tr_type:global"),
+            InlineKeyboardButton(text="🇷🇺 Россия", callback_data=f"tr_type:russia"),
+            InlineKeyboardButton(text="📊 Все", callback_data=f"tr_type:all"),
         ])
+        
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="✅ WIN", callback_data=f"tr_filter:win:{type_label}"),
+            InlineKeyboardButton(text="❌ LOSS", callback_data=f"tr_filter:loss:{type_label}"),
+            InlineKeyboardButton(text="⚠️ CAUTION", callback_data=f"tr_filter:caution:{type_label}"),
+            InlineKeyboardButton(text="📋 Все", callback_data=f"tr_filter:all:{type_label}"),
+        ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
         await message.answer("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as e:
         logger.error(f"Trackrecord error: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.callback_query(F.data.startswith("tr_type:"))
+async def cb_tr_type(callback: CallbackQuery):
+    await callback.answer()
+    data = callback.data.split(":")
+    report_type = data[1] if len(data) > 1 and data[1] != "all" else None
+    title = "GLOBAL" if report_type == "global" else "РОССИЯ" if report_type == "russia" else "АГЕНТОВ"
+    await _cmd_trackrecord(callback.message, report_type=report_type, title=title)
+
+
+@dp.callback_query(F.data.startswith("tr_filter:"))
+async def cb_tr_filter(callback: CallbackQuery):
+    await callback.answer()
+    data = callback.data.split(":")
+    if len(data) < 3:
+        return
+    
+    filter_type = data[1]
+    type_label = data[2]
+    
+    report_type = "global" if type_label == "GLOBAL" else "russia" if type_label == "РОССИЯ" else None
+    
+    await _cmd_trackrecord(callback.message, report_type=report_type, title=f"{type_label} ({filter_type.upper()})", filter_type=filter_type)
 
 
 @dp.message(Command("trackrecord"))
