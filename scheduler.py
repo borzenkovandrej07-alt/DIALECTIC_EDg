@@ -13,11 +13,18 @@ scheduler.py — Фоновые задачи по расписанию.
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, date
 from database import (
     get_daily_subscribers,
     reset_daily_counts,
 )
+
+try:
+    from alert_system import AlertSystem
+    ALERT_SYSTEM_ENABLED = True
+except ImportError:
+    ALERT_SYSTEM_ENABLED = False
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +35,32 @@ class Scheduler:
         self.send_daily = send_daily_fn
         self.check_predictions = check_predictions_fn
         self._running = False
-        # ИСПРАВЛЕНО: трекаем дату последнего экспорта чтобы не дублировать
         self._last_export_date: date | None = None
+        self._alert_system = None
+        
+        if ALERT_SYSTEM_ENABLED:
+            try:
+                github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+                self._alert_system = AlertSystem(self.bot, github_repo)
+                logger.info("✅ Alert system инициализирован")
+            except Exception as e:
+                logger.warning(f"Alert system init error: {e}")
 
     async def start(self):
         self._running = True
         logger.info("⏰ Scheduler запущен")
 
-        await asyncio.gather(
+        tasks = [
             self._daily_digest_loop(),
             self._prediction_checker_loop(),
             self._midnight_reset_loop(),
-            self._daily_github_export_loop(),   # ← раз в сутки, не после каждого /daily
-        )
+            self._daily_github_export_loop(),
+        ]
+        
+        if ALERT_SYSTEM_ENABLED and self._alert_system:
+            tasks.append(self._alert_checker_loop())
+        
+        await asyncio.gather(*tasks)
 
     async def _daily_digest_loop(self):
         """Каждую минуту проверяет — не пора ли слать дайджест подписчикам."""
@@ -125,6 +145,26 @@ class Scheduler:
 
             # Проверяем каждую минуту (синхронизируемся с минутным циклом)
             await asyncio.sleep(60)
+
+    async def _alert_checker_loop(self):
+        """Проверяет серию вердиктов и шлёт алерт подписчикам каждые 4 часа."""
+        await asyncio.sleep(300)  # ждём 5 минут при старте
+
+        while self._running:
+            try:
+                if self._alert_system is None:
+                    await asyncio.sleep(3600)
+                    continue
+
+                subscribers = await get_daily_subscribers()
+                if subscribers:
+                    sent = await self._alert_system.check_and_alert(subscribers)
+                    if sent > 0:
+                        logger.info(f"📢 Алерты отправлены: {sent}")
+            except Exception as e:
+                logger.error(f"Alert checker error: {e}")
+
+            await asyncio.sleep(4 * 3600)  # каждые 4 часа
 
     async def export_now(self):
         """
