@@ -104,7 +104,7 @@ scheduler: Scheduler = None
 # {user_id: {"rounds": [...], "full_report": str}}
 
 # Кэш РФ анализа (обновляется вместе с /daily)
-russia_cache: dict = {}  # {"report": str, "timestamp": str}
+russia_cache: dict = {}  # {"report": str, "timestamp": str, "sections": {...}, "ts": float}
 debate_cache: dict = {}  # {user_id: {"rounds": [...], "full": str}}
 
 
@@ -1120,6 +1120,37 @@ async def cmd_russia(message: Message):
             pass  # сообщение уже удалено — не критично
 
         await send_russia_chart_photo(message.chat.id, report)
+        
+        # Парсим секции для навигации
+        opportunities = ""
+        risks = ""
+        synthesis = ""
+        
+        sections = report.split("─" * 30)
+        if len(sections) >= 4:
+            opportunities = sections[1].strip() if len(sections) > 1 else ""
+            risks = sections[2].strip() if len(sections) > 2 else ""
+            synthesis = sections[3].strip() if len(sections) > 3 else ""
+        
+        # Сохраняем секции в кэш для навигации
+        russia_cache["sections"] = {
+            "opportunities": opportunities,
+            "risks": risks,
+            "synthesis": synthesis
+        }
+        
+        # Клавиатура навигации
+        nav_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 Возможности", callback_data="russia_nav:opp"),
+                InlineKeyboardButton(text="🔴 Риски", callback_data="russia_nav:risk"),
+            ],
+            [
+                InlineKeyboardButton(text="⚖️ Итог", callback_data="russia_nav:synth"),
+                InlineKeyboardButton(text="📊 Полный", callback_data="russia_nav:full"),
+            ]
+        ])
+        
         for chunk in split_message(report):
             await message.answer(clean_markdown(chunk), parse_mode="Markdown")
 
@@ -1127,6 +1158,12 @@ async def cmd_russia(message: Message):
             "💬 *Был ли анализ полезным?*",
             parse_mode="Markdown",
             reply_markup=feedback_keyboard("russia")
+        )
+        
+        await message.answer(
+            "📍 *Навигация по разделам:*",
+            parse_mode="Markdown",
+            reply_markup=nav_keyboard
         )
 
     except Exception as e:
@@ -1144,6 +1181,46 @@ async def cmd_russia(message: Message):
 
 
 # ─── Выбор перед /russia ──────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("russia_nav:"))
+async def handle_russia_nav(callback: CallbackQuery):
+    await callback.answer()
+    data = callback.data.split(":")
+    section = data[1] if len(data) > 1 else "full"
+    
+    sections = russia_cache.get("sections", {})
+    
+    full_report = russia_cache.get("report", "")
+    
+    text = ""
+    if section == "opp":
+        text = sections.get("opportunities", "Раздел не найден")
+    elif section == "risk":
+        text = sections.get("risks", "Раздел не найден")
+    elif section == "synth":
+        text = sections.get("synthesis", "Раздел не найден")
+    elif section == "full":
+        text = full_report[:3500] if full_report else "Отчёт не найден. Запусти /russia заново."
+    else:
+        text = "Выбери раздел:"
+    
+    nav_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 Возможности", callback_data="russia_nav:opp"),
+            InlineKeyboardButton(text="🔴 Риски", callback_data="russia_nav:risk"),
+        ],
+        [
+            InlineKeyboardButton(text="⚖️ Итог", callback_data="russia_nav:synth"),
+            InlineKeyboardButton(text="📊 Полный", callback_data="russia_nav:full"),
+        ]
+    ])
+    
+    await callback.message.answer(
+        f"📍 *Раздел:* {section.upper()}\n\n{text[:3500]}",
+        parse_mode="Markdown",
+        reply_markup=nav_keyboard
+    )
+
 
 @dp.callback_query(F.data.startswith("russia_choice:"))
 async def handle_russia_choice(callback: CallbackQuery):
