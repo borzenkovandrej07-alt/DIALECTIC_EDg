@@ -129,16 +129,18 @@ class Scheduler:
                 now = datetime.now()
                 today = now.date()
 
-                # Экспортируем раз в сутки в 00:05
-                if (now.hour == 0 and now.minute == 5
-                        and self._last_export_date != today):
-                    from github_export import export_to_github
-                    success = await export_to_github()
-                    if success:
-                        self._last_export_date = today
-                        logger.info("✅ Track record экспортирован на GitHub (ежесуточно)")
-                    else:
-                        logger.warning("⚠️ GitHub export не выполнен — проверь GITHUB_TOKEN")
+                # Экспорт ОТКЛЮЧЕН — теперь вручную
+                # Включить: раскомментировать ниже
+                # if (now.hour == 0 and now.minute == 5
+                #         and self._last_export_date != today):
+                #     from github_export import export_to_github
+                #     success = await export_to_github()
+                #     if success:
+                #         self._last_export_date = today
+                #         logger.info("✅ Track record экспортирован на GitHub (ежесуточно)")
+                #     else:
+                #         logger.warning("⚠️ GitHub export не выполнен — проверь GITHUB_TOKEN")
+                pass
 
             except Exception as e:
                 logger.error(f"GitHub export error: {e}")
