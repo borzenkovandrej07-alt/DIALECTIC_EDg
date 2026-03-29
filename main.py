@@ -1520,6 +1520,7 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                         pred_type = parts[2] if len(parts) > 2 else ""
                         asset = parts[3] if len(parts) > 3 else ""
                         forecast = parts[4] if len(parts) > 4 else ""
+                        fact = parts[5] if len(parts) > 5 else ""
                         result = parts[6] if len(parts) > 6 else ""
                         
                         is_russia = "Russia" in pred_type or any(kw in asset.lower() for kw in russia_keywords)
@@ -1535,6 +1536,7 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                             "type": pred_type,
                             "asset": asset,
                             "forecast": forecast[:30],
+                            "fact": fact[:30],
                             "result": result,
                             "is_russia": is_russia
                         })
@@ -1633,9 +1635,10 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         
         for p in predictions:
             date = p.get("date", "")[:8]
-            asset = p.get("asset", "")[:20]
-            forecast = p.get("forecast", "")[:40]
+            asset = p.get("asset", "")[:15]
+            forecast = p.get("forecast", "")[:30]
             result = p.get("result", "")
+            fact = p.get("fact", "")[:30]
             
             if "Верно" in result:
                 res_emoji = "✅"
@@ -1646,7 +1649,13 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             else:
                 res_emoji = "⏳"
             
-            lines.append(f"{date} | {asset:<20} | {forecast:<40} | {res_emoji}")
+            # Для LOSS/CAUTION показываем больше инфы
+            if filter_type and filter_type != "all" and fact:
+                lines.append(f"{res_emoji} {date} {asset}")
+                lines.append(f"   Прогноз: {forecast}")
+                lines.append(f"   Факт:    {fact}")
+            else:
+                lines.append(f"{res_emoji} {date} {asset:<15} {forecast:<30}")
 
         lines.append("")
         lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
