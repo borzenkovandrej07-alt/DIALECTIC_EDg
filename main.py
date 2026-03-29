@@ -1502,98 +1502,45 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                     break
 
         predictions = []
-        errors = []
-        caution_notes = []
-        problems = []
-        
-        in_predictions = False
-        in_errors = False
-        in_caution = False
-        in_problems = False
         
         for line in content.split('\n'):
-            if '## 📝 Все прогнозы' in line:
-                in_predictions = True
-                in_errors = False
-                in_caution = False
-                in_problems = False
+            # Новый формат таблицы
+            if '## 📋 Последние закрытые прогнозы' in line:
                 continue
-            if '## ❌ Разбор ошибок' in line:
-                in_predictions = False
-                in_errors = True
-                in_caution = False
-                in_problems = False
-                continue
-            if '## ⚠️ Примечание по "правильной осторожности"' in line:
-                in_predictions = False
-                in_errors = False
-                in_caution = True
-                in_problems = False
-                continue
-            if '## ⚠️ Известные проблемы' in line:
-                in_predictions = False
-                in_errors = False
-                in_caution = False
-                in_problems = True
-                continue
-            
-            if line.strip().startswith('|') and '---' not in line:
+            if line.strip().startswith('|') and '---' not in line and 'Дата' not in line:
                 parts = [p.strip() for p in line.split('|')[1:-1]]
-                
-                if in_predictions and len(parts) >= 7:
+                if len(parts) >= 5:
                     try:
-                        num = parts[0]
-                        date = parts[1]
-                        pred_type = parts[2]
-                        asset = parts[3]
-                        forecast = parts[4]
-                        fact = parts[5]
-                        result = parts[6]
+                        date = parts[0]
+                        asset = parts[1]
+                        direction = parts[2]
+                        result = parts[4]
+                        pnl = parts[5] if len(parts) > 5 else ""
                         
-                        is_russia = pred_type == "Russia Edge" or any(kw in asset.lower() for kw in russia_keywords)
-                        
-                        if report_type == "global" and is_russia:
-                            pass
-                        elif report_type == "russia" and not is_russia:
-                            pass
-                        else:
-                            predictions.append({
-                                "num": num,
-                                "date": date,
-                                "type": pred_type,
-                                "asset": asset,
-                                "forecast": forecast[:30],
-                                "fact": fact[:30],
-                                "result": result,
-                                "is_russia": is_russia
-                            })
+                        predictions.append({
+                            "date": date,
+                            "asset": asset,
+                            "forecast": direction[:30],
+                            "result": result,
+                            "pnl": pnl
+                        })
                     except:
                         pass
-                
-                elif in_errors and len(parts) >= 4:
-                    errors.append({
-                        "date": parts[0],
-                        "asset": parts[1],
-                        "forecast": parts[2],
-                        "fact": parts[3]
-                    })
-                
-                elif in_caution and len(parts) >= 5:
-                    caution_notes.append({
-                        "date": parts[0],
-                        "asset": parts[1],
-                        "forecast": parts[2],
-                        "fact": parts[3],
-                        "why": parts[4]
-                    })
-                
-                elif in_problems and len(parts) >= 3:
-                    problems.append({
-                        "date": parts[0],
-                        "problem": parts[1],
-                        "status": parts[2]
-                    })
-
+        
+        # Парсим статы из таблицы
+        total_match = re.search(r'Всего прогнозов.*?(\d+)', content)
+        if total_match:
+            total = int(total_match.group(1))
+        
+        wins_match = re.search(r'Прибыльных.*?(\d+)', content)
+        if wins_match:
+            wins = int(wins_match.group(1))
+        
+        losses_match = re.search(r'Убыточных.*?(\d+)', content)
+        if losses_match:
+            losses = int(losses_match.group(1))
+        
+        # Фильтрация по типу
         if filter_type and filter_type != "all":
             filtered = []
             for p in predictions:
@@ -1606,10 +1553,10 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                     filtered.append(p)
             predictions = filtered
 
-        total = len(predictions)
-        wins = sum(1 for p in predictions if "Верно" in p["result"])
-        cautions = sum(1 for p in predictions if "Осторожность" in p["result"])
-        losses = sum(1 for p in predictions if "Неверно" in p["result"])
+        total = len(predictions) if total == 0 else total
+        wins = sum(1 for p in predictions if "WIN" in p["result"].upper())
+        cautions = sum(1 for p in predictions if "CAUTION" in p["result"].upper())
+        losses = sum(1 for p in predictions if "LOSS" in p["result"].upper())
 
         if total == 0:
             await message.answer(
