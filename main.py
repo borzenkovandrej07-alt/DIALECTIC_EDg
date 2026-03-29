@@ -1631,9 +1631,9 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         lines.append("📝 ПРОГНОЗЫ")
         
         for p in predictions:
-            date = p.get("date", "")[:5]
-            asset = p.get("asset", "")[:12]
-            forecast = p.get("forecast", "")[:20]
+            date = p.get("date", "")[:8]
+            asset = p.get("asset", "")[:20]
+            forecast = p.get("forecast", "")[:40]
             result = p.get("result", "")
             
             if "Верно" in result:
@@ -1645,7 +1645,7 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             else:
                 res_emoji = "⏳"
             
-            lines.append(f"{date} | {asset:<12} | {forecast:<20} | {res_emoji}")
+            lines.append(f"{date} | {asset:<20} | {forecast:<40} | {res_emoji}")
 
         lines.append("")
         lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
