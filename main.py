@@ -1560,19 +1560,19 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
         if filter_type and filter_type != "all":
             filtered = []
             for p in predictions:
-                result = p["result"].upper()
-                if filter_type == "win" and "WIN" in result:
+                result = p["result"]
+                if filter_type == "win" and ("Верно" in result or "✅" in result):
                     filtered.append(p)
-                elif filter_type == "loss" and "LOSS" in result:
+                elif filter_type == "loss" and ("Неверно" in result or "❌" in result):
                     filtered.append(p)
-                elif filter_type == "caution" and "CAUTION" in result:
+                elif filter_type == "caution" and ("Осторожность" in result or "⚠️" in result):
                     filtered.append(p)
             predictions = filtered
 
         total = len(predictions) if total == 0 else total
-        wins = sum(1 for p in predictions if "WIN" in p["result"].upper())
-        cautions = sum(1 for p in predictions if "CAUTION" in p["result"].upper())
-        losses = sum(1 for p in predictions if "LOSS" in p["result"].upper())
+        wins = sum(1 for p in predictions if "Верно" in p["result"] or "✅" in p["result"])
+        cautions = sum(1 for p in predictions if "Осторожность" in p["result"] or "⚠️" in p["result"])
+        losses = sum(1 for p in predictions if "Неверно" in p["result"] or "❌" in p["result"])
 
         if total == 0:
             await message.answer(
