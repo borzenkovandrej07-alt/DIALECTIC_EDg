@@ -1634,28 +1634,6 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             
             lines.append(f"{date} | {asset:<12} | {forecast:<20} | {res_emoji}")
 
-        if errors:
-            lines.append("")
-            lines.append("❌ ОШИБКИ")
-            for err in errors:
-                lines.append(f"• {err['date']} | {err['asset']}")
-                lines.append(f"  Прогноз: {err['forecast']}")
-                lines.append(f"  Факт:    {err['fact']}")
-
-        if caution_notes:
-            lines.append("")
-            lines.append("⚠️ ОСТОРОЖНОСТЬ")
-            for note in caution_notes:
-                lines.append(f"• {note['date']} | {note['asset']}")
-                lines.append(f"  Прогноз: {note['forecast']}")
-                lines.append(f"  Почему:  {note.get('why', 'верно')}")
-
-        if problems:
-            lines.append("")
-            lines.append("⚠️ ПРОБЛЕМЫ")
-            for prob in problems:
-                lines.append(f"• {prob['date']} | {prob['problem']} | {prob['status']}")
-        
         lines.append("")
         lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
 
