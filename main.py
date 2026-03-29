@@ -1569,14 +1569,15 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                     filtered.append(p)
             predictions = filtered
 
-        total = len(predictions) if total == 0 else total
+        # Считаем статистику из отфильтрованных прогнозов
         wins = sum(1 for p in predictions if "Верно" in p["result"] or "✅" in p["result"])
         cautions = sum(1 for p in predictions if "Осторожность" in p["result"] or "⚠️" in p["result"])
         losses = sum(1 for p in predictions if "Неверно" in p["result"] or "❌" in p["result"])
+        total = wins + cautions + losses
 
         if total == 0:
             await message.answer(
-                "📊 TRACK RECORD\n\nПрогнозов пока нет.\nЗапусти /daily — агенты начнут делать прогнозы.",
+                "📊 TRACK RECORD\n\nПрогнозов не найдено с таким фильтром.",
                 parse_mode="Markdown"
             )
             return
@@ -1594,7 +1595,7 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
             filled = int(pct * length)
             return "█" * filled + "░" * (length - filled)
 
-        finished = wins + losses + cautions
+        finished = total
         lines = [
             f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD{filter_label}",
             f"_{period}_" if period else f"_{last_update}_",
@@ -1614,14 +1615,14 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                 f"❌ LOSS  [{loss_bar}] {losses}/{finished} ({losses*100//finished}%)",
             ])
 
-        wr_emoji = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
-        if winrate > 0:
-            lines.append(f"Точность: {wr_emoji} {winrate:.1f}%")
-        if protection > 0:
-            prot_emoji = "🟢" if protection >= 90 else "🟡"
-            lines.append(f"🛡️ Защита: {prot_emoji} {protection:.1f}%")
+        # Точность только из отфильтрованных
+        if finished > 0:
+            winrate_calc = wins / finished * 100
+            wr_emoji = "🟢" if winrate_calc >= 55 else "🟡" if winrate_calc >= 45 else "🔴"
+            lines.append(f"Точность: {wr_emoji} {winrate_calc:.1f}%")
 
-        if categories:
+        # Категории показываем только без фильтра
+        if categories and (not filter_type or filter_type == "all"):
             lines.append("")
             lines.append("📈 КАТЕГОРИИ")
             for cat in categories[:6]:
