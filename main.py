@@ -1503,29 +1503,32 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
 
         predictions = []
         
+        in_forecasts = False
         for line in content.split('\n'):
-            # Новый формат таблицы
-            if '## 📋 Последние закрытые прогнозы' in line:
+            if '## 📝 Все прогнозы' in line:
+                in_forecasts = True
                 continue
-            if line.strip().startswith('|') and '---' not in line and 'Дата' not in line:
+            if in_forecasts and line.strip().startswith('|') and '---' not in line:
+                if '№' in line or 'Дата' in line:
+                    continue
                 parts = [p.strip() for p in line.split('|')[1:-1]]
-                if len(parts) >= 5:
+                if len(parts) >= 6:
                     try:
-                        date = parts[0]
-                        asset = parts[1]
-                        direction = parts[2]
-                        result = parts[4]
-                        pnl = parts[5] if len(parts) > 5 else ""
+                        date = parts[1] if len(parts) > 1 else ""
+                        asset = parts[3] if len(parts) > 3 else ""
+                        forecast = parts[4] if len(parts) > 4 else ""
+                        result = parts[6] if len(parts) > 6 else ""
                         
                         predictions.append({
                             "date": date,
                             "asset": asset,
-                            "forecast": direction[:30],
-                            "result": result,
-                            "pnl": pnl
+                            "forecast": forecast[:30],
+                            "result": result
                         })
                     except:
                         pass
+            if in_forecasts and line.strip().startswith('##') and 'Все прогнозы' not in line:
+                break
         
         # Парсим статы из таблицы
         total_match = re.search(r'Всего прогнозов.*?(\d+)', content)
