@@ -1503,6 +1503,8 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
 
         predictions = []
         
+        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "офз", "нефть", "росси"]
+        
         in_forecasts = False
         for line in content.split('\n'):
             if '## 📝 Все прогнозы' in line:
@@ -1512,18 +1514,29 @@ async def _cmd_trackrecord(message: Message, report_type: str = None, title: str
                 if '№' in line or 'Дата' in line:
                     continue
                 parts = [p.strip() for p in line.split('|')[1:-1]]
-                if len(parts) >= 6:
+                if len(parts) >= 7:
                     try:
                         date = parts[1] if len(parts) > 1 else ""
+                        pred_type = parts[2] if len(parts) > 2 else ""
                         asset = parts[3] if len(parts) > 3 else ""
                         forecast = parts[4] if len(parts) > 4 else ""
                         result = parts[6] if len(parts) > 6 else ""
                         
+                        is_russia = "Russia" in pred_type or any(kw in asset.lower() for kw in russia_keywords)
+                        
+                        # Фильтрация по типу
+                        if report_type == "global" and is_russia:
+                            continue
+                        if report_type == "russia" and not is_russia:
+                            continue
+                        
                         predictions.append({
                             "date": date,
+                            "type": pred_type,
                             "asset": asset,
                             "forecast": forecast[:30],
-                            "result": result
+                            "result": result,
+                            "is_russia": is_russia
                         })
                     except:
                         pass
