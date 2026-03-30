@@ -151,49 +151,44 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
     ]
     
     # Текущие позиции топ-трейдеров
-    lines.append("═" * 30)
-    lines.append("🔥 ТОП-ТРЕЙДЕРЫ (Binance)")
-    lines.append("═" * 30)
+    lines.append("🔥 *ТОП-ТРЕЙДЕРЫ (Binance)*")
     
-    for symbol, data in binance_data.items():
-        name = symbol.replace("USDT", "")
-        long = data["long"]
-        short = data["short"]
-        
-        if long >= 60:
-            bar = "🟢" * int(long/10)
-        elif short >= 60:
-            bar = "🔴" * int(short/10)
-        else:
-            bar = "⚪️" * 5
-        
-        lines.append(f"{name}:")
-        lines.append(f"  🟢 Лонг: {long}%")
-        lines.append(f"  🔴 Шорт: {short}%")
-        lines.append(f"  {bar}")
-        lines.append("")
+    if not binance_data:
+        lines.append("Ситуация неопределена")
+    else:
+        for symbol, data in binance_data.items():
+            name = symbol.replace("USDT", "")
+            long = data["long"]
+            short = data["short"]
+            
+            if long >= 60:
+                bar = "🟢" * int(long/10)
+            elif short >= 60:
+                bar = "🔴" * int(short/10)
+            else:
+                bar = "⚪️" * 5
+            
+            lines.append(f"{name}:")
+            lines.append(f"  🟢 Лонг: {long}%")
+            lines.append(f"  🔴 Шорт: {short}%")
+            lines.append(f"  {bar}")
+            lines.append("")
     
     # Вердикт
     if verdict and verdict.get("verdict"):
         v = verdict["verdict"]
         emoji = "🐂" if v == "BULLISH" else "🐻" if v == "BEARISH" else "⚪️"
-        lines.append("═" * 30)
-        lines.append(f"{emoji} НАШ ВЕРДИКТ")
-        lines.append("═" * 30)
+        lines.append(f"{emoji} *НАШ ВЕРДИКТ*")
         lines.append(v)
-        lines.append("")
+    else:
+        lines.append("🎯 *НАШ ВЕРДИКТ*")
+        lines.append("Ситуация неопределена")
+    
+    lines.append("")
     
     # Сигналы
-    if not binance_data:
-        lines.append("═" * 30)
-        lines.append("⚠️ ДАННЫЕ НЕ ЗАГРУЖЕНЫ")
-        lines.append("═" * 30)
-        lines.append("Ситуация неопределена.")
-        lines.append("Попробуй позже.")
-    elif signals:
-        lines.append("═" * 30)
-        lines.append("🔔 СИГНАЛЫ")
-        lines.append("═" * 30)
+    if signals:
+        lines.append("🔔 *СИГНАЛЫ*")
         
         for s in signals:
             emoji = "🟢" if s["direction"] == "LONG" else "🔴"
@@ -204,11 +199,8 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
             lines.append(f"   {s['reason']}")
             lines.append("")
     else:
-        lines.append("═" * 30)
-        lines.append("⚪️ СИГНАЛОВ НЕТ")
-        lines.append("═" * 30)
-        lines.append("Ситуация неопределена.")
-        lines.append("Нет явных сигналов сейчас.")
+        lines.append("⚪️ *СИГНАЛЫ*")
+        lines.append("Ситуация неопределена")
     
     lines.extend([
         "",
