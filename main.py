@@ -1395,6 +1395,12 @@ async def cmd_status(message: Message):
             message_id=wait_msg.message_id,
             parse_mode="Markdown"
         )
+    except Exception as e:
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
 
 
 @dp.message(Command("signals"))
