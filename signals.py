@@ -1,54 +1,130 @@
 """
-signals.py — Сигналы на основе данных Binance и вердиктов Dialectic Edge.
+signals.py — Сигналы на основе данных Binance/Bybit и вердиктов Dialectic Edge.
 
 Логика:
-1. Получаем данные Binance (публичный API - без ключа)
-2. Читаем вердикт из DIGEST_CACHE
-3. Анализируем: изменение цены + funding rate + open interest
-4. Отправляем подписчикам через scheduler
+1. Получаем данные Bybit (позиции трейдеров) если есть API ключ
+2. Иначе используем публичный Binance API
+3. Читаем вердикт из DIGEST_CACHE
+4. Анализируем и генерируем сигналы
+5. Отправляем подписчикам через scheduler
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import os
 import re
+import time
 import aiohttp
 from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Binance API endpoints (публичные, без ключа)
+# API URLs
 BINANCE_FUTURES_URL = "https://fapi.binance.com"
+BYBIT_URL = "https://api.bybit.com"
 
 DIGEST_CACHE_URL = "https://raw.githubusercontent.com/{repo}/main/DIGEST_CACHE.md"
 
 # Пороги для сигналов
-PRICE_CHANGE_THRESHOLD = 2.0  # 2%+ изменение = сильный сигнал
-FUNDING_THRESHOLD = 0.0001    # funding rate порог
+PRICE_CHANGE_THRESHOLD = 2.0
+FUNDING_THRESHOLD = 0.0001
+TOP_TRADERS_THRESHOLD = 60  # 60%+ трейдеров в одну сторону
+
+
+def get_bybit_keys() -> tuple:
+    """Получает API ключи Bybit из переменных окружения."""
+    api_key = os.getenv("BYBIT_API_KEY", "")
+    secret = os.getenv("BYBIT_SECRET_KEY", "")
+    return api_key, secret
+
+
+async def fetch_bybit_long_short_ratio(symbols: list[str] = ["BTCUSDT", "ETHUSDT"]) -> dict:
+    """Получает данные позиций трейдеров с Bybit API."""
+    api_key, secret = get_bybit_keys()
+    results = {}
+    
+    if not api_key or not secret:
+        logger.info("Bybit API ключи не найдены, используем Binance")
+        return {}
+    
+    for symbol in symbols:
+        try:
+            # Bybit V5 API для account ratio
+            endpoint = "/v5/market/account-ratio"
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "interval": "15",  # 15 минут
+                "limit": 1
+            }
+            
+            # Генерируем подпись
+            timestamp = str(int(time.time() * 1000))
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            sign = hmac.new(
+                secret.encode(),
+                f"{timestamp}{api_key}{query_string}".encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            headers = {
+                "X-BAPI-API-KEY": api_key,
+                "X-BAPI-SIGN": sign,
+                "X-BAPI-SIGN-TYPE": "HmacSHA256",
+                "X-BAPI-TIMESTAMP": timestamp,
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                url = f"{BYBIT_URL}{endpoint}"
+                async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("retCode") == 0 and data.get("result", {}).get("list"):
+                            item = data["result"]["list"][0]
+                            long_ratio = float(item.get("longAccount", 0)) * 100
+                            short_ratio = float(item.get("shortAccount", 0)) * 100
+                            results[symbol] = {
+                                "long": round(long_ratio, 1),
+                                "short": round(short_ratio, 1),
+                                "dominant": "LONG" if long_ratio > short_ratio else "SHORT"
+                            }
+                            logger.info(f"Bybit data for {symbol}: long={long_ratio}%, short={short_ratio}%")
+                    else:
+                        logger.warning(f"Bybit API error: {resp.status}")
+                        
+        except Exception as e:
+            logger.warning(f"Bybit fetch error for {symbol}: {e}")
+    
+    return results
 
 
 async def fetch_binance_signals(symbols: list[str] = ["BTCUSDT", "ETHUSDT"]) -> dict:
-    """Получает данные с Binance: 24hr ticker + funding rate + open interest."""
+    """Получает данные: Bybit (если есть ключи) + Binance (fallback)."""
     results = {}
+    
+    # Сначала пробуем Bybit (позиции трейдеров)
+    bybit_data = await fetch_bybit_long_short_ratio(symbols)
     
     async with aiohttp.ClientSession() as session:
         for symbol in symbols:
             try:
-                # 1. 24hr ticker - изменение цены
+                # Всегда получаем данные Binance как baseline
                 ticker_url = f"{BINANCE_FUTURES_URL}/fapi/v1/ticker/24hr"
                 async with session.get(ticker_url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         ticker = await resp.json()
                         price_change = float(ticker.get("priceChangePercent", 0))
-                        volume = float(ticker.get("quoteVolume", 0))
                         
                         results[symbol] = {
                             "price_change": round(price_change, 2),
-                            "volume": volume,
+                            "volume": float(ticker.get("quoteVolume", 0)),
                             "last_price": float(ticker.get("lastPrice", 0)),
                         }
-                        
-                # 2. Funding rate
+                
+                # Funding rate
                 funding_url = f"{BINANCE_FUTURES_URL}/fapi/v1/fundingRate"
                 async with session.get(funding_url, params={"symbol": symbol, "limit": 1}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
@@ -58,12 +134,13 @@ async def fetch_binance_signals(symbols: list[str] = ["BTCUSDT", "ETHUSDT"]) -> 
                             results[symbol]["funding_rate"] = funding
                             results[symbol]["funding_direction"] = "LONG" if funding > 0 else "SHORT"
                 
-                # 3. Open Interest
-                oi_url = f"{BINANCE_FUTURES_URL}/fapi/v1/openInterest"
-                async with session.get(oi_url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        oi_data = await resp.json()
-                        results[symbol]["open_interest"] = float(oi_data.get("openInterest", 0))
+                # Если есть Bybit данные - мержим
+                if symbol in bybit_data:
+                    results[symbol]["long"] = bybit_data[symbol]["long"]
+                    results[symbol]["short"] = bybit_data[symbol]["short"]
+                    results[symbol]["dominant"] = bybit_data[symbol]["dominant"]
+                    results[symbol]["has_traders_data"] = True
+                    logger.info(f"Using Bybit data for {symbol}")
                         
             except Exception as e:
                 logger.warning(f"Binance API error for {symbol}: {e}")
@@ -102,7 +179,7 @@ async def fetch_verdict(github_repo: str) -> Optional[dict]:
 
 
 def analyze_signals(binance_data: dict, verdict: Optional[dict]) -> list:
-    """Анализирует данные и генерирует сигналы на основе price change + funding."""
+    """Анализирует данные и генерирует сигналы."""
     signals = []
     
     for symbol, data in binance_data.items():
@@ -110,8 +187,29 @@ def analyze_signals(binance_data: dict, verdict: Optional[dict]) -> list:
         funding = data.get("funding_rate", 0)
         funding_dir = data.get("funding_direction", "NEUTRAL")
         
-        # Сигнал 1: Сильное изменение цены
-        if abs(price_change) >= PRICE_CHANGE_THRESHOLD:
+        # Сигнал 1: Bybit позиции трейдеров (приоритет!)
+        long_pct = data.get("long", 0)
+        short_pct = data.get("short", 0)
+        
+        if long_pct >= TOP_TRADERS_THRESHOLD:
+            signals.append({
+                "type": "BYBIT_TRADERS",
+                "symbol": symbol,
+                "direction": "LONG",
+                "confidence": long_pct,
+                "reason": f"{long_pct}% трейдеров в лонге"
+            })
+        elif short_pct >= TOP_TRADERS_THRESHOLD:
+            signals.append({
+                "type": "BYBIT_TRADERS",
+                "symbol": symbol,
+                "direction": "SHORT",
+                "confidence": short_pct,
+                "reason": f"{short_pct}% трейдеров в шорте"
+            })
+        
+        # Сигнал 2: Сильное изменение цены (fallback если нет Bybit)
+        elif abs(price_change) >= PRICE_CHANGE_THRESHOLD:
             direction = "LONG" if price_change > 0 else "SHORT"
             confidence = min(abs(price_change) * 10, 95)
             signals.append({
@@ -122,7 +220,7 @@ def analyze_signals(binance_data: dict, verdict: Optional[dict]) -> list:
                 "reason": f"{price_change:+.2f}% за 24ч"
             })
         
-        # Сигнал 2: Funding rate
+        # Сигнал 3: Funding rate
         if abs(funding) >= FUNDING_THRESHOLD:
             direction = "LONG" if funding > 0 else "SHORT"
             confidence = min(abs(funding) * 100000, 80)
@@ -166,8 +264,10 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
         "",
     ]
     
-    # Данные рынка
-    lines.append("📊 *РЫНОК (Binance)*")
+    # Данные рынка (Bybit если есть, иначе Binance)
+    has_bybit = any(data.get("has_traders_data") for data in binance_data.values()) if binance_data else False
+    source = "Bybit" if has_bybit else "Binance"
+    lines.append(f"📊 *ТРЕЙДЕРЫ ({source})*")
     
     if not binance_data:
         lines.append("Ситуация неопределена")
@@ -176,16 +276,25 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
             name = symbol.replace("USDT", "")
             price_change = data.get("price_change", 0)
             funding = data.get("funding_rate", 0)
-            funding_dir = data.get("funding_direction", "NEUTRAL")
+            long_pct = data.get("long", 0)
+            short_pct = data.get("short", 0)
             
-            emoji = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪️"
-            change_str = f"{emoji} {price_change:+.2f}%"
-            
-            funding_str = f"Funding: {'🔼' if funding > 0 else '🔽'}{funding*100:.4f}%"
-            
-            lines.append(f"{name}:")
-            lines.append(f"  {change_str}")
-            lines.append(f"  {funding_str}")
+            # Если есть данные Bybit трейдеров
+            if long_pct > 0 or short_pct > 0:
+                dominant = "🟢" if long_pct > short_pct else "🔴"
+                lines.append(f"{name}:")
+                lines.append(f"  🔼 Лонг: {long_pct}%")
+                lines.append(f"  🔽 Шорт: {short_pct}%")
+                lines.append(f"  {dominant} Доминирование")
+            else:
+                # Fallback на цену
+                emoji = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪️"
+                change_str = f"{emoji} {price_change:+.2f}%"
+                funding_str = f"Funding: {'🔼' if funding > 0 else '🔽'}{funding*100:.4f}%"
+                
+                lines.append(f"{name}:")
+                lines.append(f"  {change_str}")
+                lines.append(f"  {funding_str}")
             lines.append("")
     
     # Вердикт
