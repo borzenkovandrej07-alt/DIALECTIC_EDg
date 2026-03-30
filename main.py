@@ -1395,6 +1395,30 @@ async def cmd_status(message: Message):
             message_id=wait_msg.message_id,
             parse_mode="Markdown"
         )
+
+
+@dp.message(Command("signals"))
+async def cmd_signals(message: Message):
+    from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
+    import os
+    
+    await upsert_user(message.from_user.id)
+    wait_msg = await message.answer("⏳ Загружаю сигналы...")
+    
+    try:
+        github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+        
+        binance_data = await fetch_binance_signals()
+        verdict = await fetch_verdict(github_repo)
+        signals = analyze_signals(binance_data, verdict)
+        msg = build_signals_message(signals, binance_data, verdict)
+        
+        await bot.edit_message_text(
+            msg,
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
     except Exception as e:
         await bot.edit_message_text(
             f"❌ Ошибка: {e}",
@@ -2037,6 +2061,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="trackrecord", description="📊 Вся статистика"),
         BotCommand(command="markets", description="Текущие цены"),
         BotCommand(command="status", description="Краткий статус"),
+        BotCommand(command="signals", description="📡 Сигналы копитрейдинг"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
         BotCommand(command="profile", description="Настройки профиля"),
         BotCommand(command="subscribe", description="Авторассылка"),
