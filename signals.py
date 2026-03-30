@@ -2,9 +2,9 @@
 signals.py — Сигналы на основе данных Binance и вердиктов Dialectic Edge.
 
 Логика:
-1. Получаем данные Binance API (топ-трейдеры лонг/шорт) — без ключа
+1. Получаем данные Binance (публичный API - без ключа)
 2. Читаем вердикт из DIGEST_CACHE
-3. Сравниваем — если совпадение 60%+ или 80%+ трейдеров в одну сторону = сигнал
+3. Анализируем: изменение цены + funding rate + open interest
 4. Отправляем подписчикам через scheduler
 """
 
@@ -23,33 +23,48 @@ BINANCE_FUTURES_URL = "https://fapi.binance.com"
 DIGEST_CACHE_URL = "https://raw.githubusercontent.com/{repo}/main/DIGEST_CACHE.md"
 
 # Пороги для сигналов
-TOP_TRADERS_THRESHOLD = 80  # 80% трейдеров в одну сторону = сигнал
-VERDICT_MATCH_THRESHOLD = 60  # 60% совпадение с вердиктом = сигнал
+PRICE_CHANGE_THRESHOLD = 2.0  # 2%+ изменение = сильный сигнал
+FUNDING_THRESHOLD = 0.0001    # funding rate порог
 
 
 async def fetch_binance_signals(symbols: list[str] = ["BTCUSDT", "ETHUSDT"]) -> dict:
-    """Получает позиции топ-трейдеров с Binance."""
+    """Получает данные с Binance: 24hr ticker + funding rate + open interest."""
     results = {}
     
     async with aiohttp.ClientSession() as session:
         for symbol in symbols:
             try:
-                # top Long/Short Account Ratio
-                url = f"{BINANCE_FUTURES_URL}/fapi/v1/topLongShortAccountRatio"
-                params = {"symbol": symbol, "period": "1h", "limit": 1}
-                
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                # 1. 24hr ticker - изменение цены
+                ticker_url = f"{BINANCE_FUTURES_URL}/fapi/v1/ticker/24hr"
+                async with session.get(ticker_url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        ticker = await resp.json()
+                        price_change = float(ticker.get("priceChangePercent", 0))
+                        volume = float(ticker.get("quoteVolume", 0))
+                        
+                        results[symbol] = {
+                            "price_change": round(price_change, 2),
+                            "volume": volume,
+                            "last_price": float(ticker.get("lastPrice", 0)),
+                        }
+                        
+                # 2. Funding rate
+                funding_url = f"{BINANCE_FUTURES_URL}/fapi/v1/fundingRate"
+                async with session.get(funding_url, params={"symbol": symbol, "limit": 1}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data:
-                            item = data[0]
-                            long_ratio = float(item.get("longAccount", 0)) * 100
-                            short_ratio = float(item.get("shortAccount", 0)) * 100
-                            results[symbol] = {
-                                "long": round(long_ratio, 1),
-                                "short": round(short_ratio, 1),
-                                "dominant": "LONG" if long_ratio > short_ratio else "SHORT"
-                            }
+                            funding = float(data[0].get("fundingRate", 0))
+                            results[symbol]["funding_rate"] = funding
+                            results[symbol]["funding_direction"] = "LONG" if funding > 0 else "SHORT"
+                
+                # 3. Open Interest
+                oi_url = f"{BINANCE_FUTURES_URL}/fapi/v1/openInterest"
+                async with session.get(oi_url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        oi_data = await resp.json()
+                        results[symbol]["open_interest"] = float(oi_data.get("openInterest", 0))
+                        
             except Exception as e:
                 logger.warning(f"Binance API error for {symbol}: {e}")
     
@@ -86,92 +101,91 @@ async def fetch_verdict(github_repo: str) -> Optional[dict]:
     return {"verdict": verdict, "content": content[:500]}
 
 
-def analyze_signals(binance_data: dict, verdict: Optional[dict]) -> dict:
-    """Анализирует данные и генерирует сигналы."""
+def analyze_signals(binance_data: dict, verdict: Optional[dict]) -> list:
+    """Анализирует данные и генерирует сигналы на основе price change + funding."""
     signals = []
     
     for symbol, data in binance_data.items():
-        long_pct = data["long"]
-        short_pct = data["short"]
-        dominant = data["dominant"]
+        price_change = data.get("price_change", 0)
+        funding = data.get("funding_rate", 0)
+        funding_dir = data.get("funding_direction", "NEUTRAL")
         
-        # Сигнал 1: 80%+ трейдеров в одну сторону
-        if long_pct >= TOP_TRADERS_THRESHOLD:
+        # Сигнал 1: Сильное изменение цены
+        if abs(price_change) >= PRICE_CHANGE_THRESHOLD:
+            direction = "LONG" if price_change > 0 else "SHORT"
+            confidence = min(abs(price_change) * 10, 95)
             signals.append({
-                "type": "TOP_TRADERS",
+                "type": "PRICE_MOVE",
                 "symbol": symbol,
-                "direction": "LONG",
-                "confidence": long_pct,
-                "reason": f"{long_pct}% трейдеров в лонге"
-            })
-        elif short_pct >= TOP_TRADERS_THRESHOLD:
-            signals.append({
-                "type": "TOP_TRADERS",
-                "symbol": symbol,
-                "direction": "SHORT",
-                "confidence": short_pct,
-                "reason": f"{short_pct}% трейдеров в шорте"
+                "direction": direction,
+                "confidence": round(confidence),
+                "reason": f"{price_change:+.2f}% за 24ч"
             })
         
-        # Сигнал 2: Совпадение с вердиктом
+        # Сигнал 2: Funding rate
+        if abs(funding) >= FUNDING_THRESHOLD:
+            direction = "LONG" if funding > 0 else "SHORT"
+            confidence = min(abs(funding) * 100000, 80)
+            signals.append({
+                "type": "FUNDING",
+                "symbol": symbol,
+                "direction": direction,
+                "confidence": round(confidence),
+                "reason": f"Funding: {funding*100:.4f}%"
+            })
+        
+        # Сигнал 3: Совпадение с вердиктом
         if verdict and verdict.get("verdict"):
             v = verdict["verdict"]
             
-            if v == "BULLISH" and dominant == "LONG":
-                match = min(long_pct, 80)
-                if match >= VERDICT_MATCH_THRESHOLD:
-                    signals.append({
-                        "type": "VERDICT_MATCH",
-                        "symbol": symbol,
-                        "direction": "LONG",
-                        "confidence": match,
-                        "reason": f"Наш вердикт: БЫЧИЙ + {long_pct}% трейдеров в лонге"
-                    })
+            if v == "BULLISH" and price_change > 1:
+                signals.append({
+                    "type": "VERDICT_MATCH",
+                    "symbol": symbol,
+                    "direction": "LONG",
+                    "confidence": 75,
+                    "reason": "Наш вердикт: БЫЧИЙ + рост"
+                })
+            elif v == "BEARISH" and price_change < -1:
+                signals.append({
+                    "type": "VERDICT_MATCH",
+                    "symbol": symbol,
+                    "direction": "SHORT",
+                    "confidence": 75,
+                    "reason": "Наш вердикт: МЕДВЕЖИЙ + падение"
+                })
             
-            elif v == "BEARISH" and dominant == "SHORT":
-                match = min(short_pct, 80)
-                if match >= VERDICT_MATCH_THRESHOLD:
-                    signals.append({
-                        "type": "VERDICT_MATCH",
-                        "symbol": symbol,
-                        "direction": "SHORT",
-                        "confidence": match,
-                        "reason": f"Наш вердикт: МЕДВЕЖИЙ + {short_pct}% трейдеров в шорте"
-                    })
-    
     return signals
 
 
 def build_signals_message(signals: list, binance_data: dict, verdict: Optional[dict]) -> str:
     """Формирует красивое сообщение с сигналами."""
     lines = [
-        "📡 *COPYTRADE SIGNALS*",
+        "📡 *MARKET SIGNALS*",
         f"_{datetime.now().strftime('%d.%m %H:%M UTC')}_",
         "",
     ]
     
-    # Текущие позиции топ-трейдеров
-    lines.append("🔥 *ТОП-ТРЕЙДЕРЫ (Binance)*")
+    # Данные рынка
+    lines.append("📊 *РЫНОК (Binance)*")
     
     if not binance_data:
         lines.append("Ситуация неопределена")
     else:
         for symbol, data in binance_data.items():
             name = symbol.replace("USDT", "")
-            long = data["long"]
-            short = data["short"]
+            price_change = data.get("price_change", 0)
+            funding = data.get("funding_rate", 0)
+            funding_dir = data.get("funding_direction", "NEUTRAL")
             
-            if long >= 60:
-                bar = "🟢" * int(long/10)
-            elif short >= 60:
-                bar = "🔴" * int(short/10)
-            else:
-                bar = "⚪️" * 5
+            emoji = "🟢" if price_change > 0 else "🔴" if price_change < 0 else "⚪️"
+            change_str = f"{emoji} {price_change:+.2f}%"
+            
+            funding_str = f"Funding: {'🔼' if funding > 0 else '🔽'}{funding*100:.4f}%"
             
             lines.append(f"{name}:")
-            lines.append(f"  🟢 Лонг: {long}%")
-            lines.append(f"  🔴 Шорт: {short}%")
-            lines.append(f"  {bar}")
+            lines.append(f"  {change_str}")
+            lines.append(f"  {funding_str}")
             lines.append("")
     
     # Вердикт
