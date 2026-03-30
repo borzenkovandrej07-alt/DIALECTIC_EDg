@@ -18,6 +18,7 @@ from datetime import datetime, date
 from database import (
     get_daily_subscribers,
     reset_daily_counts,
+    get_signals_subscribers,
 )
 
 try:
@@ -25,6 +26,12 @@ try:
     ALERT_SYSTEM_ENABLED = True
 except ImportError:
     ALERT_SYSTEM_ENABLED = False
+
+try:
+    from signals import SignalsSystem
+    SIGNALS_SYSTEM_ENABLED = True
+except ImportError:
+    SIGNALS_SYSTEM_ENABLED = False
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +44,7 @@ class Scheduler:
         self._running = False
         self._last_export_date: date | None = None
         self._alert_system = None
+        self._signals_system = None
         
         if ALERT_SYSTEM_ENABLED:
             try:
@@ -45,6 +53,14 @@ class Scheduler:
                 logger.info("✅ Alert system инициализирован")
             except Exception as e:
                 logger.warning(f"Alert system init error: {e}")
+        
+        if SIGNALS_SYSTEM_ENABLED:
+            try:
+                github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+                self._signals_system = SignalsSystem(self.bot, github_repo)
+                logger.info("✅ Signals system инициализирован")
+            except Exception as e:
+                logger.warning(f"Signals system init error: {e}")
 
     async def start(self):
         self._running = True
@@ -59,6 +75,9 @@ class Scheduler:
         
         if ALERT_SYSTEM_ENABLED and self._alert_system:
             tasks.append(self._alert_checker_loop())
+        
+        if SIGNALS_SYSTEM_ENABLED and self._signals_system:
+            tasks.append(self._signals_checker_loop())
         
         await asyncio.gather(*tasks)
 
@@ -167,6 +186,26 @@ class Scheduler:
                 logger.error(f"Alert checker error: {e}")
 
             await asyncio.sleep(4 * 3600)  # каждые 4 часа
+
+    async def _signals_checker_loop(self):
+        """Проверяет сигналы и отправляет подписчикам каждые 2 часа."""
+        await asyncio.sleep(600)  # ждём 10 минут при старте
+
+        while self._running:
+            try:
+                if self._signals_system is None:
+                    await asyncio.sleep(3600)
+                    continue
+
+                subscribers = await get_signals_subscribers()
+                if subscribers:
+                    sent = await self._signals_system.check_and_send_signals(subscribers)
+                    if sent > 0:
+                        logger.info(f"📡 Сигналы отправлены: {sent}")
+            except Exception as e:
+                logger.error(f"Signals checker error: {e}")
+
+            await asyncio.sleep(2 * 3600)  # каждые 2 часа
 
     async def export_now(self):
         """

@@ -46,6 +46,7 @@ from database import (
     set_daily_sub,
     get_track_record, save_feedback, get_feedback_stats,
     import_forecasts_from_markdown,
+    get_signals_subscribers, set_signals_sub, get_user_signals_status,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
@@ -1408,7 +1409,8 @@ async def cmd_signals(message: Message):
     from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
     import os
     
-    await upsert_user(message.from_user.id)
+    user_id = message.from_user.id
+    await upsert_user(user_id)
     wait_msg = await message.answer("⏳ Загружаю сигналы...")
     
     try:
@@ -1419,11 +1421,27 @@ async def cmd_signals(message: Message):
         signals = analyze_signals(binance_data, verdict)
         msg = build_signals_message(signals, binance_data, verdict)
         
+        is_enabled = await get_user_signals_status(user_id)
+        
+        if is_enabled:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
+                [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+            ])
+            status_text = "\n\n✅ *Сигналы включены* — буду присылать когда появится сигнал"
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
+                [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+            ])
+            status_text = "\n\n━━━━━━━━━━━━━━━━━━━━━\nНажми 'Включить сигналы' — бот будет сам присылать когда:\n• 80%+ трейдеров в одну сторону\n• или 60%+ совпадение с вердиктом"
+        
         await bot.edit_message_text(
-            msg,
+            msg + status_text,
             chat_id=message.chat.id,
             message_id=wait_msg.message_id,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=keyboard
         )
     except Exception as e:
         await bot.edit_message_text(
@@ -1431,6 +1449,71 @@ async def cmd_signals(message: Message):
             chat_id=message.chat.id,
             message_id=wait_msg.message_id
         )
+
+
+@dp.callback_query(F.data.startswith("signals:"))
+async def cb_signals(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    action = callback.data.split(":")[1] if ":" in callback.data else ""
+    
+    if action == "enable":
+        await set_signals_sub(user_id, True)
+        await callback.answer("✅ Сигналы включены! Буду присылать когда появится сигнал.", show_alert=True)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
+            [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+        ])
+        
+        await callback.message.edit_text(
+            callback.message.text + "\n\n✅ *Сигналы включены!*",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    elif action == "disable":
+        await set_signals_sub(user_id, False)
+        await callback.answer("🔕 Сигналы выключены.", show_alert=True)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
+            [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+        ])
+        
+        await callback.message.edit_text(
+            callback.message.text.replace("✅ *Сигналы включены!*", ""),
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    elif action == "check":
+        await callback.answer("📡 Проверяю...")
+        
+        import os
+        github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+        from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
+        
+        binance_data = await fetch_binance_signals()
+        verdict = await fetch_verdict(github_repo)
+        signals = analyze_signals(binance_data, verdict)
+        msg = build_signals_message(signals, binance_data, verdict)
+        
+        is_enabled = await get_user_signals_status(user_id)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔕 Выключить сигналы" if is_enabled else "🔔 Включить сигналы", 
+                                 callback_data="signals:disable" if is_enabled else "signals:enable")],
+            [InlineKeyboardButton(text="📡 Обновить", callback_data="signals:check")],
+        ])
+        
+        status_text = "\n\n✅ *Сигналы включены*" if is_enabled else ""
+        await callback.message.edit_text(
+            msg + status_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    else:
+        await callback.answer()
 
 
 # ─── /trackrecord ─────────────────────────────────────────────────────────────

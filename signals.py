@@ -184,7 +184,13 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
         lines.append("")
     
     # Сигналы
-    if signals:
+    if not binance_data:
+        lines.append("═" * 30)
+        lines.append("⚠️ ДАННЫЕ НЕ ЗАГРУЖЕНЫ")
+        lines.append("═" * 30)
+        lines.append("Ситуация неопределена.")
+        lines.append("Попробуй позже.")
+    elif signals:
         lines.append("═" * 30)
         lines.append("🔔 СИГНАЛЫ")
         lines.append("═" * 30)
@@ -201,6 +207,7 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
         lines.append("═" * 30)
         lines.append("⚪️ СИГНАЛОВ НЕТ")
         lines.append("═" * 30)
+        lines.append("Ситуация неопределена.")
         lines.append("Нет явных сигналов сейчас.")
     
     lines.extend([

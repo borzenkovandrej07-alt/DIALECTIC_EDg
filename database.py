@@ -32,10 +32,17 @@ async def init_db():
                 sub_time    TEXT DEFAULT '08:00',
                 requests_today INTEGER DEFAULT 0,
                 requests_total INTEGER DEFAULT 0,
+                signals_sub INTEGER DEFAULT 0,
                 last_active TEXT,
                 created_at  TEXT DEFAULT (datetime('now'))
             )
         """)
+
+        # Добавляем колонку signals_sub если её нет (для обновления с существующей БД)
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN signals_sub INTEGER DEFAULT 0")
+        except:
+            pass  # Колонка уже существует
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
@@ -179,6 +186,38 @@ async def set_daily_sub(user_id: int, enabled: bool, time: str = "08:00"):
             WHERE user_id = ?
         """, (1 if enabled else 0, time, user_id))
         await db.commit()
+
+
+async def get_signals_subscribers() -> list[dict]:
+    """Возвращает пользователей с включёнными сигналами."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM users WHERE signals_sub = 1"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def set_signals_sub(user_id: int, enabled: bool):
+    """Включить/выключить сигналы для пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET signals_sub = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id)
+        )
+        await db.commit()
+
+
+async def get_user_signals_status(user_id: int) -> bool:
+    """Проверить статус подписки на сигналы."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT signals_sub FROM users WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] == 1 if row else False
 
 
 # ─── Прогнозы / Track Record ──────────────────────────────────────────────────
