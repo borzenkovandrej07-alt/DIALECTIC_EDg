@@ -18,6 +18,13 @@ import aiohttp
 from datetime import datetime
 from typing import Optional
 
+# Загружаем .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    pass
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -518,6 +525,48 @@ class AutoTracker:
         ])
         
         return "\n".join(lines)
+    
+    async def upload_to_github(self, content: str, filename: str = "AUTO_TRACK.md") -> bool:
+        """Загружает результат на GitHub."""
+        import base64
+        import requests
+        
+        token = os.getenv("GITHUB_TOKEN")
+        repo = GITHUB_REPO
+        
+        if not token:
+            logger.warning("GITHUB_TOKEN не найден")
+            return False
+        
+        try:
+            # Получаем SHA файла если он существует
+            url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+            headers = {"Authorization": f"token {token}"}
+            
+            sha = None
+            resp = requests.get(url, headers=headers)
+            if resp.status_code == 200:
+                sha = resp.json()["sha"]
+            
+            # Загружаем файл
+            data = {
+                "message": f"Auto-update: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                "content": base64.b64encode(content.encode()).decode(),
+            }
+            if sha:
+                data["sha"] = sha
+            
+            resp = requests.put(url, headers=headers, json=data)
+            
+            if resp.status_code in (200, 201):
+                logger.info(f"✅ Загружено на GitHub: {filename}")
+                return True
+            else:
+                logger.warning(f"GitHub error: {resp.status_code} - {resp.text}")
+                return False
+        except Exception as e:
+            logger.warning(f"GitHub upload error: {e}")
+            return False
 
 
 async def main():
@@ -530,11 +579,18 @@ async def main():
     
     if results:
         md = tracker.generate_markdown(results)
+        
+        # Выводим в консоль
         print(md)
         
-        # TODO: Загрузить на GitHub
-        # uploader = GitHubUploader()
-        # uploader.update_file("AUTO_TRACK.md", md)
+        # Загружаем на GitHub (если есть токен)
+        token = os.getenv("GITHUB_TOKEN", "")
+        if token:
+            await tracker.upload_to_github(md, "AUTO_TRACK.md")
+        else:
+            logger.info("ℹ️ GITHUB_TOKEN не найден - загрузка пропущена (на Railway будет работать)")
+        
+        logger.info("✅ Проверка завершена")
     else:
         logger.error("Нет результатов")
 
