@@ -33,6 +33,12 @@ try:
 except ImportError:
     SIGNALS_SYSTEM_ENABLED = False
 
+try:
+    from auto_tracker import AutoTracker
+    AUTO_TRACKER_ENABLED = True
+except ImportError:
+    AUTO_TRACKER_ENABLED = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +67,14 @@ class Scheduler:
                 logger.info("✅ Signals system инициализирован")
             except Exception as e:
                 logger.warning(f"Signals system init error: {e}")
+        
+        self._auto_tracker = None
+        if AUTO_TRACKER_ENABLED:
+            try:
+                self._auto_tracker = AutoTracker()
+                logger.info("✅ Auto tracker инициализирован")
+            except Exception as e:
+                logger.warning(f"Auto tracker init error: {e}")
 
     async def start(self):
         self._running = True
@@ -78,6 +92,9 @@ class Scheduler:
         
         if SIGNALS_SYSTEM_ENABLED and self._signals_system:
             tasks.append(self._signals_checker_loop())
+        
+        if AUTO_TRACKER_ENABLED and self._auto_tracker:
+            tasks.append(self._auto_tracker_loop())
         
         await asyncio.gather(*tasks)
 
@@ -206,6 +223,35 @@ class Scheduler:
                 logger.error(f"Signals checker error: {e}")
 
             await asyncio.sleep(2 * 3600)  # каждые 2 часа
+
+    async def _auto_tracker_loop(self):
+        """Проверяет прогнозы в 00:10 UTC (через 10 минут после дайджеста)."""
+        await asyncio.sleep(120)  # ждём 2 минуты при старте
+
+        while self._running:
+            try:
+                now = datetime.now()
+                current_time = now.strftime("%H:%M")
+                
+                # Запускаем в 00:10 UTC каждый день
+                if current_time == "00:10":
+                    logger.info("🔄 Запускаю авто-проверку прогнозов...")
+                    
+                    results = await self._auto_tracker.check_all_forecasts()
+                    
+                    if results:
+                        md = self._auto_tracker.generate_markdown(results)
+                        await self._auto_tracker.upload_to_github(md, "AUTO_TRACK.md")
+                        logger.info(f"✅ Auto track обновлён")
+                    
+                    # Ждём минуту чтобы не запустить дважды
+                    await asyncio.sleep(60)
+                    
+            except Exception as e:
+                logger.error(f"Auto tracker error: {e}")
+
+            # Проверяем каждую минуту
+            await asyncio.sleep(60)
 
     async def export_now(self):
         """
