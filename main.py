@@ -2641,7 +2641,7 @@ if __name__ == "__main__":
 @dp.message(Command("testbot"))
 async def cmd_test_bot(message: Message):
     """Test command."""
-    print(f"TESTBOT CALLED BY: {message.from_user.id}")
+    logger.info(f"TESTBOT CALLED BY: {message.from_user.id}")
     await message.answer("TEST WORKS!")
 
 
