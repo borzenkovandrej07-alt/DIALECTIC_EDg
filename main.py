@@ -2443,9 +2443,20 @@ async def cmd_remove_portfolio(message: Message):
 backtest_enabled = True  # Global toggle for backtest recording
 
 
+def backtest_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    buttons = []
+    if enabled:
+        buttons.append([InlineKeyboardButton(text="⏸ Остановить", callback_data="bt:toggle")])
+    else:
+        buttons.append([InlineKeyboardButton(text="▶️ Запустить", callback_data="bt:toggle")])
+    buttons.append([InlineKeyboardButton(text="📋 История сделок", callback_data="bt:history")])
+    buttons.append([InlineKeyboardButton(text="💰 Изменить баланс", callback_data="bt:capital")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @dp.message(Command("backtest"))
 async def cmd_backtest(message: Message):
-    """Show backtest results with nice formatting."""
+    """Show backtest results with nice formatting and keyboard."""
     signals = await get_backtest_signals()
     stats = await get_backtest_stats()
     config = await get_backtest_config()
@@ -2463,6 +2474,8 @@ async def cmd_backtest(message: Message):
     
     msg = "🤖 *ТЕСТОВЫЙ ТРЕЙДЕР*\n"
     msg += "═" * 25 + "\n"
+    msg += f"Это бот который торгует по сигналам анализа.\n"
+    msg += f"Начинает с виртуального баланса и фармит $$$\n\n"
     msg += f"💵 *Баланс:* `${capital:,.2f}`\n"
     msg += f"📊 *Всего сделок:* {total}\n"
     msg += f"🎯 *Win Rate:* {win_rate:.1f}%\n"
@@ -2478,7 +2491,8 @@ async def cmd_backtest(message: Message):
             direction = s["direction"]
             entry = s.get("entry_price", 0)
             emoji = "🟢" if direction == "BUY" else "🔴"
-            msg += f"  {emoji} {symbol} {direction} @ ${entry:,.2f}\n"
+            dir_text = "📈 ЛОНГ" if direction == "BUY" else "📉 ШОРТ"
+            msg += f"  {emoji} {symbol} {dir_text} @ ${entry:,.2f}\n"
     else:
         msg += "\n📭 *Нет открытых позиций*\n"
     
@@ -2491,18 +2505,18 @@ async def cmd_backtest(message: Message):
             pnl = s.get("pnl", 0) or 0
             pnl_pct = s.get("pnl_pct", 0) or 0
             emoji = "🟢" if pnl > 0 else "🔴"
-            msg += f"  {emoji} {symbol} {direction} ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+            dir_text = "📈" if direction == "BUY" else "📉"
+            msg += f"  {emoji} {symbol} {dir_text} ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
     
     status_text = "✅ Работает" if enabled else "❌ Остановлен"
-    msg += "\n" + "═" * 25 + "\n"
-    msg += f"Статус: {status_text}\n"
-    msg += "Команды:\n"
-    msg += "  /backtest_toggle - вкл/выкл\n"
-    msg += "  /backtest_capital [сумма] - изменить баланс\n"
-    msg += "  /backtest_clear - сбросить\n"
-    msg += "═" * 25
+    msg += "═" * 25 + "\n"
+    msg += f"Статус: {status_text}"
     
-    await message.answer(msg, parse_mode="Markdown")
+    await message.answer(
+        msg, 
+        parse_mode="Markdown",
+        reply_markup=backtest_keyboard(bool(enabled))
+    )
     
     # Also export to GitHub
     try:
@@ -2520,6 +2534,71 @@ async def cmd_backtest_toggle(message: Message):
     await set_backtest_enabled(enabled)
     status = "включён" if enabled else "выключен"
     await message.answer(f"🤖 Бэктест {status}")
+
+
+@dp.callback_query(F.data.startswith("bt:"))
+async def cb_backtest(callback: CallbackQuery):
+    """Handle backtest keyboard buttons."""
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+    
+    if action == "toggle":
+        config = await get_backtest_config()
+        enabled = not bool(config.get("enabled", 1))
+        await set_backtest_enabled(enabled)
+        status = "✅ Работает" if enabled else "❌ Остановлен"
+        await callback.message.edit_text(
+            callback.message.text.split("Статус: ")[0] + f"Статус: {status}",
+            parse_mode="Markdown",
+            reply_markup=backtest_keyboard(bool(enabled))
+        )
+        await callback.answer(f"Бэктест {status}")
+    
+    elif action == "history":
+        signals = await get_backtest_signals()
+        closed = [s for s in signals if s.get("status") == "closed"]
+        
+        if not closed:
+            await callback.answer("Нет закрытых сделок", show_alert=True)
+            return
+        
+        msg = "📋 *История сделок*\n"
+        msg += "═" * 25 + "\n"
+        
+        wins = 0
+        losses = 0
+        for s in closed:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            pnl = s.get("pnl", 0) or 0
+            pnl_pct = s.get("pnl_pct", 0) or 0
+            date = s.get("created_at", "")[:10]
+            emoji = "🟢" if pnl > 0 else "🔴"
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+            dir_text = "📈" if direction == "BUY" else "📉"
+            msg += f"{date} {emoji} {symbol} {dir_text} ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+        
+        msg += "═" * 25 + "\n"
+        msg += f"Всего: {len(closed)} | 🟢 {wins} | 🔴 {losses}"
+        
+        await callback.message.answer(msg, parse_mode="Markdown")
+        await callback.answer()
+    
+    elif action == "capital":
+        await callback.message.answer(
+            "💰 *Изменить баланс*\n\n"
+            "Введите новую сумму:\n"
+            "/backtest_capital 500\n"
+            "или просто число",
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+    
+    else:
+        await callback.answer()
 
 
 @dp.message(Command("backtest_capital"))
