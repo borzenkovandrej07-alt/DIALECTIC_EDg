@@ -2136,30 +2136,44 @@ async def main():
 
 # ─── Портфельный трекер ─────────────────────────────────────────────────────────
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters.callback_data import CallbackData
+
+portfolio_cb = CallbackData("portfolio", "action", "symbol")
+
+user_portfolio_state = {}  # user_id: {"symbol": str, "step": str}
+
+
+def portfolio_keyboard(has_positions: bool = True) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="➕ Добавить", callback_data=portfolio_cb.new(action="add_select", symbol=""))],
+    ]
+    if has_positions:
+        buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=portfolio_cb.new(action="remove_select", symbol=""))])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=portfolio_cb.new(action="refresh", symbol=""))])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def select_crypto_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="₿ Bitcoin", callback_data=portfolio_cb.new(action="add_amount", symbol="BTC"))],
+        [InlineKeyboardButton(text="Ξ Ethereum", callback_data=portfolio_cb.new(action="add_amount", symbol="ETH"))],
+        [InlineKeyboardButton(text="◎ Solana", callback_data=portfolio_cb.new(action="add_amount", symbol="SOL"))],
+        [InlineKeyboardButton(text="🥇 Gold", callback_data=portfolio_cb.new(action="add_amount", symbol="GOLD"))],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=portfolio_cb.new(action="menu", symbol=""))],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @dp.message(Command("portfolio"))
 async def cmd_portfolio(message: Message):
-    """Show user portfolio."""
     user_id = message.from_user.id
     await upsert_user(user_id)
     
-    await message.answer("⏳ Загружаю портфель...")
-    
     positions = await get_portfolio(user_id)
-    
-    if not positions:
-        await message.answer(
-            "📊 Твой портфель пуст.\n\n"
-            "Добавить позицию: /add BTC 0.5 65000\n"
-            "Формат: /add СИМВОЛ КОЛИЧЕСТВО ЦЕНА_ВХОДА"
-        )
-        return
-    
     prices, _ = await get_full_realtime_context()
     
-    symbol_map = {
-        "BTC": "BTC", "ETH": "ETH", "SOL": "SOL",
-        "GOLD": "GOLD", "OIL": "OIL_WTI",
-    }
+    symbol_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "GOLD": "GOLD"}
     
     lines = ["📊 ТВОЙ ПОРТФЕЛЬ", ""]
     total_pnl = 0
@@ -2178,29 +2192,102 @@ async def cmd_portfolio(message: Message):
             cost = amount * entry
             pnl = value - cost
             pnl_pct = (pnl / cost * 100) if cost > 0 else 0
-            
             total_pnl += pnl
             total_value += value
-            
             emoji = "🟢" if pnl >= 0 else "🔴"
-            lines.append(
-                f"{symbol}: {amount} x ${current_price:,.0f} = ${value:,.0f}\n"
-                f"  Вход: ${entry:,.0f} | PnL: {emoji}${pnl:+,.0f} ({pnl_pct:+.1f}%)"
-            )
+            lines.append(f"{symbol}: {amount} x ${current_price:,.0f} = ${value:,.0f}")
+            lines.append(f"  Вход: ${entry:,.0f} | PnL: {emoji}${pnl:+,.0f} ({pnl_pct:+.1f}%)")
         else:
             cost = amount * entry
             total_value += cost
-            lines.append(f"{symbol}: {amount} x $??? (цена недоступна)\n  Вход: ${entry:,.0f}")
+            lines.append(f"{symbol}: {amount} x $??? | Вход: ${entry:,.0f}")
     
-    total_cost = total_value - total_pnl
-    total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
-    emoji = "🟢" if total_pnl >= 0 else "🔴"
+    if not positions:
+        lines.append("Портфель пуст")
     
-    lines.extend(["", f"📈 Итого: ${total_value:,.0f} | {emoji} {total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)"])
-    lines.append("")
-    lines.append("Удалить: /remove BTC")
+    if total_value > 0:
+        total_cost = total_value - total_pnl if total_pnl > 0 else total_value
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+        emoji = "🟢" if total_pnl >= 0 else "🔴"
+        lines.extend(["", f"📈 Итого: ${total_value:,.0f} | {emoji} {total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)"])
     
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
+
+
+@dp.callback_query(portfolio_cb.filter())
+async def handle_portfolio_callback(callback: CallbackQuery, callback_data: portfolio_cb):
+    user_id = callback.from_user.id
+    action = callback_data.action
+    symbol = callback_data.symbol
+    
+    await callback.answer()
+    
+    if action == "add_select":
+        await callback.message.edit_text("Выбери криптовалюту:", reply_markup=select_crypto_keyboard())
+    
+    elif action == "add_amount":
+        user_portfolio_state[user_id] = {"symbol": symbol, "step": "amount"}
+        await callback.message.edit_text(f"Сколько {symbol} ты купил?\nВведи число (например 0.5)")
+    
+    elif action == "menu":
+        await callback.message.delete()
+        await cmd_portfolio(callback.message)
+    
+    elif action == "refresh":
+        await callback.message.delete()
+        await cmd_portfolio(callback.message)
+    
+    elif action == "remove_select":
+        positions = await get_portfolio(user_id)
+        if not positions:
+            await callback.message.edit_text("Нечего удалять!", reply_markup=portfolio_keyboard(False))
+        else:
+            buttons = []
+            for pos in positions:
+                buttons.append([InlineKeyboardButton(
+                    text=f"🗑 {pos['symbol']} ({pos['amount']})",
+                    callback_data=portfolio_cb.new(action="confirm_remove", symbol=pos['symbol"])
+                )])
+            buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=portfolio_cb.new(action="menu", symbol=""))])
+            await callback.message.edit_text("Что удалить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    
+    elif action == "confirm_remove":
+        await remove_portfolio_position(user_id, symbol)
+        await callback.message.edit_text(f"✅ {symbol} удалён из портфеля")
+        await asyncio.sleep(1)
+        await callback.message.delete()
+        await cmd_portfolio(callback.message)
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_portfolio_input(message: Message):
+    user_id = message.from_user.id
+    state = user_portfolio_state.get(user_id)
+    
+    if not state:
+        return
+    
+    if state["step"] == "amount":
+        try:
+            amount = float(message.text.replace(",", "."))
+            assert amount > 0
+            state["amount"] = amount
+            state["step"] = "price"
+            await message.answer(f"По какой цене купил {state['symbol']}?\nВведи цену (например 65000)")
+        except:
+            await message.answer("Введи число, например 0.5")
+    
+    elif state["step"] == "price":
+        try:
+            price = float(message.text.replace(",", "."))
+            assert price > 0
+            symbol = state["symbol"]
+            amount = state["amount"]
+            await add_portfolio_position(user_id, symbol, amount, price)
+            await message.answer(f"✅ Добавлено: {symbol} | {amount} шт. | ${price:,.0f}")
+            del user_portfolio_state[user_id]
+        except:
+            await message.answer("Введи цену, например 65000")
 
 
 @dp.message(Command("add"))
