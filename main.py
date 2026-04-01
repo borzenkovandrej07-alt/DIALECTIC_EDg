@@ -2168,6 +2168,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="markets", description="Текущие цены"),
         BotCommand(command="status", description="Краткий статус"),
         BotCommand(command="signals", description="📡 Сигналы копитрейдинг"),
+        BotCommand(command="testbot", description="🧪 Тест бота"),
         BotCommand(command="signalstatus", description="📊 Статус трейдера"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
         BotCommand(command="profile", description="Настройки профиля"),
@@ -2637,6 +2638,12 @@ if __name__ == "__main__":
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
 
 
+@dp.message(Command("testbot"))
+async def cmd_test_bot(message: Message):
+    """Test command."""
+    await message.answer("✅ Бот работает!")
+
+
 @dp.message(Command("signalstatus"))
 async def cmd_signal_status(message: Message):
     """Check signal trader status with entry prices."""
@@ -2687,4 +2694,3 @@ async def cmd_signal_status(message: Message):
         logger.error(f"signal_status error: {e}")
         import traceback
         await message.answer(f"Ошибка: {e}\n\n{traceback.format_exc()}")
-        await message.answer(f"Ошибка: {e}")
