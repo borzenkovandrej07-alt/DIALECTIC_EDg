@@ -145,17 +145,17 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
             if symbol in open_positions:
                 continue
             
-            # Проверяем сигнал от /daily (с допуском 5% от точки входа)
+            # Проверяем сигнал от /daily — покупаем/продаём когда цена дошла до точки входа
             trade_triggered = False
             trigger_reason = ""
             
-            if verdict == "BUY" and current_price <= entry_price * 1.05:
+            if verdict == "BUY" and current_price <= entry_price:
                 trade_triggered = True
-                trigger_reason = f"Вердикт BUY, цена {current_price} близко к входу {entry_price}"
+                trigger_reason = f"Вердикт BUY, цена {current_price} дошла до входа {entry_price}"
             
-            elif verdict == "SELL" and current_price >= entry_price * 0.95:
+            elif verdict == "SELL" and current_price >= entry_price:
                 trade_triggered = True
-                trigger_reason = f"Вердикт SELL, цена {current_price} близко к входу {entry_price}"
+                trigger_reason = f"Вердикт SELL, цена {current_price} дошла до входа {entry_price}"
             
             if trade_triggered:
                 direction = "BUY" if verdict == "BUY" else "SELL"
@@ -200,13 +200,13 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                     continue
         
         # === ПРИОРИТЕТ 2: Если есть точки входа из /daily (любого возраста) — автотрейдер от них ===
-        elif entries and symbol in entries and symbol not in open_positions:
+        if entries and symbol in entries and symbol not in open_positions:
             base_price = entries.get(symbol)
             if base_price:
                 change_pct = (current_price - base_price) / base_price
                 
-                # BUY если цена упала на 3%+ от точки входа
-                if change_pct <= -0.03:
+                # BUY если цена УПАЛА от точки входа (цена ниже — значит有机会买入)
+                if change_pct < 0:  # Любое снижение от точки входа
                     direction = "BUY"
                     result = await add_backtest_signal(
                         symbol=symbol,
@@ -241,8 +241,8 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                         
                         logger.info(f"Auto trade: {symbol} BUY at {current_price}")
                 
-                # SELL если цена выросла на 3%+ от точки входа
-                elif change_pct >= 0.03:
+                # SELL если цена ВЫРОСЛА от точки входа (цена выше — значит можно продать)
+                elif change_pct > 0:  # Любой рост от точки входа
                     direction = "SELL"
                     result = await add_backtest_signal(
                         symbol=symbol,

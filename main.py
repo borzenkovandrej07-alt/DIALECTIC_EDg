@@ -2656,19 +2656,19 @@ async def cmd_signal_status(message: Message):
         msg += f"\n🎯 *Вердикт:* {verdict}\n"
         
         if entries:
-            msg += "\n📊 *Точки входа:*\n"
+            msg += "\n📊 *Точки входа и сигналы:*\n"
             for symbol, price in entries.items():
                 if price:
-                    # Show entry price from daily
-                    msg += f"  • {symbol}: ${price:,.0f}\n"
-                    
-                    # Show trade trigger levels
                     if verdict == "BUY":
-                        buy_trigger = price * 1.05  # 5% above entry
-                        msg += f"    → BUY при ${buy_trigger:,.0f}\n"
+                        msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                        msg += f"    → BUY когда цена ≤ ${price:,.0f}\n"
+                        msg += f"    → (цена упала на 3%+ от входа = доп. сигнал)\n"
                     elif verdict == "SELL":
-                        sell_trigger = price * 0.95  # 5% below entry
-                        msg += f"    → SELL при ${sell_trigger:,.0f}\n"
+                        msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                        msg += f"    → SELL когда цена ≥ ${price:,.0f}\n"
+                        msg += f"    → (цена выросла на 3%+ от входа = доп. сигнал)\n"
+                    else:
+                        msg += f"  • {symbol}: ${price:,.0f}\n"
         else:
             msg += "\n📭 Нет точек входа — сделай /daily\n"
     else:
