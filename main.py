@@ -2137,30 +2137,27 @@ async def main():
 # ─── Портфельный трекер ─────────────────────────────────────────────────────────
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters.callback_data import CallbackData
-
-portfolio_cb = CallbackData("portfolio", "action", "symbol")
 
 user_portfolio_state = {}  # user_id: {"symbol": str, "step": str}
 
 
 def portfolio_keyboard(has_positions: bool = True) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="➕ Добавить", callback_data=portfolio_cb.new(action="add_select", symbol=""))],
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="portfolio:add_select:")],
     ]
     if has_positions:
-        buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=portfolio_cb.new(action="remove_select", symbol=""))])
-    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=portfolio_cb.new(action="refresh", symbol=""))])
+        buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data="portfolio:remove_select:")])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="portfolio:refresh:")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def select_crypto_keyboard() -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="₿ Bitcoin", callback_data=portfolio_cb.new(action="add_amount", symbol="BTC"))],
-        [InlineKeyboardButton(text="Ξ Ethereum", callback_data=portfolio_cb.new(action="add_amount", symbol="ETH"))],
-        [InlineKeyboardButton(text="◎ Solana", callback_data=portfolio_cb.new(action="add_amount", symbol="SOL"))],
-        [InlineKeyboardButton(text="🥇 Gold", callback_data=portfolio_cb.new(action="add_amount", symbol="GOLD"))],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data=portfolio_cb.new(action="menu", symbol=""))],
+        [InlineKeyboardButton(text="₿ Bitcoin", callback_data="portfolio:add_amount:BTC")],
+        [InlineKeyboardButton(text="Ξ Ethereum", callback_data="portfolio:add_amount:ETH")],
+        [InlineKeyboardButton(text="◎ Solana", callback_data="portfolio:add_amount:SOL")],
+        [InlineKeyboardButton(text="🥇 Gold", callback_data="portfolio:add_amount:GOLD")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="portfolio:menu:")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -2214,11 +2211,12 @@ async def cmd_portfolio(message: Message):
     await message.answer("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
 
 
-@dp.callback_query(portfolio_cb.filter())
-async def handle_portfolio_callback(callback: CallbackQuery, callback_data: portfolio_cb):
+@dp.callback_query(F.data.startswith("portfolio:"))
+async def handle_portfolio_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
-    action = callback_data.action
-    symbol = callback_data.symbol
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    symbol = parts[2] if len(parts) > 2 else ""
     
     await callback.answer()
     
