@@ -335,16 +335,23 @@ async def get_previous_digest() -> str:
 
 # ─── BACKTEST.md — история бэктеста ──────────────────────────────────────────────
 
-async def export_backtest_to_github(signals: list[dict], stats: dict) -> bool:
+async def export_backtest_to_github(signals: list[dict], stats: dict, config: dict = None) -> bool:
     """Экспортирует результаты бэктеста в BACKTEST.md на GitHub."""
     if not GITHUB_TOKEN:
         return False
+    
+    capital = config.get("capital", 100.0) if config else 100.0
+    enabled = config.get("enabled", 1) if config else 1
     
     lines = [
         "# 📊 Dialectic Edge — Backtest Results",
         f"> Обновлено: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "",
-        "## 📈 Статистика",
+        "## 💵 Капитал",
+        f"- Текущий: **${capital:,.2f}**",
+        f"- Статус: **{'✅ Включён' if enabled else '❌ Выключен'}**",
+        "",
+        "## 📈 Статистика (закрытые сделки)",
         "",
         f"- Всего сделок: **{stats.get('total', 0)}**",
         f"- Win Rate: **{stats.get('wins', 0) / max(stats.get('total', 1), 1) * 100:.1f}%**",
@@ -357,7 +364,9 @@ async def export_backtest_to_github(signals: list[dict], stats: dict) -> bool:
         "|------|--------|-------------|------|-------|-----|-------|",
     ]
     
-    for s in signals:
+    # Only show closed trades in table
+    closed_signals = [s for s in signals if s.get("status") == "closed"]
+    for s in closed_signals:
         date = s.get("created_at", "")[:10]
         symbol = s.get("symbol", "")
         direction = s.get("direction", "")
@@ -367,6 +376,18 @@ async def export_backtest_to_github(signals: list[dict], stats: dict) -> bool:
         pnl_pct = s.get("pnl_pct", 0) or 0
         
         lines.append(f"| {date} | {symbol} | {direction} | ${entry:,.0f} | ${exit_price:,.0f} | ${pnl:+,.0f} | {pnl_pct:+.1f}% |")
+    
+    # Add open positions
+    open_signals = [s for s in signals if s.get("status") == "open"]
+    if open_signals:
+        lines.extend(["", "## 🔵 Открытые позиции", ""])
+        for s in open_signals:
+            date = s.get("created_at", "")[:10]
+            symbol = s.get("symbol", "")
+            direction = s.get("direction", "")
+            entry = s.get("entry_price", 0) or 0
+            qty = s.get("quantity", 0) or 0
+            lines.append(f"- **{symbol}** {direction} @ ${entry:,.2f} (qty: {qty:.4f}) — {date}")
     
     content = "\n".join(lines)
     

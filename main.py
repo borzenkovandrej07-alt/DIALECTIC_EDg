@@ -2500,7 +2500,7 @@ async def cmd_backtest(message: Message):
     # Also export to GitHub
     try:
         from github_export import export_backtest_to_github
-        await export_backtest_to_github(signals, stats)
+        await export_backtest_to_github(signals, stats, config)
     except Exception as e:
         logger.warning(f"Backtest GitHub export failed: {e}")
 
