@@ -11,6 +11,8 @@ web_search.py — Реалтайм данные + реальный веб-пои
   Золото         → Yahoo GC=F + XAUUSD=X fallback
   Макро          → FRED API (CPI пересчитывается в YoY %)
   Веб-новости    → Tavily API (реальный поиск, не DDG-пустышка)
+  COT           → CFTC.gov (фьючерсное позиционирование)
+  ETF Flows     → Yahoo (институциональные потоки)
 """
 
 import asyncio
@@ -390,4 +392,24 @@ def format_prices_for_agents(prices: dict) -> str:
 async def get_full_realtime_context() -> tuple[dict, str]:
     prices    = await fetch_realtime_prices()
     formatted = format_prices_for_agents(prices)
+    
+    try:
+        from cot_data import format_cot_for_agents, get_cot_for_assets
+        cot_data = await get_cot_for_assets(["Bitcoin", "Gold", "Crude Oil"])
+        cot_formatted = format_cot_for_agents(cot_data)
+        formatted += "\n\n" + cot_formatted
+    except Exception as e:
+        logger.warning(f"COT data error: {e}")
+    
+    try:
+        from etf_flows import format_etf_flows_for_agents, get_market_breadth
+        etf_data = await get_etf_flows()
+        etf_formatted = format_etf_flows_for_agents(etf_data)
+        formatted += "\n\n" + etf_formatted
+        
+        breadth = await get_market_breadth()
+        prices["BREADTH"] = breadth
+    except Exception as e:
+        logger.warning(f"ETF flows error: {e}")
+    
     return prices, formatted
