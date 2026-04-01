@@ -379,6 +379,38 @@ async def save_predictions_from_report(report_text: str, source_news: str = "", 
     # Track trades for notification
     trades_executed = []
     
+    # Extract verdict from report
+    verdict = "NEUTRAL"
+    vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
+    if vm:
+        verdict_line = re.sub(r"[*_`]", "", vm.group(1)).strip().upper()
+        if "БЫЧ" in verdict_line or "BULL" in verdict_line:
+            verdict = "BUY"
+        elif "МЕДВЕЖ" in verdict_line or "BEAR" in verdict_line:
+            verdict = "SELL"
+        else:
+            verdict = "NEUTRAL"
+    
+    # Save daily context for signal trader
+    if predictions:
+        from database import save_daily_context
+        symbols = [p["asset"] for p in predictions]
+        entries = {p["asset"]: p["entry_price"] for p in predictions if p.get("entry_price")}
+        stop_losses = {p["asset"]: p["stop_loss"] for p in predictions if p.get("stop_loss")}
+        targets = {p["asset"]: p["target_price"] for p in predictions if p.get("target_price")}
+        timeframes = {p["asset"]: p["timeframe"] for p in predictions}
+        
+        await save_daily_context(
+            verdict=verdict,
+            symbols=symbols,
+            entries=entries,
+            stop_losses=stop_losses,
+            targets=targets,
+            timeframes=timeframes,
+            news_summary=source_news[:300]
+        )
+        logger.info(f"Saved daily context: verdict={verdict}, symbols={symbols}")
+    
     for pred in predictions:
         try:
             await save_prediction(

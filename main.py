@@ -60,6 +60,7 @@ from database import (
     add_portfolio_position, get_portfolio, remove_portfolio_position,
     add_backtest_signal, close_backtest_signal, get_backtest_signals, get_backtest_stats,
     get_backtest_config, update_backtest_capital, set_backtest_enabled,
+    save_daily_context, get_daily_context,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
@@ -2224,6 +2225,10 @@ async def main():
         check_predictions_fn=check_pending_predictions
     )
 
+    # Start signal trader in background
+    from signal_trader import run_signal_trader
+    signal_trader_task = asyncio.create_task(run_signal_trader(bot, ADMIN_IDS))
+
     await asyncio.gather(
         dp.start_polling(bot),
         scheduler.start()
@@ -2545,3 +2550,26 @@ async def cmd_backtest_clear(message: Message):
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ─── Signal Trader Status ─────────────────────────────────────────────────────────
+
+from signal_trader import get_signal_trader_status
+
+
+@dp.message(Command("signal_status"))
+async def cmd_signal_status(message: Message):
+    """Check signal trader status."""
+    status = await get_signal_trader_status()
+    
+    lines = ["📡 СИГНАЛ ТРЕЙДЕР", ""]
+    lines.append(f"Статус: {'✅ Включён' if status['enabled'] else '❌ Выключен'}")
+    lines.append(f"Капитал: ${status['capital']:,.2f}")
+    lines.append(f"Вердикт: {status['daily_verdict'] or 'нет'}")
+    lines.append(f"Символы: {', '.join(status['symbols']) if status['symbols'] else 'нет'}")
+    lines.append(f"Всего сделок: {status['total_trades']}")
+    lines.append(f"Total PnL: ${status['total_pnl']:+,.2f}")
+    lines.append("")
+    lines.append("Проверка каждые 5 минут")
+    
+    await message.answer("\n".join(lines))

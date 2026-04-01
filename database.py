@@ -141,6 +141,22 @@ async def init_db():
         await db.execute("""
             INSERT OR IGNORE INTO backtest_config (id, capital, enabled) VALUES (1, 100.0, 1)
         """)
+        
+        # Daily context table - stores verdict and price levels for signal trading
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS daily_context (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at      TEXT DEFAULT (datetime('now')),
+                verdict         TEXT,  -- BUY, SELL, NEUTRAL
+                symbols         TEXT,  -- JSON list of symbols to trade
+                entries         TEXT,  -- JSON dict of entry prices
+                stop_losses     TEXT,  -- JSON dict of stop loss prices
+                targets         TEXT,  -- JSON dict of target prices
+                timeframes      TEXT,  -- JSON dict of timeframes
+                news_summary    TEXT,  -- brief news context
+                expires_at      TEXT   -- when this context expires (default 24h)
+            )
+        """)
 
         await db.commit()
 
@@ -726,3 +742,60 @@ async def set_backtest_enabled(enabled: bool) -> dict:
         """, (1 if enabled else 0,))
         await db.commit()
     return await get_backtest_config()
+
+
+# ─── Daily Context ─────────────────────────────────────────────────────────────
+
+async def save_daily_context(
+    verdict: str,
+    symbols: list,
+    entries: dict,
+    stop_losses: dict,
+    targets: dict,
+    timeframes: dict,
+    news_summary: str = ""
+) -> int:
+    """Save daily context from /daily for signal trading."""
+    import json
+    
+    # Clear old context first
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM daily_context")
+        
+        cursor = await db.execute("""
+            INSERT INTO daily_context (
+                verdict, symbols, entries, stop_losses, targets, timeframes, news_summary, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+24 hours'))
+        """, (
+            verdict,
+            json.dumps(symbols),
+            json.dumps(entries),
+            json.dumps(stop_losses),
+            json.dumps(targets),
+            json.dumps(timeframes),
+            news_summary[:500]
+        ))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_daily_context() -> dict | None:
+    """Get current daily context for signal trading."""
+    import json
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM daily_context ORDER BY created_at DESC LIMIT 1
+        """) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            
+            data = dict(row)
+            data["symbols"] = json.loads(data.get("symbols", "[]"))
+            data["entries"] = json.loads(data.get("entries", "{}"))
+            data["stop_losses"] = json.loads(data.get("stop_losses", "{}"))
+            data["targets"] = json.loads(data.get("targets", "{}"))
+            data["timeframes"] = json.loads(data.get("timeframes", "{}"))
+            return data
