@@ -69,6 +69,13 @@ def is_daily_context_fresh(context: dict) -> bool:
         return False
 
 
+def get_daily_entries(context: dict) -> dict:
+    """Получить точки входа из daily контекста (любого возраста)."""
+    if not context:
+        return {}
+    return context.get("entries", {}) or {}
+
+
 async def fetch_current_prices(symbols: list[str]) -> dict:
     """Получить текущие цены через web_search."""
     from web_search import get_full_realtime_context
@@ -115,12 +122,11 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
     daily_context = await get_daily_context()
     binance_signals = await get_binance_signals()
     is_daily_fresh = is_daily_context_fresh(daily_context)
+    entries = get_daily_entries(daily_context) if daily_context else {}
+    verdict = daily_context.get("verdict", "").upper() if daily_context else ""
     
     signals = await get_backtest_signals()
     open_positions = {s["symbol"]: s for s in signals if s.get("status") == "open"}
-    
-    verdict = daily_context.get("verdict", "").upper() if daily_context else ""
-    entries = daily_context.get("entries", {}) if daily_context else {}
     
     for symbol in TRADE_SYMBOLS:
         current_price = prices.get(symbol)
@@ -129,8 +135,8 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
         
         last_price = last_prices.get(symbol)
         
-        # === ПРИОРИТЕТ 1: /daily контекст ===
-        if is_daily_fresh and verdict and symbol in entries:
+        # === ПРИОРИТЕТ 1: /daily контекст (любой свежести — главное есть точки входа) ===
+        if verdict and entries and symbol in entries and is_daily_fresh:
             entry_price = entries.get(symbol)
             if not entry_price:
                 continue
@@ -193,85 +199,83 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                     logger.info(f"Trade from daily: {symbol} {direction} at {current_price}")
                     continue
         
-        # === ПРИОРИТЕТ 2: Если нет daily контекста — автотрейдер по daily точке входа ===
-        if not is_daily_fresh and symbol not in open_positions:
-            # Используем цену из daily как базу
-            if symbol in entries:
-                base_price = entries.get(symbol)
-                if base_price:
-                    change_pct = (current_price - base_price) / base_price
+        # === ПРИОРИТЕТ 2: Если есть точки входа из /daily (любого возраста) — автотрейдер от них ===
+        elif entries and symbol in entries and symbol not in open_positions:
+            base_price = entries.get(symbol)
+            if base_price:
+                change_pct = (current_price - base_price) / base_price
+                
+                # BUY если цена упала на 3%+ от точки входа
+                if change_pct <= -0.03:
+                    direction = "BUY"
+                    result = await add_backtest_signal(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=current_price,
+                        source="auto_trader"
+                    )
                     
-                    # BUY если цена упала на 3%+ от точки входа
-                    if change_pct <= -0.03:
-                        direction = "BUY"
-                        result = await add_backtest_signal(
-                            symbol=symbol,
-                            direction=direction,
-                            entry_price=current_price,
-                            source="auto_trader"
-                        )
+                    if result.get("status") == "opened":
+                        executed.append({
+                            "symbol": symbol,
+                            "direction": direction,
+                            "entry_price": current_price,
+                            "source": "auto_trader",
+                            "capital": result.get("capital_after", 0)
+                        })
                         
-                        if result.get("status") == "opened":
-                            executed.append({
-                                "symbol": symbol,
-                                "direction": direction,
-                                "entry_price": current_price,
-                                "source": "auto_trader",
-                                "capital": result.get("capital_after", 0)
-                            })
-                            
-                            emoji = "🟢"
-                            msg = f"🎯 *АВТОТРЕЙДЕР*\n"
-                            msg += "═" * 25 + "\n"
-                            msg += f"{emoji} *{symbol}* 📈 ЛОНГ\n"
-                            msg += f"Вход: ${current_price:,.2f}\n"
-                            msg += f"От точки входа: {change_pct*100:+.1f}%\n"
-                            msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
-                            msg += "═" * 25
-                            
-                            for admin_id in admin_ids:
-                                try:
-                                    await bot.send_message(admin_id, msg, parse_mode="Markdown")
-                                except:
-                                    pass
-                            
-                            logger.info(f"Auto trade fallback: {symbol} BUY at {current_price}")
+                        emoji = "🟢"
+                        msg = f"🎯 *АВТОТРЕЙДЕР*\n"
+                        msg += "═" * 25 + "\n"
+                        msg += f"{emoji} *{symbol}* 📈 ЛОНГ\n"
+                        msg += f"Вход: ${current_price:,.2f}\n"
+                        msg += f"От точки входа: {change_pct*100:+.1f}%\n"
+                        msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
+                        msg += "═" * 25
+                        
+                        for admin_id in admin_ids:
+                            try:
+                                await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                            except:
+                                pass
+                        
+                        logger.info(f"Auto trade: {symbol} BUY at {current_price}")
+                
+                # SELL если цена выросла на 3%+ от точки входа
+                elif change_pct >= 0.03:
+                    direction = "SELL"
+                    result = await add_backtest_signal(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=current_price,
+                        source="auto_trader"
+                    )
                     
-                    # SELL если цена выросла на 3%+ от точки входа
-                    elif change_pct >= 0.03:
-                        direction = "SELL"
-                        result = await add_backtest_signal(
-                            symbol=symbol,
-                            direction=direction,
-                            entry_price=current_price,
-                            source="auto_trader"
-                        )
+                    if result.get("status") == "opened":
+                        executed.append({
+                            "symbol": symbol,
+                            "direction": direction,
+                            "entry_price": current_price,
+                            "source": "auto_trader",
+                            "capital": result.get("capital_after", 0)
+                        })
                         
-                        if result.get("status") == "opened":
-                            executed.append({
-                                "symbol": symbol,
-                                "direction": direction,
-                                "entry_price": current_price,
-                                "source": "auto_trader",
-                                "capital": result.get("capital_after", 0)
-                            })
-                            
-                            emoji = "🔴"
-                            msg = f"🎯 *АВТОТРЕЙДЕР*\n"
-                            msg += "═" * 25 + "\n"
-                            msg += f"{emoji} *{symbol}* 📉 ШОРТ\n"
-                            msg += f"Вход: ${current_price:,.2f}\n"
-                            msg += f"От точки входа: {change_pct*100:+.1f}%\n"
-                            msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
-                            msg += "═" * 25
-                            
-                            for admin_id in admin_ids:
-                                try:
-                                    await bot.send_message(admin_id, msg, parse_mode="Markdown")
-                                except:
-                                    pass
-                            
-                            logger.info(f"Auto trade fallback: {symbol} SELL at {current_price}")
+                        emoji = "🔴"
+                        msg = f"🎯 *АВТОТРЕЙДЕР*\n"
+                        msg += "═" * 25 + "\n"
+                        msg += f"{emoji} *{symbol}* 📉 ШОРТ\n"
+                        msg += f"Вход: ${current_price:,.2f}\n"
+                        msg += f"От точки входа: {change_pct*100:+.1f}%\n"
+                        msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
+                        msg += "═" * 25
+                        
+                        for admin_id in admin_ids:
+                            try:
+                                await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                            except:
+                                pass
+                        
+                        logger.info(f"Auto trade: {symbol} SELL at {current_price}")
         
         # === Проверка открытых позиций: тейк-профит / стоп-лосс ===
         if symbol in open_positions:
