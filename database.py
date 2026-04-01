@@ -793,11 +793,11 @@ async def get_daily_context() -> dict | None:
                 return None
             
             data = dict(row)
-            data["symbols"] = json.loads(data.get("symbols", "[]"))
-            data["entries"] = json.loads(data.get("entries", "{}"))
-            data["stop_losses"] = json.loads(data.get("stop_losses", "{}"))
-            data["targets"] = json.loads(data.get("targets", "{}"))
-            data["timeframes"] = json.loads(data.get("timeframes", "{}"))
+            data["symbols"] = json.loads(data.get("symbols", "[]") or "[]")
+            data["entries"] = json.loads(data.get("entries", "{}") or "{}")
+            data["stop_losses"] = json.loads(data.get("stop_losses", "{}") or "{}")
+            data["targets"] = json.loads(data.get("targets", "{}") or "{}")
+            data["timeframes"] = json.loads(data.get("timeframes", "{}") or "{}")
             return data
 
 
@@ -807,12 +807,12 @@ async def get_recent_predictions(days: int = 5, limit: int = 10) -> list[dict]:
     """Get recent predictions for context in analysis."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("""
+        async with db.execute(f"""
             SELECT * FROM predictions 
-            WHERE created_at > datetime('now', '-{} days')
+            WHERE created_at > datetime('now', '-{days} days')
             ORDER BY created_at DESC
             LIMIT ?
-        """, (days, limit)) as cursor:
+        """, (limit,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
