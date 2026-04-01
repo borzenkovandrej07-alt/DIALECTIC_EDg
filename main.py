@@ -1393,6 +1393,7 @@ async def cb_signals(callback: CallbackQuery):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
             [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
         ])
         
         await callback.message.edit_text(
@@ -1408,6 +1409,7 @@ async def cb_signals(callback: CallbackQuery):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
             [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
         ])
         
         await callback.message.edit_text(
