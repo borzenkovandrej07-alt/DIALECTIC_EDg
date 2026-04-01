@@ -2641,7 +2641,7 @@ if __name__ == "__main__":
 @dp.message(Command("testbot"))
 async def cmd_test_bot(message: Message):
     """Test command."""
-    await message.answer("✅ Бот работает!")
+    await message.answer("TEST WORKS!")
 
 
 @dp.message(Command("signalstatus"))
