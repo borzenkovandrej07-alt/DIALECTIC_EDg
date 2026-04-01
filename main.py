@@ -2445,12 +2445,10 @@ backtest_enabled = True  # Global toggle for backtest recording
 
 @dp.message(Command("backtest"))
 async def cmd_backtest(message: Message):
-    """Show backtest results."""
+    """Show backtest results with nice formatting."""
     signals = await get_backtest_signals()
     stats = await get_backtest_stats()
     config = await get_backtest_config()
-    
-    lines = ["📊 BACKTEST РЕЗУЛЬТАТЫ", ""]
     
     total = stats.get("total", 0) or 0
     wins = stats.get("wins", 0) or 0
@@ -2463,45 +2461,48 @@ async def cmd_backtest(message: Message):
     capital = config.get("capital", 100.0)
     enabled = config.get("enabled", 1)
     
-    lines.append(f"💵 Капитал: ${capital:,.2f}")
-    lines.append(f"📈 Всего сделок: {total}")
-    lines.append(f"✅ Win Rate: {win_rate:.1f}% ({wins} wins / {losses} losses)")
-    lines.append(f"💰 Total PnL: ${total_pnl:+,.2f}")
-    lines.append(f"📊 Avg PnL: {avg_pnl:+.2f}%")
-    lines.append("")
-    lines.append("Открытые позиции:")
+    msg = "🤖 *ТЕСТОВЫЙ ТРЕЙДЕР*\n"
+    msg += "═" * 25 + "\n"
+    msg += f"💵 *Баланс:* `${capital:,.2f}`\n"
+    msg += f"📊 *Всего сделок:* {total}\n"
+    msg += f"🎯 *Win Rate:* {win_rate:.1f}%\n"
+    msg += f"💰 *Total PnL:* `${total_pnl:+,.2f}`\n"
+    msg += f"📈 *Avg PnL:* {avg_pnl:+.2f}%\n"
+    msg += "═" * 25 + "\n"
     
     open_positions = [s for s in signals if s.get("status") == "open"]
-    if not open_positions:
-        lines.append("  нет")
-    else:
+    if open_positions:
+        msg += "\n🔵 *Открытые позиции:*\n"
         for s in open_positions:
             symbol = s["symbol"]
             direction = s["direction"]
             entry = s.get("entry_price", 0)
-            qty = s.get("quantity", 0) or 0
-            lines.append(f"  {symbol} {direction} @ ${entry:,.2f} (qty: {qty:.4f})")
-    
-    lines.append("")
-    lines.append("Последние закрытые:")
+            emoji = "🟢" if direction == "BUY" else "🔴"
+            msg += f"  {emoji} {symbol} {direction} @ ${entry:,.2f}\n"
+    else:
+        msg += "\n📭 *Нет открытых позиций*\n"
     
     closed = [s for s in signals if s.get("status") == "closed"]
-    for s in closed[:5]:
-        symbol = s["symbol"]
-        direction = s["direction"]
-        pnl = s.get("pnl", 0) or 0
-        pnl_pct = s.get("pnl_pct", 0) or 0
-        emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-        lines.append(f"  {symbol} {direction} {emoji} ${pnl:+,.2f} ({pnl_pct:+.2f}%)")
+    if closed:
+        msg += "\n📋 *Последние сделки:*\n"
+        for s in closed[:5]:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            pnl = s.get("pnl", 0) or 0
+            pnl_pct = s.get("pnl_pct", 0) or 0
+            emoji = "🟢" if pnl > 0 else "🔴"
+            msg += f"  {emoji} {symbol} {direction} ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
     
-    status = "✅ ВКЛ" if enabled else "❌ ВЫКЛ"
-    lines.extend(["", f"🤖 Статус: {status} (/backtest_toggle)", f"💰 Изменить капитал: /backtest_capital [сумма]"])
+    status_text = "✅ Работает" if enabled else "❌ Остановлен"
+    msg += "\n" + "═" * 25 + "\n"
+    msg += f"Статус: {status_text}\n"
+    msg += "Команды:\n"
+    msg += "  /backtest_toggle - вкл/выкл\n"
+    msg += "  /backtest_capital [сумма] - изменить баланс\n"
+    msg += "  /backtest_clear - сбросить\n"
+    msg += "═" * 25
     
-    global backtest_enabled
-    status = "✅ ВКЛ" if backtest_enabled else "❌ ВЫКЛ"
-    lines.extend(["", f"🤖 Бэктест: {status} (/backtest_toggle)"])
-    
-    await message.answer("\n".join(lines))
+    await message.answer(msg, parse_mode="Markdown")
     
     # Also export to GitHub
     try:
@@ -2563,14 +2564,16 @@ async def cmd_signal_status(message: Message):
     """Check signal trader status."""
     status = await get_signal_trader_status()
     
-    lines = ["📡 СИГНАЛ ТРЕЙДЕР", ""]
-    lines.append(f"Статус: {'✅ Включён' if status['enabled'] else '❌ Выключен'}")
-    lines.append(f"Капитал: ${status['capital']:,.2f}")
-    lines.append(f"Вердикт: {status['daily_verdict'] or 'нет'}")
-    lines.append(f"Символы: {', '.join(status['symbols']) if status['symbols'] else 'нет'}")
-    lines.append(f"Всего сделок: {status['total_trades']}")
-    lines.append(f"Total PnL: ${status['total_pnl']:+,.2f}")
-    lines.append("")
-    lines.append("Проверка каждые 5 минут")
+    msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
+    msg += "═" * 25 + "\n"
+    msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
+    msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
+    msg += f"🎯 Вердикт: {status['daily_verdict'] or 'НЕТ'}\n"
+    msg += f"📊 Символы: {', '.join(status['symbols']) if status['symbols'] else 'нет'}\n"
+    msg += f"💰 Всего сделок: {status['total_trades']}\n"
+    msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
+    msg += "═" * 25 + "\n"
+    msg += "Проверка каждые 5 минут\n"
+    msg += "═" * 25
     
-    await message.answer("\n".join(lines))
+    await message.answer(msg, parse_mode="Markdown")

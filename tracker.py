@@ -447,15 +447,18 @@ async def save_predictions_from_report(report_text: str, source_news: str = "", 
 
     # Send notification to admins about executed trades
     if trades_executed and bot and admin_ids:
-        msg_parts = ["🔔 НОВЫЕ СДЕЛКИ БЭКТЕСТА", ""]
+        msg = "🎯 *ТЕСТОВЫЙ ТРЕЙДЕР - СДЕЛКА*\n"
+        msg += "═" * 25 + "\n"
         for t in trades_executed:
             emoji = "🟢" if t["direction"] == "BUY" else "🔴"
-            msg_parts.append(f"{emoji} {t['symbol']} {t['direction']} @ ${t['entry_price']:,.2f}")
-            msg_parts.append(f"   Капитал: ${t['capital']:,.2f}")
-        msg = "\n".join(msg_parts)
+            direction_text = "ПОКУПКА" if t["direction"] == "BUY" else "ПРОДАЖА"
+            msg += f"{emoji} *{t['symbol']}* {direction_text}\n"
+            msg += f"   Вход: ${t['entry_price']:,.2f}\n"
+            msg += f"   Баланс: ${t['capital']:,.2f}\n"
+        msg += "═" * 25
         for admin_id in admin_ids:
             try:
-                await bot.send_message(admin_id, msg)
+                await bot.send_message(admin_id, msg, parse_mode="Markdown")
             except Exception as e:
                 logger.warning(f"Failed to notify admin {admin_id}: {e}")
 

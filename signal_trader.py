@@ -139,18 +139,21 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                 }
                 executed.append(trade)
                 
-                # Notify admins
+                # Notify admins with nice format
                 emoji = "🟢" if direction == "BUY" else "🔴"
-                msg = f"🔔 СИГНАЛ ТРЕЙДЕРА\n\n"
-                msg += f"{emoji} {symbol} {direction}\n"
+                direction_text = "ПОКУПКА" if direction == "BUY" else "ПРОДАЖА"
+                msg = f"🎯 *ТЕСТОВЫЙ ТРЕЙДЕР - СИГНАЛ*\n"
+                msg += "═" * 25 + "\n"
+                msg += f"{emoji} *{symbol}* {direction_text}\n"
                 msg += f"Вход: ${current_price:,.2f}\n"
                 msg += f"Вердикт: {verdict}\n"
                 msg += f"Причина: {trigger_reason}\n"
-                msg += f"Капитал: ${result.get('capital_after', 0):,.2f}"
+                msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
+                msg += "═" * 25
                 
                 for admin_id in admin_ids:
                     try:
-                        await bot.send_message(admin_id, msg)
+                        await bot.send_message(admin_id, msg, parse_mode="Markdown")
                     except Exception as e:
                         logger.warning(f"Failed to notify admin {admin_id}: {e}")
                 
