@@ -81,7 +81,13 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
     from web_search import get_full_realtime_context
     
     try:
-        context = await get_full_realtime_context()
+        result = await get_full_realtime_context()
+        # Result is a tuple (prices_dict, formatted_string)
+        if isinstance(result, tuple):
+            _, context = result
+        else:
+            context = result
+        
         prices = {}
         
         # Parse prices from context

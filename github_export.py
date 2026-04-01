@@ -353,8 +353,15 @@ async def export_backtest_to_github(signals: list[dict], stats: dict, config: di
         "",
         "## 📈 Статистика (закрытые сделки)",
         "",
-        f"- Всего сделок: **{stats.get('total', 0)}**",
-        f"- Win Rate: **{stats.get('wins', 0) / max(stats.get('total', 1), 1) * 100:.1f}%**",
+    ]
+    
+    total = stats.get("total", 0) or 0
+    wins = stats.get("wins", 0) or 0
+    win_rate = (wins / total * 100) if total > 0 else 0
+    
+    lines.extend([
+        f"- Всего сделок: **{total}**",
+        f"- Win Rate: **{win_rate:.1f}%**",
         f"- Total PnL: **${stats.get('total_pnl', 0):+,.2f}**",
         f"- Avg PnL: **{stats.get('avg_pnl_pct', 0):+.2f}%**",
         "",
@@ -362,7 +369,7 @@ async def export_backtest_to_github(signals: list[dict], stats: dict, config: di
         "",
         "| Дата | Символ | Направление | Вход | Выход | PnL | PnL % |",
         "|------|--------|-------------|------|-------|-----|-------|",
-    ]
+    ])
     
     # Only show closed trades in table
     closed_signals = [s for s in signals if s.get("status") == "closed"]
