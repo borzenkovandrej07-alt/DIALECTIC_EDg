@@ -335,6 +335,65 @@ def hydrate_debate_from_report(full_report: str) -> dict | None:
     return {"rounds": [section], "full": full_report}
 
 
+def extract_verdict_from_report(report: str) -> str | None:
+    """Extract verdict from report synthesis section."""
+    markers = [
+        "⚖️ *ВЕРДИКТ И ТОРГОВЫЙ ПЛАН*",
+        "⚖️ ВЕРДИКТ И ТОРГОВЫЙ ПЛАН",
+        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
+        "ИТОГОВЫЙ СИНТЕЗ",
+    ]
+    synth_start = None
+    for m in markers:
+        if m in report:
+            synth_start = report.find(m)
+            break
+    
+    if synth_start is None:
+        return None
+    
+    synth = report[synth_start:synth_start + 1500]
+    synth_upper = synth.upper()
+    
+    if "БЫЧ" in synth_upper or "BULL" in synth_upper:
+        return "BUY"
+    elif "МЕДВЕЖ" in synth_upper or "BEAR" in synth_upper:
+        return "SELL"
+    else:
+        return "NEUTRAL"
+
+
+def extract_symbols_from_report(report: str, prices: dict) -> tuple[dict, dict, dict, dict]:
+    """Extract symbols, entry prices, stop losses, targets from report."""
+    entries = {}
+    stop_losses = {}
+    targets = {}
+    timeframes = {}
+    
+    symbol_pattern = re.compile(r"\$?(BTC|ETH|SOL|SPY|ES)[\s:]*\$?([\d,]+)", re.IGNORECASE)
+    
+    for match in symbol_pattern.finditer(report):
+        sym = match.group(1).upper()
+        try:
+            price_str = match.group(2).replace(",", "")
+            price = float(price_str)
+            if price > 100:
+                if sym not in entries:
+                    entries[sym] = price
+                else:
+                    stop_losses[sym] = price
+        except:
+            pass
+    
+    for sym, price in prices.items():
+        if sym not in entries:
+            entries[sym] = price
+        timeframes[sym] = "1h"
+    
+    return entries, stop_losses, targets, timeframes
+
+
 def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     Возвращает СПИСОК сообщений для отправки.
@@ -493,6 +552,17 @@ async def send_daily_digest_bundle(
         debate_cache[user_id] = hid
     else:
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
+    
+    # Save daily context for signal trading
+    try:
+        verdict = extract_verdict_from_report(report)
+        entries, stop_losses, targets, timeframes = extract_symbols_from_report(report, prices_dict)
+        if verdict and entries:
+            await save_daily_context(verdict, list(entries.keys()), entries, stop_losses, targets, timeframes)
+            logger.info(f"Saved daily context: verdict={verdict}, symbols={list(entries.keys())}")
+    except Exception as e:
+        logger.warning(f"Failed to save daily context: {e}")
+    
     try:
         await save_debate_session(user_id, report)
     except Exception as e:
