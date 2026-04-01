@@ -1,5 +1,5 @@
 """
-Signal Trader — проверяет сигналы каждые N минут и исполняет сделки по вердикту из /daily.
+Signal Trader — проверяет сигналы каждую минуту и торгует по простой стратегии.
 """
 import asyncio
 import logging
@@ -20,7 +20,14 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-INTERVAL_MINUTES = 5  # Проверка каждые 5 минут
+INTERVAL_SECONDS = 60  # Проверка каждую минуту (для тестов)
+
+TRADE_SYMBOLS = ["BTC", "ETH", "SOL"]  # Символы для торговли
+TRADE_THRESHOLD = 0.02  # 2% движение для входа
+TAKE_PROFIT = 0.03  # 3% тейк-профит
+STOP_LOSS = 0.02  # 2% стоп-лосс
+
+last_prices = {}  # Цены на последней проверке
 
 
 async def fetch_current_prices(symbols: list[str]) -> dict:
@@ -51,144 +58,195 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
 
 async def check_and_trade(bot, admin_ids: list) -> list[dict]:
     """
-    Проверить сигналы и исполнить сделки на основе daily_context.
-    Возвращает список выполненных сделок.
+    Проверить цены и исполнить сделки.
+    Стратегия: если цена упала на 2%+ → BUY, выросла на 2%+ → SELL.
+    Закрываем: +3% (тейк-профит) или -2% (стоп-лосс).
     """
+    global last_prices
     executed = []
     
-    # Check if backtest is enabled
     config = await get_backtest_config()
     if not config.get("enabled", 1):
-        logger.info("Backtest disabled, skipping trade check")
         return executed
     
-    # Get daily context
-    context = await get_daily_context()
-    if not context:
-        logger.info("No daily context found, skipping trade check")
+    prices = await fetch_current_prices(TRADE_SYMBOLS)
+    if not prices:
         return executed
     
-    verdict = context.get("verdict", "").upper()
-    symbols = context.get("symbols", [])
-    entries = context.get("entries", {})
-    stop_losses = context.get("stop_losses", {})
+    signals = await get_backtest_signals()
+    open_positions = {s["symbol"]: s for s in signals if s.get("status") == "open"}
     
-    if not symbols or not verdict:
-        logger.info("No symbols or verdict in context")
-        return executed
-    
-    # Get current prices
-    prices = await fetch_current_prices(symbols)
-    
-    # Check for each symbol
-    for symbol in symbols:
-        try:
-            current_price = prices.get(symbol)
-            entry_price = entries.get(symbol)
-            stop_loss = stop_losses.get(symbol)
-            
-            if not current_price or not entry_price:
-                continue
-            
-            # Check if we already have an open position for this symbol
-            signals = await get_backtest_signals()
-            open_positions = [s for s in signals if s.get("status") == "open" and s.get("symbol") == symbol]
-            
-            if open_positions:
-                logger.debug(f"Position already open for {symbol}")
-                continue
-            
-            # Determine if we should trade based on verdict
-            # If verdict is BUY, we look for price near entry or lower (buy the dip)
-            # If verdict is SELL, we look for price near entry or higher (sell the rip)
-            
-            trade_triggered = False
-            trigger_reason = ""
-            
-            if verdict == "BUY":
-                # Buy if price is at or below entry (within 2% tolerance)
-                if current_price <= entry_price * 1.02:
-                    trade_triggered = True
-                    trigger_reason = f"Price {current_price} <= entry {entry_price}"
-            
-            elif verdict == "SELL":
-                # Sell if price is at or above entry (within 2% tolerance)
-                if current_price >= entry_price * 0.98:
-                    trade_triggered = True
-                    trigger_reason = f"Price {current_price} >= entry {entry_price}"
-            
-            if not trade_triggered:
-                continue
-            
-            # Execute the trade
-            direction = "BUY" if verdict == "BUY" else "SELL"
-            result = await add_backtest_signal(
-                symbol=symbol,
-                direction=direction,
-                entry_price=current_price,
-                source="signal_trader"
-            )
-            
-            if result.get("status") == "opened":
-                trade = {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "entry_price": current_price,
-                    "reason": trigger_reason,
-                    "capital": result.get("capital_after", 0)
-                }
-                executed.append(trade)
-                
-                # Notify admins with nice format
-                emoji = "🟢" if direction == "BUY" else "🔴"
-                direction_text = "ПОКУПКА" if direction == "BUY" else "ПРОДАЖА"
-                msg = f"🎯 *ТЕСТОВЫЙ ТРЕЙДЕР - СИГНАЛ*\n"
-                msg += "═" * 25 + "\n"
-                msg += f"{emoji} *{symbol}* {direction_text}\n"
-                msg += f"Вход: ${current_price:,.2f}\n"
-                msg += f"Вердикт: {verdict}\n"
-                msg += f"Причина: {trigger_reason}\n"
-                msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
-                msg += "═" * 25
-                
-                for admin_id in admin_ids:
-                    try:
-                        await bot.send_message(admin_id, msg, parse_mode="Markdown")
-                    except Exception as e:
-                        logger.warning(f"Failed to notify admin {admin_id}: {e}")
-                
-                logger.info(f"Executed trade: {symbol} {direction} @ {current_price}")
+    for symbol in TRADE_SYMBOLS:
+        current_price = prices.get(symbol)
+        if not current_price:
+            continue
         
-        except Exception as e:
-            logger.warning(f"Error processing {symbol}: {e}")
+        last_price = last_prices.get(symbol)
+        
+        # Check for new trade signal (only if no open position)
+        if symbol not in open_positions and last_price:
+            change = (current_price - last_price) / last_price
+            
+            # Price dropped → BUY
+            if change <= -TRADE_THRESHOLD:
+                direction = "BUY"
+                result = await add_backtest_signal(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=current_price,
+                    source="auto_trader"
+                )
+                
+                if result.get("status") == "opened":
+                    executed.append({
+                        "symbol": symbol,
+                        "direction": direction,
+                        "entry_price": current_price,
+                        "change": change,
+                        "capital": result.get("capital_after", 0)
+                    })
+                    
+                    emoji = "🟢"
+                    msg = f"🎯 *АВТОТРЕЙДЕР - ПОКУПКА*\n"
+                    msg += "═" * 25 + "\n"
+                    msg += f"{emoji} *{symbol}* 📈 ЛОНГ\n"
+                    msg += f"Вход: ${current_price:,.2f}\n"
+                    msg += f"Изменение: {change*100:+.2f}%\n"
+                    msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
+                    msg += "═" * 25
+                    
+                    for admin_id in admin_ids:
+                        try:
+                            await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                        except:
+                            pass
+                    
+                    logger.info(f"Auto trade: {symbol} BUY at {current_price}")
+            
+            # Price jumped → SELL
+            elif change >= TRADE_THRESHOLD:
+                direction = "SELL"
+                result = await add_backtest_signal(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=current_price,
+                    source="auto_trader"
+                )
+                
+                if result.get("status") == "opened":
+                    executed.append({
+                        "symbol": symbol,
+                        "direction": direction,
+                        "entry_price": current_price,
+                        "change": change,
+                        "capital": result.get("capital_after", 0)
+                    })
+                    
+                    emoji = "🔴"
+                    msg = f"🎯 *АВТОТРЕЙДЕР - ПРОДАЖА*\n"
+                    msg += "═" * 25 + "\n"
+                    msg += f"{emoji} *{symbol}* 📉 ШОРТ\n"
+                    msg += f"Вход: ${current_price:,.2f}\n"
+                    msg += f"Изменение: {change*100:+.2f}%\n"
+                    msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
+                    msg += "═" * 25
+                    
+                    for admin_id in admin_ids:
+                        try:
+                            await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                        except:
+                            pass
+                    
+                    logger.info(f"Auto trade: {symbol} SELL at {current_price}")
+        
+        # Check open positions for take profit / stop loss
+        elif symbol in open_positions:
+            pos = open_positions[symbol]
+            entry = pos.get("entry_price", 0)
+            direction = pos.get("direction", "")
+            
+            if not entry:
+                continue
+            
+            change_pct = (current_price - entry) / entry if direction == "BUY" else (entry - current_price) / entry
+            
+            # Check take profit
+            if change_pct >= TAKE_PROFIT:
+                from database import close_backtest_signal
+                result = await close_backtest_signal(pos["id"], current_price)
+                if result:
+                    emoji = "🟢"
+                    msg = f"🎯 *АВТОТРЕЙДЕР - ТЕЙК-ПРОФИТ*\n"
+                    msg += "═" * 25 + "\n"
+                    msg += f"{emoji} {symbol} {direction} ЗАКРЫТ\n"
+                    msg += f"Вход: ${entry:,.2f}\n"
+                    msg += f"Выход: ${current_price:,.2f}\n"
+                    msg += f"Профит: {change_pct*100:+.2f}%\n"
+                    msg += f"💵 Баланс: ${result.get('new_capital', 0):,.2f}\n"
+                    msg += "═" * 25
+                    
+                    for admin_id in admin_ids:
+                        try:
+                            await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                        except:
+                            pass
+                    
+                    logger.info(f"Auto close: {symbol} TP at {current_price}")
+            
+            # Check stop loss
+            elif change_pct <= -STOP_LOSS:
+                from database import close_backtest_signal
+                result = await close_backtest_signal(pos["id"], current_price)
+                if result:
+                    emoji = "🔴"
+                    msg = f"🎯 *АВТОТРЕЙДЕР - СТОП-ЛОСС*\n"
+                    msg += "═" * 25 + "\n"
+                    msg += f"{emoji} {symbol} {direction} ЗАКРЫТ\n"
+                    msg += f"Вход: ${entry:,.2f}\n"
+                    msg += f"Выход: ${current_price:,.2f}\n"
+                    msg += f"Потери: {change_pct*100:.2f}%\n"
+                    msg += f"💵 Баланс: ${result.get('new_capital', 0):,.2f}\n"
+                    msg += "═" * 25
+                    
+                    for admin_id in admin_ids:
+                        try:
+                            await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                        except:
+                            pass
+                    
+                    logger.info(f"Auto close: {symbol} SL at {current_price}")
+    
+    # Update last prices for next iteration
+    last_prices = prices
     
     return executed
 
 
 async def run_signal_trader(bot, admin_ids: list):
-    """Запустить сигнал-трейдер в бесконечном цикле."""
-    logger.info(f"🚀 Signal Trader started (check every {INTERVAL_MINUTES} min)")
+    """Запустить автотрейдера в бесконечном цикле."""
+    logger.info(f"🚀 Auto Trader started (check every {INTERVAL_SECONDS} sec)")
     
     while True:
         try:
             await check_and_trade(bot, admin_ids)
         except Exception as e:
-            logger.error(f"Signal trader error: {e}")
+            logger.error(f"Auto trader error: {e}")
         
-        await asyncio.sleep(INTERVAL_MINUTES * 60)
+        await asyncio.sleep(INTERVAL_SECONDS)
 
 
 async def get_signal_trader_status() -> dict:
-    """Получить статус сигнал-трейдера."""
-    context = await get_daily_context()
+    """Получить статус автотрейдера."""
     config = await get_backtest_config()
     stats = await get_backtest_stats()
+    signals = await get_backtest_signals()
+    open_positions = [s for s in signals if s.get("status") == "open"]
     
     return {
         "enabled": config.get("enabled", 1),
         "capital": config.get("capital", 100.0),
-        "daily_verdict": context.get("verdict") if context else None,
-        "symbols": context.get("symbols", []) if context else [],
         "total_trades": stats.get("total", 0),
         "total_pnl": stats.get("total_pnl", 0),
+        "open_positions": len(open_positions),
+        "symbols": TRADE_SYMBOLS,
     }
