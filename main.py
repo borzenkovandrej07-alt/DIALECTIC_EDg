@@ -2635,24 +2635,48 @@ if __name__ == "__main__":
 
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
 
-from signal_trader import get_signal_trader_status
+from signal_trader import get_signal_trader_status, get_daily_context
 
 
 @dp.message(Command("signal_status"))
 async def cmd_signal_status(message: Message):
-    """Check signal trader status."""
+    """Check signal trader status with entry prices."""
     status = await get_signal_trader_status()
+    daily_ctx = await get_daily_context()
     
     msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
     msg += "═" * 25 + "\n"
     msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
     msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
-    msg += f"🎯 Вердикт: {status['daily_verdict'] or 'НЕТ'}\n"
-    msg += f"📊 Символы: {', '.join(status['symbols']) if status['symbols'] else 'нет'}\n"
+    
+    if daily_ctx:
+        verdict = daily_ctx.get("verdict", "NEUTRAL")
+        entries = daily_ctx.get("entries", {})
+        
+        msg += f"\n🎯 *Вердикт:* {verdict}\n"
+        
+        if entries:
+            msg += "\n📊 *Точки входа:*\n"
+            for symbol, price in entries.items():
+                if price:
+                    # Show entry price from daily
+                    msg += f"  • {symbol}: ${price:,.0f}\n"
+                    
+                    # Show trade trigger levels
+                    if verdict == "BUY":
+                        buy_trigger = price * 1.05  # 5% above entry
+                        msg += f"    → BUY при ${buy_trigger:,.0f}\n"
+                    elif verdict == "SELL":
+                        sell_trigger = price * 0.95  # 5% below entry
+                        msg += f"    → SELL при ${sell_trigger:,.0f}\n"
+        else:
+            msg += "\n📭 Нет точек входа — сделай /daily\n"
+    else:
+        msg += "\n📭 Нет контекста — сделай /daily\n"
+    
+    msg += "\n" + "═" * 25 + "\n"
     msg += f"💰 Всего сделок: {status['total_trades']}\n"
     msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
-    msg += "═" * 25 + "\n"
-    msg += "Проверка каждые 5 минут\n"
     msg += "═" * 25
     
     await message.answer(msg, parse_mode="Markdown")
