@@ -32,10 +32,17 @@ async def init_db():
                 sub_time    TEXT DEFAULT '08:00',
                 requests_today INTEGER DEFAULT 0,
                 requests_total INTEGER DEFAULT 0,
+                signals_sub INTEGER DEFAULT 0,
                 last_active TEXT,
                 created_at  TEXT DEFAULT (datetime('now'))
             )
         """)
+
+        # Добавляем колонку signals_sub если её нет (для обновления с существующей БД)
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN signals_sub INTEGER DEFAULT 0")
+        except:
+            pass  # Колонка уже существует
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
@@ -51,7 +58,11 @@ async def init_db():
                 result       TEXT DEFAULT 'pending',
                 result_price REAL,
                 result_at    TEXT,
-                pnl_pct      REAL
+                pnl_pct      REAL,
+                prediction_type TEXT,
+                forecast     TEXT,
+                fact         TEXT,
+                report_type  TEXT DEFAULT 'global'
             )
         """)
 
@@ -83,6 +94,67 @@ async def init_db():
                 user_id    INTEGER PRIMARY KEY,
                 report     TEXT NOT NULL,
                 updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                symbol      TEXT NOT NULL,
+                amount      REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                added_at    TEXT DEFAULT (datetime('now')),
+                UNIQUE(user_id, symbol)
+            )
+        """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_signals (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at  TEXT DEFAULT (datetime('now')),
+                symbol      TEXT NOT NULL,
+                direction   TEXT NOT NULL,  -- BUY or SELL
+                entry_price REAL,
+                exit_price  REAL,
+                status      TEXT DEFAULT 'open',  -- open, closed
+                pnl         REAL DEFAULT 0,
+                pnl_pct     REAL DEFAULT 0,
+                signal_source TEXT,  -- daily, manual, etc
+                notes       TEXT,
+                quantity    REAL DEFAULT 0,  -- amount of asset
+                trade_log   TEXT  -- JSON log of trade actions
+            )
+        """)
+        
+        # Backtest config table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_config (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                capital     REAL DEFAULT 100.0,
+                enabled     INTEGER DEFAULT 1,
+                last_updated TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        
+        # Initialize default config if not exists
+        await db.execute("""
+            INSERT OR IGNORE INTO backtest_config (id, capital, enabled) VALUES (1, 100.0, 1)
+        """)
+        
+        # Daily context table - stores verdict and price levels for signal trading
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS daily_context (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at      TEXT DEFAULT (datetime('now')),
+                verdict         TEXT,  -- BUY, SELL, NEUTRAL
+                symbols         TEXT,  -- JSON list of symbols to trade
+                entries         TEXT,  -- JSON dict of entry prices
+                stop_losses     TEXT,  -- JSON dict of stop loss prices
+                targets         TEXT,  -- JSON dict of target prices
+                timeframes      TEXT,  -- JSON dict of timeframes
+                news_summary    TEXT,  -- brief news context
+                expires_at      TEXT   -- when this context expires (default 24h)
             )
         """)
 
@@ -177,6 +249,38 @@ async def set_daily_sub(user_id: int, enabled: bool, time: str = "08:00"):
         await db.commit()
 
 
+async def get_signals_subscribers() -> list[dict]:
+    """Возвращает пользователей с включёнными сигналами."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM users WHERE signals_sub = 1"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def set_signals_sub(user_id: int, enabled: bool):
+    """Включить/выключить сигналы для пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET signals_sub = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id)
+        )
+        await db.commit()
+
+
+async def get_user_signals_status(user_id: int) -> bool:
+    """Проверить статус подписки на сигналы."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT signals_sub FROM users WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] == 1 if row else False
+
+
 # ─── Прогнозы / Track Record ──────────────────────────────────────────────────
 
 async def save_prediction(
@@ -229,40 +333,140 @@ async def update_prediction_result(
         await db.commit()
 
 
-async def get_track_record() -> dict:
+async def import_forecasts_from_markdown():
+    """Импорт прогнозов из локального FORECASTS.md в SQLite."""
+    import re
+    import os
+    forecast_path = os.path.join(os.path.dirname(__file__), "FORECASTS.md")
+    if not os.path.exists(forecast_path):
+        logger.warning("FORECASTS.md не найден")
+        return
+
+    with open(forecast_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    predictions = []
+    table_match = re.search(r"\| № \| Дата \|.*?\n\|[-|]+\|.*?\n((?:\|.*?\n)+)", content, re.DOTALL)
+    if not table_match:
+        logger.warning("Таблица прогнозов не найдена в FORECASTS.md")
+        return
+
+    rows = table_match.group(1).strip().split("\n")
+    for row in rows:
+        parts = [p.strip() for p in row.split("|")[1:-1]]
+        if len(parts) < 8:
+            continue
+        try:
+            date_str = parts[1]
+            pred_type = parts[2].strip()
+            asset = parts[3].strip()
+            forecast = parts[4].strip()
+            fact = parts[5].strip()
+            result_text = parts[6].strip().lower()
+            accuracy_text = parts[7].strip().replace("%", "").replace("*", "")
+            try:
+                pnl_pct = float(accuracy_text)
+            except:
+                pnl_pct = 0.0
+            if "неверно" in result_text:
+                result = "loss"
+            elif "осторожность" in result_text:
+                result = "caution"
+                pnl_pct = 100.0
+            elif "верно" in result_text or "точ" in result_text:
+                result = "win"
+            else:
+                result = "win"
+            date_obj = datetime.strptime(date_str, "%d.%m.%Y")
+            created_at = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+            
+            if "russia" in pred_type.lower() or "edge" in pred_type.lower():
+                report_type = "russia"
+            else:
+                report_type = "global"
+                
+            predictions.append({
+                "created_at": created_at,
+                "asset": asset,
+                "direction": forecast,
+                "result": result,
+                "pnl_pct": pnl_pct,
+                "prediction_type": pred_type,
+                "forecast": forecast,
+                "fact": fact,
+                "report_type": report_type
+            })
+        except Exception as e:
+            logger.debug(f"Ошибка парсинга строки: {e}")
+
+    if predictions:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM predictions WHERE created_at LIKE '2026-03-%'")
+            await db.commit()
+            for p in predictions:
+                await db.execute("""
+                    INSERT INTO predictions (created_at, asset, direction, entry_price, target_price, result, pnl_pct, prediction_type, forecast, fact, report_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    p["created_at"],
+                    p["asset"],
+                    p["direction"],
+                    None,
+                    None,
+                    p["result"],
+                    p["pnl_pct"],
+                    p.get("prediction_type", ""),
+                    p.get("forecast", ""),
+                    p.get("fact", ""),
+                    p.get("report_type", "global")
+                ))
+            await db.commit()
+        logger.info(f"✅ Импортировано {len(predictions)} прогнозов из FORECASTS.md")
+    else:
+        logger.warning("Не удалось распарсить прогнозы из FORECASTS.md")
+
+
+async def get_track_record(report_type: str = None) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        async with db.execute("""
+        where_clause = ""
+        params = []
+        if report_type:
+            where_clause = " AND report_type = ?"
+            params = [report_type]
+
+        async with db.execute(f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result = 'caution' THEN 1 ELSE 0 END) as cautions,
                 SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END) as pending,
                 AVG(CASE WHEN result != 'pending' THEN pnl_pct END) as avg_pnl,
                 MAX(pnl_pct) as best_call,
                 MIN(pnl_pct) as worst_call
             FROM predictions
-            WHERE result != 'expired'
-        """) as cursor:
+            WHERE result != 'expired'{where_clause}
+        """, params) as cursor:
             stats = dict(await cursor.fetchone())
 
-        async with db.execute("""
-            SELECT asset, direction, entry_price, result, pnl_pct, created_at
+        async with db.execute(f"""
+            SELECT asset, direction, entry_price, result, pnl_pct, created_at, prediction_type, forecast, fact
             FROM predictions
-            WHERE result != 'pending'
+            WHERE result != 'pending'{where_clause}
             ORDER BY created_at DESC
-            LIMIT 10
+            LIMIT 50
         """) as cursor:
             recent = [dict(r) for r in await cursor.fetchall()]
 
-        async with db.execute("""
+        async with db.execute(f"""
             SELECT asset,
                 COUNT(*) as calls,
                 SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
                 AVG(pnl_pct) as avg_pnl
             FROM predictions
-            WHERE result IN ('win','loss')
+            WHERE result IN ('win','loss'){where_clause}
             GROUP BY asset
             HAVING calls >= 2
             ORDER BY avg_pnl DESC
@@ -338,3 +542,400 @@ async def get_admin_stats() -> dict:
             "subscribers":   subscribers,
             "total_reports": total_reports,
         }
+
+
+async def add_portfolio_position(user_id: int, symbol: str, amount: float, entry_price: float) -> bool:
+    """Add or update portfolio position."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO portfolio (user_id, symbol, amount, entry_price)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, symbol) DO UPDATE SET
+                amount = excluded.amount,
+                entry_price = excluded.entry_price
+        """, (user_id, symbol.upper(), amount, entry_price))
+        await db.commit()
+    return True
+
+
+async def get_portfolio(user_id: int) -> list[dict]:
+    """Get user portfolio."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT symbol, amount, entry_price, added_at
+            FROM portfolio WHERE user_id = ?
+            ORDER BY added_at DESC
+        """, (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def remove_portfolio_position(user_id: int, symbol: str) -> bool:
+    """Remove position from portfolio."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM portfolio WHERE user_id = ? AND symbol = ?",
+                        (user_id, symbol.upper()))
+        await db.commit()
+    return True
+
+
+# ─── Backtest Signals ─────────────────────────────────────────────────────────────
+
+async def add_backtest_signal(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    source: str = "daily",
+    quantity_pct: float = 1.0,
+    notes: str = "",
+    trade_log: str = "",
+) -> dict:
+    """Open a paper trade without changing equity until the trade is closed."""
+    config = await get_backtest_config()
+
+    if not config.get("enabled", 1):
+        return {"status": "disabled", "message": "Backtest is disabled"}
+
+    if entry_price <= 0:
+        return {"status": "invalid", "message": "Entry price must be positive"}
+
+    direction = direction.upper()
+    symbol = symbol.upper()
+    quantity_pct = min(max(quantity_pct, 0.01), 1.0)
+    capital = float(config.get("capital", 100.0) or 100.0)
+    quantity = (capital * quantity_pct) / entry_price if entry_price > 0 else 0.0
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        async with db.execute("""
+            SELECT * FROM backtest_signals
+            WHERE symbol = ? AND direction = ? AND status = 'open'
+            ORDER BY created_at DESC LIMIT 1
+        """, (symbol, direction)) as cursor:
+            existing_open = await cursor.fetchone()
+
+        if existing_open:
+            return {
+                "status": "duplicate_open",
+                "signal_id": existing_open["id"],
+                "symbol": symbol,
+                "direction": direction,
+                "entry_price": existing_open["entry_price"],
+                "quantity": existing_open["quantity"] or 0.0,
+                "capital_before": capital,
+                "capital_after": capital,
+            }
+
+        cursor = await db.execute("""
+            INSERT INTO backtest_signals (
+                symbol, direction, entry_price, status, signal_source, notes, quantity, trade_log
+            )
+            VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
+        """, (symbol, direction, entry_price, source, notes[:500], quantity, trade_log[:4000]))
+
+        await db.execute("""
+            UPDATE backtest_config SET last_updated = datetime('now') WHERE id = 1
+        """)
+        await db.commit()
+
+    return {
+        "status": "opened",
+        "signal_id": cursor.lastrowid,
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": entry_price,
+        "quantity": quantity,
+        "capital_before": capital,
+        "capital_after": capital,
+    }
+
+
+async def close_backtest_signal(signal_id: int, exit_price: float, reason: str = "") -> dict | None:
+    """Close a paper trade, realize PnL, and update account equity."""
+    if exit_price <= 0:
+        return None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        async with db.execute("SELECT * FROM backtest_signals WHERE id = ?", (signal_id,)) as cursor:
+            signal = await cursor.fetchone()
+            if not signal:
+                return None
+
+        async with db.execute("SELECT capital FROM backtest_config WHERE id = 1") as cursor:
+            config_row = await cursor.fetchone()
+            capital = float((config_row["capital"] if config_row else 100.0) or 100.0)
+
+        if signal["status"] == "closed":
+            return {
+                "pnl": signal["pnl"] or 0.0,
+                "pnl_pct": signal["pnl_pct"] or 0.0,
+                "new_capital": capital,
+            }
+
+        entry_price = float(signal["entry_price"] or 0.0)
+        direction = (signal["direction"] or "").upper()
+        quantity = float(signal["quantity"] or 0.0)
+        quantity = quantity if quantity > 0 else (capital / entry_price if entry_price > 0 else 0.0)
+
+        if direction == "BUY":
+            pnl_per_unit = exit_price - entry_price
+        else:
+            pnl_per_unit = entry_price - exit_price
+
+        pnl_pct = (pnl_per_unit / entry_price * 100) if entry_price > 0 else 0.0
+        pnl = pnl_per_unit * quantity
+        new_capital = max(capital + pnl, 0.0)
+
+        old_notes = signal["notes"] or ""
+        final_notes = old_notes
+        if reason:
+            final_notes = f"{old_notes}\n{reason}".strip()
+
+        await db.execute("""
+            UPDATE backtest_signals
+            SET status = 'closed', exit_price = ?, pnl = ?, pnl_pct = ?, notes = ?
+            WHERE id = ?
+        """, (exit_price, pnl, pnl_pct, final_notes[:500], signal_id))
+
+        await db.execute("""
+            UPDATE backtest_config SET capital = ?, last_updated = datetime('now') WHERE id = 1
+        """, (new_capital,))
+        await db.commit()
+
+    return {
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "new_capital": new_capital,
+        "quantity": quantity,
+    }
+
+
+async def get_backtest_signals() -> list[dict]:
+    """Get all backtest signals."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM backtest_signals ORDER BY created_at DESC
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_backtest_stats() -> dict:
+    """Get backtest statistics."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        async with db.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as total_pnl,
+                AVG(pnl_pct) as avg_pnl_pct
+            FROM backtest_signals WHERE status = 'closed'
+        """) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "avg_pnl_pct": 0.0}
+            d = dict(row)
+            return {
+                "total": d.get("total") or 0,
+                "wins": d.get("wins") or 0,
+                "losses": d.get("losses") or 0,
+                "total_pnl": d.get("total_pnl") or 0.0,
+                "avg_pnl_pct": d.get("avg_pnl_pct") or 0.0
+            }
+
+
+# ─── Backtest Config ─────────────────────────────────────────────────────────────
+
+async def get_backtest_config() -> dict:
+    """Get backtest configuration (capital, enabled)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM backtest_config WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return {"capital": 100.0, "enabled": 1}
+            d = dict(row)
+            d["capital"] = d.get("capital") or 100.0
+            d["enabled"] = d.get("enabled") or 1
+            return d
+
+
+async def update_backtest_capital(new_capital: float) -> dict:
+    """Update backtest capital."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE backtest_config SET capital = ?, last_updated = datetime('now') WHERE id = 1
+        """, (new_capital,))
+        await db.commit()
+    return await get_backtest_config()
+
+
+async def set_backtest_enabled(enabled: bool) -> dict:
+    """Enable or disable backtest."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE backtest_config SET enabled = ?, last_updated = datetime('now') WHERE id = 1
+        """, (1 if enabled else 0,))
+        await db.commit()
+    return await get_backtest_config()
+
+
+# ─── Daily Context ─────────────────────────────────────────────────────────────
+
+def _decode_daily_context_row(row) -> dict | None:
+    import json
+
+    if not row:
+        return None
+
+    data = dict(row)
+    data["symbols"] = json.loads(data.get("symbols", "[]") or "[]")
+    data["entries"] = json.loads(data.get("entries", "{}") or "{}")
+    data["stop_losses"] = json.loads(data.get("stop_losses", "{}") or "{}")
+    data["targets"] = json.loads(data.get("targets", "{}") or "{}")
+    data["timeframes"] = json.loads(data.get("timeframes", "{}") or "{}")
+    return data
+
+
+async def save_daily_context(
+    verdict: str,
+    symbols: list,
+    entries: dict,
+    stop_losses: dict,
+    targets: dict,
+    timeframes: dict,
+    news_summary: str = ""
+) -> int:
+    """Save daily context from /daily and keep recent history for consensus trading."""
+    import json
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO daily_context (
+                verdict, symbols, entries, stop_losses, targets, timeframes, news_summary, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+72 hours'))
+        """, (
+            verdict,
+            json.dumps(symbols),
+            json.dumps(entries),
+            json.dumps(stop_losses),
+            json.dumps(targets),
+            json.dumps(timeframes),
+            news_summary[:500]
+        ))
+
+        await db.execute("""
+            DELETE FROM daily_context
+            WHERE id NOT IN (
+                SELECT id FROM daily_context ORDER BY created_at DESC, id DESC LIMIT 30
+            )
+        """)
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_daily_context() -> dict | None:
+    """Get the latest saved daily context for signal trading."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM daily_context ORDER BY created_at DESC, id DESC LIMIT 1
+        """) as cursor:
+            row = await cursor.fetchone()
+            return _decode_daily_context_row(row)
+
+
+async def get_recent_daily_contexts(limit: int = 3, max_age_hours: int | None = 72) -> list[dict]:
+    """Get several recent daily contexts for digest-consensus trading."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        if max_age_hours is None:
+            query = """
+                SELECT * FROM daily_context
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            """
+            params = (limit,)
+        else:
+            query = f"""
+                SELECT * FROM daily_context
+                WHERE created_at >= datetime('now', '-{int(max_age_hours)} hours')
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            """
+            params = (limit,)
+
+        async with db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [_decode_daily_context_row(row) for row in rows if row]
+
+
+# ─── Recent Predictions for Context ─────────────────────────────────────────────
+
+async def get_recent_predictions(days: int = 5, limit: int = 10) -> list[dict]:
+    """Get recent predictions for context in analysis."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(f"""
+            SELECT * FROM predictions 
+            WHERE created_at > datetime('now', '-{days} days')
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_predictions_summary(days: int = 5) -> str:
+    """Get formatted summary of recent predictions for AI context."""
+    predictions = await get_recent_predictions(days=days, limit=20)
+    
+    if not predictions:
+        return "Нет прошлых прогнозов за последние дни."
+    
+    lines = ["=== ПРОШЛЫЕ ПРОГНОЗЫ ==="]
+    
+    # Group by asset
+    by_asset = {}
+    for p in predictions:
+        asset = p.get("asset", "UNKNOWN")
+        if asset not in by_asset:
+            by_asset[asset] = []
+        by_asset[asset].append(p)
+    
+    for asset, preds in by_asset.items():
+        lines.append(f"\n{asset}:")
+        for p in preds[:3]:  # Max 3 per asset
+            direction = p.get("direction", "")
+            entry = p.get("entry_price") or 0
+            target = p.get("target_price") or 0
+            result = p.get("result", "pending")
+            date = p.get("created_at", "")[:10]
+            
+            if result == "pending":
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — в ожидании")
+            elif result == "win":
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — ✅ WIN")
+            elif result == "loss":
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — 🔴 LOSS")
+            else:
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — {result}")
+    
+    # Calculate accuracy
+    closed = [p for p in predictions if p.get("result") in ("win", "loss")]
+    wins = len([p for p in closed if p.get("result") == "win"])
+    accuracy = (wins / len(closed) * 100) if closed else 0
+    
+    lines.append(f"\nТочность: {wins}/{len(closed)} = {accuracy:.0f}%")
+    lines.append("=========================")
+    
+    return "\n".join(lines)

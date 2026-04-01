@@ -18,6 +18,7 @@ tracker.py — Автоматическая проверка прогнозов 
 import asyncio
 import logging
 import re
+import os
 from datetime import datetime, timedelta
 
 from market_data import MarketDataFetcher
@@ -236,32 +237,35 @@ def extract_predictions_from_report(report_text: str) -> list[dict]:
             "timeframe":   tf,
         })
 
-    # ── Метод 2: компактный inline формат ────────────────────────────────────
-    # "BTC LONG $96500 → $105000 стоп $93000"
-    # "ETH: SHORT от $3200, цель $2800, стоп $3400"
+    # ── Метод 2: РЕАЛЬНЫЙ формат Synth ──────────────────────────────────────
+    # "• BTC | LONG | Вход: $70,000 | Стоп: $68,000 | Цель: $74,000 | R/R 1:2 | Горизонт: 1w"
+    # "-> SHORT: Вход $70,000 | Стоп $72,100 | Цель $65,800"
     if not predictions:
-        inline_pattern = re.compile(
-            r'\b(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\b'
-            r'[:\s]+(LONG|SHORT|long|short)'
-            r'[^$\n]{0,30}\$\s*([\d,.K]+)'   # entry
-            r'[^$\n]{0,30}\$\s*([\d,.K]+)'   # target
-            r'[^$\n]{0,30}\$\s*([\d,.K]+)',   # stop
+        pipe_pattern = re.compile(
+            r'(?:•|-+>)\s*'
+            r'(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)'
+            r'\s*\|\s*(LONG|SHORT)'
+            r'.*?(?:Вход|вход|Entry)[:\s]+\$?([\d,\.K]+)'
+            r'.*?(?:Стоп|стоп|Stop)[:\s]+\$?([\d,\.K]+)'
+            r'.*?(?:Цел[ьи]|цел[ьи]|Target)[:\s]+\$?([\d,\.K]+)',
             re.IGNORECASE
         )
-        for m in inline_pattern.finditer(report_text):
+        for m in pipe_pattern.finditer(report_text):
             asset     = m.group(1).upper()
             direction = m.group(2).upper()
             entry     = _parse_price(m.group(3))
-            target    = _parse_price(m.group(4))
-            stop      = _parse_price(m.group(5))
+            stop      = _parse_price(m.group(4))
+            target    = _parse_price(m.group(5))
 
             if not all([entry, target, stop]):
                 continue
-
             if direction == "LONG" and not (stop < entry < target):
                 continue
             if direction == "SHORT" and not (target < entry < stop):
                 continue
+
+            tf_m = re.search(r'Горизонт[:\s]+([^|\n]{1,20})', m.group(0), re.IGNORECASE)
+            tf = _parse_timeframe(tf_m.group(1) if tf_m else "1w")
 
             predictions.append({
                 "asset":        asset,
@@ -269,7 +273,68 @@ def extract_predictions_from_report(report_text: str) -> list[dict]:
                 "entry_price":  entry,
                 "target_price": target,
                 "stop_loss":    stop,
-                "timeframe":    "1w",
+                "timeframe":    tf,
+            })
+
+    # ── Метод 3: стрелочный формат "-> SHORT: Вход $X | Стоп $Y | Цель $Z" ──
+    if not predictions:
+        arrow_pattern = re.compile(
+            r'->\s*(LONG|SHORT)[:\s]+'
+            r'Вход\s+\$?([\d,\.K]+)'
+            r'.*?Стоп\s+\$?([\d,\.K]+)'
+            r'.*?Цел[ьи]?\s+\$?([\d,\.K]+)',
+            re.IGNORECASE
+        )
+        # Ищем актив рядом (в 200 символах до стрелки)
+        for m in arrow_pattern.finditer(report_text):
+            direction = m.group(1).upper()
+            entry  = _parse_price(m.group(2))
+            stop   = _parse_price(m.group(3))
+            target = _parse_price(m.group(4))
+            if not all([entry, target, stop]):
+                continue
+            # Ищем актив перед стрелкой
+            prefix = report_text[max(0, m.start()-200):m.start()]
+            asset_m = re.search(r"\b(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\b", prefix)
+            if not asset_m:
+                continue
+            asset = asset_m.group(1).upper()
+            if direction == "LONG" and not (stop < entry < target):
+                continue
+            if direction == "SHORT" and not (target < entry < stop):
+                continue
+            predictions.append({
+                "asset": asset, "direction": direction,
+                "entry_price": entry, "target_price": target,
+                "stop_loss": stop, "timeframe": "1w",
+            })
+
+    # ── Метод 4: компактный inline ────────────────────────────────────────────
+    if not predictions:
+        inline_pattern = re.compile(
+            r'\b(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\b'
+            r'[:\s]+(LONG|SHORT|long|short)'
+            r'[^$\n]{0,30}\$\s*([\d,.K]+)'
+            r'[^$\n]{0,30}\$\s*([\d,.K]+)'
+            r'[^$\n]{0,30}\$\s*([\d,.K]+)',
+            re.IGNORECASE
+        )
+        for m in inline_pattern.finditer(report_text):
+            asset     = m.group(1).upper()
+            direction = m.group(2).upper()
+            entry  = _parse_price(m.group(3))
+            target = _parse_price(m.group(4))
+            stop   = _parse_price(m.group(5))
+            if not all([entry, target, stop]):
+                continue
+            if direction == "LONG" and not (stop < entry < target):
+                continue
+            if direction == "SHORT" and not (target < entry < stop):
+                continue
+            predictions.append({
+                "asset": asset, "direction": direction,
+                "entry_price": entry, "target_price": target,
+                "stop_loss": stop, "timeframe": "1w",
             })
 
     if predictions:
@@ -296,7 +361,7 @@ def _parse_timeframe(raw: str) -> str:
     return "1w"  # дефолт
 
 
-async def save_predictions_from_report(report_text: str, source_news: str = ""):
+async def save_predictions_from_report(report_text: str, source_news: str = "", bot=None, admin_ids: list = None):
     """Извлекает и сохраняет все прогнозы из отчёта."""
     vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
     if vm:
@@ -307,6 +372,40 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
     predictions = extract_predictions_from_report(report_text)
 
     saved = 0
+    trades_executed = []
+    
+    # Extract verdict from report
+    verdict = "NEUTRAL"
+    vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
+    if vm:
+        verdict_line = re.sub(r"[*_`]", "", vm.group(1)).strip().upper()
+        if "БЫЧ" in verdict_line or "BULL" in verdict_line:
+            verdict = "BUY"
+        elif "МЕДВЕЖ" in verdict_line or "BEAR" in verdict_line:
+            verdict = "SELL"
+        else:
+            verdict = "NEUTRAL"
+    
+    # Save daily context for signal trader
+    if predictions:
+        from database import save_daily_context
+        symbols = [p["asset"] for p in predictions]
+        entries = {p["asset"]: p["entry_price"] for p in predictions if p.get("entry_price")}
+        stop_losses = {p["asset"]: p["stop_loss"] for p in predictions if p.get("stop_loss")}
+        targets = {p["asset"]: p["target_price"] for p in predictions if p.get("target_price")}
+        timeframes = {p["asset"]: p["timeframe"] for p in predictions}
+        
+        await save_daily_context(
+            verdict=verdict,
+            symbols=symbols,
+            entries=entries,
+            stop_losses=stop_losses,
+            targets=targets,
+            timeframes=timeframes,
+            news_summary=source_news[:300]
+        )
+        logger.info(f"Saved daily context: verdict={verdict}, symbols={symbols}")
+    
     for pred in predictions:
         try:
             await save_prediction(
@@ -321,6 +420,23 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
             saved += 1
         except Exception as e:
             logger.warning(f"Не удалось сохранить прогноз: {e}")
+
+    # Send notification to admins about executed trades
+    if trades_executed and bot and admin_ids:
+        msg = "🎯 *ТЕСТОВЫЙ ТРЕЙДЕР - СДЕЛКА*\n"
+        msg += "═" * 25 + "\n"
+        for t in trades_executed:
+            emoji = "🟢" if t["direction"] == "BUY" else "🔴"
+            direction_text = "ПОКУПКА" if t["direction"] == "BUY" else "ПРОДАЖА"
+            msg += f"{emoji} *{t['symbol']}* {direction_text}\n"
+            msg += f"   Вход: ${t['entry_price']:,.2f}\n"
+            msg += f"   Баланс: ${t['capital']:,.2f}\n"
+        msg += "═" * 25
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(admin_id, msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.warning(f"Failed to notify admin {admin_id}: {e}")
 
     if saved:
         logger.info(f"Сохранено {saved} прогнозов из отчёта")

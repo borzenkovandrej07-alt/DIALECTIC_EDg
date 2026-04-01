@@ -1,0 +1,598 @@
+"""
+Paper auto trader:
+1. Reads the latest 2-3 digest contexts saved from reports.
+2. Builds a consensus verdict plus per-asset trade plans.
+3. Confirms crypto trades with /signals market bias.
+4. Opens and closes simulated trades in the backtest ledger.
+"""
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta
+
+from database import (
+    add_backtest_signal,
+    close_backtest_signal,
+    get_backtest_config,
+    get_backtest_signals,
+    get_backtest_stats,
+    get_recent_daily_contexts,
+)
+
+logger = logging.getLogger(__name__)
+
+INTERVAL_SECONDS = 300
+RECENT_CONTEXT_LIMIT = 3
+CONTEXT_MAX_AGE_HOURS = 72
+ENTRY_TOLERANCE_PCT = 0.02
+OPEN_SCORE_THRESHOLD = 18.0
+REVERSAL_SCORE_THRESHOLD = 16.0
+CRYPTO_SIGNAL_SYMBOLS = {"BTC", "ETH", "SOL", "BNB"}
+
+_signal_cache: dict = {}
+_signal_cache_time: datetime | None = None
+
+
+def _direction_to_int(direction: str) -> int:
+    direction = (direction or "").upper()
+    if direction in {"BUY", "LONG", "BULLISH"}:
+        return 1
+    if direction in {"SELL", "SHORT", "BEARISH"}:
+        return -1
+    return 0
+
+
+def _int_to_trade_direction(score: int) -> str:
+    if score > 0:
+        return "BUY"
+    if score < 0:
+        return "SELL"
+    return "NEUTRAL"
+
+
+def _consensus_to_signal_verdict(verdict: str) -> dict | None:
+    if verdict == "BUY":
+        return {"verdict": "BULLISH"}
+    if verdict == "SELL":
+        return {"verdict": "BEARISH"}
+    return None
+
+
+def _parse_context_dt(raw: str) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def is_daily_context_fresh(context: dict | None) -> bool:
+    """Whether the latest saved digest context is still recent enough for trading."""
+    if not context:
+        return False
+    created = _parse_context_dt(context.get("created_at", ""))
+    if not created:
+        return False
+    return (datetime.now() - created) < timedelta(hours=CONTEXT_MAX_AGE_HOURS)
+
+
+def _infer_plan_direction(context: dict, symbol: str) -> str:
+    entries = context.get("entries", {}) or {}
+    targets = context.get("targets", {}) or {}
+    stops = context.get("stop_losses", {}) or {}
+
+    entry = float(entries.get(symbol) or 0)
+    target = float(targets.get(symbol) or 0)
+    stop = float(stops.get(symbol) or 0)
+
+    if entry and target and stop:
+        if stop < entry < target:
+            return "BUY"
+        if target < entry < stop:
+            return "SELL"
+
+    verdict = (context.get("verdict") or "").upper()
+    if verdict in {"BUY", "SELL"}:
+        return verdict
+    return "NEUTRAL"
+
+
+def build_digest_consensus(contexts: list[dict]) -> dict:
+    """Aggregate the latest digest contexts into a tradeable consensus."""
+    contexts = contexts[:RECENT_CONTEXT_LIMIT]
+    weights = [3, 2, 1]
+    verdict_score = 0
+    raw_candidates: dict[tuple[str, str], dict] = {}
+    context_rows = []
+
+    for idx, context in enumerate(contexts):
+        weight = weights[idx] if idx < len(weights) else 1
+        verdict = (context.get("verdict") or "NEUTRAL").upper()
+        verdict_score += _direction_to_int(verdict) * weight
+        context_rows.append({
+            "created_at": context.get("created_at", ""),
+            "verdict": verdict,
+            "symbols": sorted(set(context.get("symbols", []) or [])),
+        })
+
+        symbols = sorted(set(context.get("symbols", []) or []))
+        symbols.extend(list((context.get("entries", {}) or {}).keys()))
+        symbols.extend(list((context.get("targets", {}) or {}).keys()))
+        symbols.extend(list((context.get("stop_losses", {}) or {}).keys()))
+        symbols = sorted(set(symbols))
+
+        for symbol in symbols:
+            direction = _infer_plan_direction(context, symbol)
+            if direction not in {"BUY", "SELL"}:
+                continue
+
+            entry = float((context.get("entries", {}) or {}).get(symbol) or 0)
+            target = float((context.get("targets", {}) or {}).get(symbol) or 0)
+            stop = float((context.get("stop_losses", {}) or {}).get(symbol) or 0)
+            timeframe = (context.get("timeframes", {}) or {}).get(symbol) or "1w"
+
+            key = (symbol, direction)
+            bucket = raw_candidates.setdefault(key, {
+                "symbol": symbol,
+                "direction": direction,
+                "support": 0,
+                "weighted_support": 0,
+                "entry_values": [],
+                "target_values": [],
+                "stop_values": [],
+                "timeframes": [],
+                "context_dates": [],
+                "latest_created_at": context.get("created_at", ""),
+                "latest_news_summary": context.get("news_summary", ""),
+            })
+
+            bucket["support"] += 1
+            bucket["weighted_support"] += weight
+            bucket["context_dates"].append(context.get("created_at", ""))
+            if entry > 0:
+                bucket["entry_values"].append(entry)
+            if target > 0:
+                bucket["target_values"].append(target)
+            if stop > 0:
+                bucket["stop_values"].append(stop)
+            if timeframe:
+                bucket["timeframes"].append(timeframe)
+
+    consensus_verdict = "NEUTRAL"
+    if verdict_score >= 2:
+        consensus_verdict = "BUY"
+    elif verdict_score <= -2:
+        consensus_verdict = "SELL"
+
+    required_support = 2 if len(contexts) >= 2 else 1
+    candidates = []
+
+    for plan in raw_candidates.values():
+        if plan["support"] < required_support:
+            continue
+
+        digest_score = plan["weighted_support"] * 4.0
+        if consensus_verdict in {"BUY", "SELL"}:
+            digest_score += 4.0 if plan["direction"] == consensus_verdict else -6.0
+
+        candidate = {
+            "symbol": plan["symbol"],
+            "direction": plan["direction"],
+            "support": plan["support"],
+            "weighted_support": plan["weighted_support"],
+            "digest_score": round(digest_score, 2),
+            "entry": round(sum(plan["entry_values"]) / len(plan["entry_values"]), 4) if plan["entry_values"] else 0.0,
+            "target": round(sum(plan["target_values"]) / len(plan["target_values"]), 4) if plan["target_values"] else 0.0,
+            "stop": round(sum(plan["stop_values"]) / len(plan["stop_values"]), 4) if plan["stop_values"] else 0.0,
+            "timeframe": plan["timeframes"][0] if plan["timeframes"] else "1w",
+            "context_dates": plan["context_dates"][:],
+            "latest_created_at": plan["latest_created_at"],
+            "news_summary": plan["latest_news_summary"],
+        }
+        candidates.append(candidate)
+
+    candidates.sort(key=lambda item: (item["digest_score"], item["weighted_support"]), reverse=True)
+
+    return {
+        "consensus_verdict": consensus_verdict,
+        "verdict_score": verdict_score,
+        "contexts": context_rows,
+        "candidates": candidates,
+    }
+
+
+async def _fetch_crypto_signal_bias(symbols: list[str], consensus_verdict: str) -> dict:
+    global _signal_cache, _signal_cache_time
+
+    crypto_symbols = [symbol for symbol in symbols if symbol in CRYPTO_SIGNAL_SYMBOLS]
+    if not crypto_symbols:
+        return {}
+
+    now = datetime.now()
+    if _signal_cache_time and (now - _signal_cache_time).total_seconds() < 300:
+        return {symbol: _signal_cache.get(symbol, {}) for symbol in crypto_symbols}
+
+    try:
+        from signals import fetch_binance_signals, build_signal_bias_map
+
+        raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
+        bias = build_signal_bias_map(raw, None)
+        _signal_cache = bias
+        _signal_cache_time = now
+        return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
+    except Exception as e:
+        logger.warning(f"Signal bias fetch error: {e}")
+        return {}
+
+
+async def _export_backtest_snapshot():
+    try:
+        from github_export import export_backtest_to_github
+
+        signals = await get_backtest_signals()
+        stats = await get_backtest_stats()
+        config = await get_backtest_config()
+        await export_backtest_to_github(signals, stats, config)
+    except Exception as e:
+        logger.warning(f"Backtest export error: {e}")
+
+
+async def fetch_current_prices(symbols: list[str]) -> dict:
+    """Fetch current prices for crypto and stocks used in recent trade plans."""
+    prices = {}
+    symbols = sorted(set(symbols))
+    if not symbols:
+        return prices
+
+    signal_bias = await _fetch_crypto_signal_bias(symbols, "NEUTRAL")
+    for symbol, data in signal_bias.items():
+        last_price = float(data.get("last_price") or 0.0)
+        if last_price > 0:
+            prices[symbol] = last_price
+
+    missing = [symbol for symbol in symbols if symbol not in prices]
+    if not missing:
+        return prices
+
+    try:
+        from tracker import get_current_price
+
+        results = await asyncio.gather(*(get_current_price(symbol) for symbol in missing), return_exceptions=True)
+        for symbol, result in zip(missing, results):
+            if isinstance(result, Exception) or result in (None, 0):
+                continue
+            try:
+                prices[symbol] = float(result)
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"Fallback price fetch error: {e}")
+
+    return prices
+
+
+def _score_candidate(candidate: dict, current_price: float, signal_bias: dict) -> dict:
+    direction = candidate["direction"]
+    entry = float(candidate.get("entry") or 0)
+    stop = float(candidate.get("stop") or 0)
+    target = float(candidate.get("target") or 0)
+    signal = signal_bias.get(candidate["symbol"], {})
+
+    proximity_score = 0.0
+    blocked_reason = ""
+
+    if entry > 0:
+        delta = (current_price - entry) / entry
+        if direction == "BUY":
+            if stop and current_price <= stop:
+                blocked_reason = "price_below_stop"
+            elif target and current_price >= target:
+                blocked_reason = "price_at_target"
+            elif current_price <= entry * (1 + ENTRY_TOLERANCE_PCT):
+                proximity_score = max(0.0, 6.0 - abs(delta) * 150)
+            else:
+                proximity_score = -6.0
+        else:
+            if stop and current_price >= stop:
+                blocked_reason = "price_above_stop"
+            elif target and current_price <= target:
+                blocked_reason = "price_at_target"
+            elif current_price >= entry * (1 - ENTRY_TOLERANCE_PCT):
+                proximity_score = max(0.0, 6.0 - abs(delta) * 150)
+            else:
+                proximity_score = -6.0
+
+    signal_score = 0.0
+    signal_direction = signal.get("direction", "NEUTRAL")
+    if candidate["symbol"] in CRYPTO_SIGNAL_SYMBOLS:
+        raw_signal_score = float(signal.get("score") or 0.0)
+        signal_score = raw_signal_score * 0.35
+        if signal_direction == "NEUTRAL":
+            signal_score -= 2.0
+        elif (direction == "BUY" and signal_direction == "SHORT") or (direction == "SELL" and signal_direction == "LONG"):
+            signal_score -= 5.0
+    else:
+        signal_score = -2.0
+
+    total_score = float(candidate.get("digest_score") or 0.0) + proximity_score + signal_score
+    ready = not blocked_reason and total_score >= OPEN_SCORE_THRESHOLD
+
+    scored = dict(candidate)
+    scored.update({
+        "current_price": current_price,
+        "signal_direction": signal_direction,
+        "signal_strength": float(signal.get("strength") or 0.0),
+        "signal_score_component": round(signal_score, 2),
+        "proximity_score": round(proximity_score, 2),
+        "total_score": round(total_score, 2),
+        "ready": ready,
+        "blocked_reason": blocked_reason,
+        "signal_reasons": signal.get("reasons", []),
+    })
+    return scored
+
+
+def rank_trade_candidates(consensus: dict, prices: dict, signal_bias: dict) -> list[dict]:
+    ranked = []
+    for candidate in consensus.get("candidates", []):
+        price = float(prices.get(candidate["symbol"]) or 0.0)
+        if price <= 0:
+            continue
+        ranked.append(_score_candidate(candidate, price, signal_bias))
+
+    ranked.sort(key=lambda item: item["total_score"], reverse=True)
+    return ranked
+
+
+def _parse_trade_meta(position: dict) -> dict:
+    raw = position.get("trade_log") or ""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+async def _close_position_if_needed(position: dict, prices: dict, signal_bias: dict, consensus: dict) -> dict | None:
+    symbol = position["symbol"]
+    current_price = float(prices.get(symbol) or 0.0)
+    if current_price <= 0:
+        return None
+
+    meta = _parse_trade_meta(position)
+    direction = (position.get("direction") or "").upper()
+    target = float(meta.get("target") or 0.0)
+    stop = float(meta.get("stop") or 0.0)
+    reason = ""
+
+    if direction == "BUY":
+        if target and current_price >= target:
+            reason = "Target hit"
+        elif stop and current_price <= stop:
+            reason = "Stop loss hit"
+    elif direction == "SELL":
+        if target and current_price <= target:
+            reason = "Target hit"
+        elif stop and current_price >= stop:
+            reason = "Stop loss hit"
+
+    if not reason:
+        signal = signal_bias.get(symbol, {})
+        signal_score = float(signal.get("score") or 0.0)
+        signal_direction = signal.get("direction", "NEUTRAL")
+        if direction == "BUY" and signal_direction == "SHORT" and abs(signal_score) >= REVERSAL_SCORE_THRESHOLD:
+            reason = "Signal reversal"
+        elif direction == "SELL" and signal_direction == "LONG" and abs(signal_score) >= REVERSAL_SCORE_THRESHOLD:
+            reason = "Signal reversal"
+
+    if not reason:
+        consensus_verdict = consensus.get("consensus_verdict", "NEUTRAL")
+        if direction == "BUY" and consensus_verdict == "SELL":
+            reason = "Digest consensus flipped bearish"
+        elif direction == "SELL" and consensus_verdict == "BUY":
+            reason = "Digest consensus flipped bullish"
+
+    if not reason:
+        return None
+
+    result = await close_backtest_signal(position["id"], current_price, reason=reason)
+    if not result:
+        return None
+
+    return {
+        "event": "closed",
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": float(position.get("entry_price") or 0.0),
+        "exit_price": current_price,
+        "reason": reason,
+        "pnl": float(result.get("pnl") or 0.0),
+        "pnl_pct": float(result.get("pnl_pct") or 0.0),
+        "capital": float(result.get("new_capital") or 0.0),
+    }
+
+
+async def _notify_admins(bot, admin_ids: list[int], event: dict):
+    if not bot or not admin_ids:
+        return
+
+    if event["event"] == "opened":
+        emoji = "🟢" if event["direction"] == "BUY" else "🔴"
+        msg = (
+            f"🎯 *AUTO TRADE OPEN*\n"
+            f"{emoji} *{event['symbol']}* {event['direction']}\n"
+            f"Вход: `${event['entry_price']:,.2f}`\n"
+            f"План: `{event['support']} digest(s)` | Score `{event['score']}`\n"
+            f"Сигнал: `{event['signal_direction']}`\n"
+            f"Тейк: `${event['target']:,.2f}` | Стоп: `${event['stop']:,.2f}`\n"
+            f"Баланс: `${event['capital']:,.2f}`"
+        )
+    else:
+        emoji = "🟢" if event["pnl"] >= 0 else "🔴"
+        msg = (
+            f"🎯 *AUTO TRADE CLOSE*\n"
+            f"{emoji} *{event['symbol']}* {event['direction']}\n"
+            f"Выход: `${event['exit_price']:,.2f}`\n"
+            f"PnL: `{event['pnl']:+,.2f}` ({event['pnl_pct']:+.2f}%)\n"
+            f"Причина: {event['reason']}\n"
+            f"Баланс: `${event['capital']:,.2f}`"
+        )
+
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, msg, parse_mode="Markdown")
+        except Exception:
+            continue
+
+
+async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
+    """Run one paper-trading cycle."""
+    events = []
+    config = await get_backtest_config()
+    if not config.get("enabled", 1):
+        return events
+
+    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=CONTEXT_MAX_AGE_HOURS)
+    if not contexts:
+        return events
+
+    consensus = build_digest_consensus(contexts)
+    open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+
+    symbols = {candidate["symbol"] for candidate in consensus.get("candidates", [])}
+    symbols.update(position["symbol"] for position in open_positions)
+    prices = await fetch_current_prices(list(symbols))
+    signal_bias = await _fetch_crypto_signal_bias(list(symbols), consensus.get("consensus_verdict", "NEUTRAL"))
+
+    for position in open_positions:
+        closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
+        if closed_event:
+            events.append(closed_event)
+            await _notify_admins(bot, admin_ids, closed_event)
+
+    remaining_open = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+    if remaining_open:
+        if events:
+            await _export_backtest_snapshot()
+        return events
+
+    ranked = rank_trade_candidates(consensus, prices, signal_bias)
+    if not ranked:
+        if events:
+            await _export_backtest_snapshot()
+        return events
+
+    best = ranked[0]
+    if not best.get("ready"):
+        if events:
+            await _export_backtest_snapshot()
+        return events
+
+    notes = (
+        f"Digest consensus {consensus.get('consensus_verdict')} | "
+        f"support {best['support']} | signal {best['signal_direction']}"
+    )
+    trade_meta = json.dumps({
+        "target": best.get("target") or 0.0,
+        "stop": best.get("stop") or 0.0,
+        "entry_plan": best.get("entry") or 0.0,
+        "support": best.get("support") or 0,
+        "context_dates": best.get("context_dates") or [],
+        "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
+        "signal_direction": best.get("signal_direction", "NEUTRAL"),
+        "signal_reasons": best.get("signal_reasons", []),
+    }, ensure_ascii=False)
+
+    result = await add_backtest_signal(
+        symbol=best["symbol"],
+        direction=best["direction"],
+        entry_price=float(best["current_price"]),
+        source="auto_trader",
+        quantity_pct=1.0,
+        notes=notes,
+        trade_log=trade_meta,
+    )
+
+    if result.get("status") != "opened":
+        return events
+
+    opened_event = {
+        "event": "opened",
+        "symbol": best["symbol"],
+        "direction": best["direction"],
+        "entry_price": float(best["current_price"]),
+        "target": float(best.get("target") or 0.0),
+        "stop": float(best.get("stop") or 0.0),
+        "support": int(best.get("support") or 0),
+        "score": float(best.get("total_score") or 0.0),
+        "signal_direction": best.get("signal_direction", "NEUTRAL"),
+        "capital": float(result.get("capital_after") or 0.0),
+    }
+    events.append(opened_event)
+    await _notify_admins(bot, admin_ids, opened_event)
+    await _export_backtest_snapshot()
+    logger.info("Opened paper trade %s %s at %.2f", best["symbol"], best["direction"], best["current_price"])
+    return events
+
+
+async def run_signal_trader(bot, admin_ids: list[int]):
+    """Run the paper autotrader forever."""
+    logger.info("Auto trader started, interval=%s sec", INTERVAL_SECONDS)
+    while True:
+        try:
+            await check_and_trade(bot, admin_ids)
+        except Exception as e:
+            logger.error(f"Auto trader error: {e}")
+        await asyncio.sleep(INTERVAL_SECONDS)
+
+
+async def get_signal_trader_status() -> dict:
+    """Return a richer status payload for /signalstatus."""
+    config = await get_backtest_config()
+    stats = await get_backtest_stats()
+    signals = await get_backtest_signals()
+    open_positions = [row for row in signals if row.get("status") == "open"]
+    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=CONTEXT_MAX_AGE_HOURS)
+    latest_context = contexts[0] if contexts else None
+    consensus = build_digest_consensus(contexts) if contexts else {
+        "consensus_verdict": "NEUTRAL",
+        "verdict_score": 0,
+        "contexts": [],
+        "candidates": [],
+    }
+
+    candidate_rows = []
+    if consensus.get("candidates"):
+        symbols = [candidate["symbol"] for candidate in consensus["candidates"][:5]]
+        prices = await fetch_current_prices(symbols)
+        signal_bias = await _fetch_crypto_signal_bias(symbols, consensus.get("consensus_verdict", "NEUTRAL"))
+        candidate_rows = rank_trade_candidates(consensus, prices, signal_bias)[:3]
+
+    active_positions = []
+    for position in open_positions:
+        meta = _parse_trade_meta(position)
+        active_positions.append({
+            "symbol": position["symbol"],
+            "direction": position["direction"],
+            "entry_price": float(position.get("entry_price") or 0.0),
+            "target": float(meta.get("target") or 0.0),
+            "stop": float(meta.get("stop") or 0.0),
+            "support": int(meta.get("support") or 0),
+        })
+
+    return {
+        "enabled": config.get("enabled", 1),
+        "capital": float(config.get("capital", 100.0) or 100.0),
+        "total_trades": stats.get("total", 0),
+        "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
+        "open_positions": len(open_positions),
+        "active_positions": active_positions,
+        "tracked_symbols": [candidate["symbol"] for candidate in consensus.get("candidates", [])[:5]],
+        "daily_context_fresh": is_daily_context_fresh(latest_context),
+        "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
+        "recent_contexts": consensus.get("contexts", []),
+        "top_candidates": candidate_rows,
+    }

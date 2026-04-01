@@ -13,11 +13,31 @@ scheduler.py — Фоновые задачи по расписанию.
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, date
 from database import (
     get_daily_subscribers,
     reset_daily_counts,
+    get_signals_subscribers,
 )
+
+try:
+    from alert_system import AlertSystem
+    ALERT_SYSTEM_ENABLED = True
+except ImportError:
+    ALERT_SYSTEM_ENABLED = False
+
+try:
+    from signals import SignalsSystem
+    SIGNALS_SYSTEM_ENABLED = True
+except ImportError:
+    SIGNALS_SYSTEM_ENABLED = False
+
+try:
+    from auto_tracker import AutoTracker
+    AUTO_TRACKER_ENABLED = True
+except ImportError:
+    AUTO_TRACKER_ENABLED = False
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +48,55 @@ class Scheduler:
         self.send_daily = send_daily_fn
         self.check_predictions = check_predictions_fn
         self._running = False
-        # ИСПРАВЛЕНО: трекаем дату последнего экспорта чтобы не дублировать
         self._last_export_date: date | None = None
+        self._alert_system = None
+        self._signals_system = None
+        
+        if ALERT_SYSTEM_ENABLED:
+            try:
+                github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+                self._alert_system = AlertSystem(self.bot, github_repo)
+                logger.info("✅ Alert system инициализирован")
+            except Exception as e:
+                logger.warning(f"Alert system init error: {e}")
+        
+        if SIGNALS_SYSTEM_ENABLED:
+            try:
+                github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+                self._signals_system = SignalsSystem(self.bot, github_repo)
+                logger.info("✅ Signals system инициализирован")
+            except Exception as e:
+                logger.warning(f"Signals system init error: {e}")
+        
+        self._auto_tracker = None
+        if AUTO_TRACKER_ENABLED:
+            try:
+                self._auto_tracker = AutoTracker()
+                logger.info("✅ Auto tracker инициализирован")
+            except Exception as e:
+                logger.warning(f"Auto tracker init error: {e}")
 
     async def start(self):
         self._running = True
         logger.info("⏰ Scheduler запущен")
 
-        await asyncio.gather(
+        tasks = [
             self._daily_digest_loop(),
             self._prediction_checker_loop(),
             self._midnight_reset_loop(),
-            self._daily_github_export_loop(),   # ← раз в сутки, не после каждого /daily
-        )
+            self._daily_github_export_loop(),
+        ]
+        
+        if ALERT_SYSTEM_ENABLED and self._alert_system:
+            tasks.append(self._alert_checker_loop())
+        
+        if SIGNALS_SYSTEM_ENABLED and self._signals_system:
+            tasks.append(self._signals_checker_loop())
+        
+        if AUTO_TRACKER_ENABLED and self._auto_tracker:
+            tasks.append(self._auto_tracker_loop())
+        
+        await asyncio.gather(*tasks)
 
     async def _daily_digest_loop(self):
         """Каждую минуту проверяет — не пора ли слать дайджест подписчикам."""
@@ -109,21 +165,92 @@ class Scheduler:
                 now = datetime.now()
                 today = now.date()
 
-                # Экспортируем раз в сутки в 00:05
-                if (now.hour == 0 and now.minute == 5
-                        and self._last_export_date != today):
-                    from github_export import export_to_github
-                    success = await export_to_github()
-                    if success:
-                        self._last_export_date = today
-                        logger.info("✅ Track record экспортирован на GitHub (ежесуточно)")
-                    else:
-                        logger.warning("⚠️ GitHub export не выполнен — проверь GITHUB_TOKEN")
+                # Экспорт ОТКЛЮЧЕН — теперь вручную
+                # Включить: раскомментировать ниже
+                # if (now.hour == 0 and now.minute == 5
+                #         and self._last_export_date != today):
+                #     from github_export import export_to_github
+                #     success = await export_to_github()
+                #     if success:
+                #         self._last_export_date = today
+                #         logger.info("✅ Track record экспортирован на GitHub (ежесуточно)")
+                #     else:
+                #         logger.warning("⚠️ GitHub export не выполнен — проверь GITHUB_TOKEN")
+                pass
 
             except Exception as e:
                 logger.error(f"GitHub export error: {e}")
 
             # Проверяем каждую минуту (синхронизируемся с минутным циклом)
+            await asyncio.sleep(60)
+
+    async def _alert_checker_loop(self):
+        """Проверяет серию вердиктов и шлёт алерт подписчикам каждые 4 часа."""
+        await asyncio.sleep(300)  # ждём 5 минут при старте
+
+        while self._running:
+            try:
+                if self._alert_system is None:
+                    await asyncio.sleep(3600)
+                    continue
+
+                subscribers = await get_daily_subscribers()
+                if subscribers:
+                    sent = await self._alert_system.check_and_alert(subscribers)
+                    if sent > 0:
+                        logger.info(f"📢 Алерты отправлены: {sent}")
+            except Exception as e:
+                logger.error(f"Alert checker error: {e}")
+
+            await asyncio.sleep(4 * 3600)  # каждые 4 часа
+
+    async def _signals_checker_loop(self):
+        """Проверяет сигналы и отправляет подписчикам каждые 2 часа."""
+        await asyncio.sleep(600)  # ждём 10 минут при старте
+
+        while self._running:
+            try:
+                if self._signals_system is None:
+                    await asyncio.sleep(3600)
+                    continue
+
+                subscribers = await get_signals_subscribers()
+                if subscribers:
+                    sent = await self._signals_system.check_and_send_signals(subscribers)
+                    if sent > 0:
+                        logger.info(f"📡 Сигналы отправлены: {sent}")
+            except Exception as e:
+                logger.error(f"Signals checker error: {e}")
+
+            await asyncio.sleep(2 * 3600)  # каждые 2 часа
+
+    async def _auto_tracker_loop(self):
+        """Проверяет прогнозы в 00:10 UTC (через 10 минут после дайджеста)."""
+        await asyncio.sleep(120)  # ждём 2 минуты при старте
+
+        while self._running:
+            try:
+                now = datetime.now()
+                current_time = now.strftime("%H:%M")
+                
+                # Запускаем в 00:10 UTC каждый день
+                if current_time == "00:10":
+                    logger.info("🔄 Запускаю авто-проверку прогнозов...")
+                    
+                    results = await self._auto_tracker.check_all_forecasts()
+                    
+                    if results:
+                        md = self._auto_tracker.generate_markdown(results)
+                        await self._auto_tracker.upload_to_github(md, "AUTO_TRACK.md")
+                        logger.info(f"✅ Auto track обновлён")
+                    
+                    # Ждём минуту чтобы не запустить дважды
+                    await asyncio.sleep(60)
+                    
+            except Exception as e:
+                logger.error(f"Auto tracker error: {e}")
+
+            # Проверяем каждую минуту
             await asyncio.sleep(60)
 
     async def export_now(self):

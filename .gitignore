@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+dialectic_edge.db

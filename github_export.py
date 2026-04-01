@@ -26,6 +26,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.getenv("GITHUB_REPO", "spermoeshka/DIALECTIC_EDg")
 FORECASTS_FILE   = "FORECASTS.md"
 DIGEST_CACHE_FILE = "DIGEST_CACHE.md"
+BACKTEST_FILE = "BACKTEST.md"
 
 TIMEOUT = aiohttp.ClientTimeout(total=15)
 
@@ -330,6 +331,83 @@ async def get_previous_digest() -> str:
         "=== ЗАДАЧА: если прошлый вердикт оказался неверным — объясни почему. "
         "Если верным — укажи это как подтверждение сигнала. ===\n"
     )
+
+
+# ─── BACKTEST.md — история бэктеста ──────────────────────────────────────────────
+
+async def export_backtest_to_github(signals: list[dict], stats: dict, config: dict = None) -> bool:
+    """Экспортирует результаты бэктеста в BACKTEST.md на GitHub."""
+    if not GITHUB_TOKEN:
+        return False
+    
+    capital = config.get("capital", 100.0) if config else 100.0
+    enabled = config.get("enabled", 1) if config else 1
+    
+    lines = [
+        "# 📊 Dialectic Edge — Backtest Results",
+        f"> Обновлено: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "## 💵 Капитал",
+        f"- Текущий: **${capital:,.2f}**",
+        f"- Статус: **{'✅ Включён' if enabled else '❌ Выключен'}**",
+        "",
+        "## 📈 Статистика (закрытые сделки)",
+        "",
+    ]
+    
+    total = stats.get("total", 0) or 0
+    wins = stats.get("wins", 0) or 0
+    win_rate = (wins / total * 100) if total > 0 else 0
+    total_pnl = stats.get("total_pnl") or 0
+    avg_pnl_pct = stats.get("avg_pnl_pct") or 0
+    
+    lines.extend([
+        f"- Всего сделок: **{total}**",
+        f"- Win Rate: **{win_rate:.1f}%**",
+        f"- Total PnL: **${total_pnl:+,.2f}**",
+        f"- Avg PnL: **{avg_pnl_pct:+.2f}%**",
+        "",
+        "## 📋 История сделок",
+        "",
+    ])
+    
+    # Only show closed trades in table
+    closed_signals = [s for s in signals if s.get("status") == "closed"]
+    for s in closed_signals:
+        date = s.get("created_at", "")[:10] or ""
+        symbol = s.get("symbol", "") or ""
+        direction = s.get("direction", "") or ""
+        entry = s.get("entry_price") or 0
+        exit_price = s.get("exit_price") or 0
+        pnl = s.get("pnl") or 0
+        pnl_pct = s.get("pnl_pct") or 0
+        
+        lines.append(f"| {date} | {symbol} | {direction} | ${entry:,.0f} | ${exit_price:,.0f} | ${pnl:+,.0f} | {pnl_pct:+.1f}% |")
+    
+    # Add open positions
+    open_signals = [s for s in signals if s.get("status") == "open"]
+    if open_signals:
+        lines.extend(["", "## 🔵 Открытые позиции", ""])
+        for s in open_signals:
+            date = s.get("created_at", "")[:10] or ""
+            symbol = s.get("symbol", "") or ""
+            direction = s.get("direction", "") or ""
+            entry = s.get("entry_price") or 0
+            qty = s.get("quantity") or 0
+            lines.append(f"- **{symbol}** {direction} @ ${entry:,.2f} (qty: {qty:.4f}) — {date}")
+    
+    content = "\n".join(lines)
+    
+    _, sha = await _github_get(BACKTEST_FILE)
+    success = await _github_put(
+        BACKTEST_FILE, content, sha,
+        f"📊 Update backtest {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]"
+    )
+    
+    if success:
+        logger.info("✅ BACKTEST.md обновлён на GitHub")
+    
+    return success
 
 
 if __name__ == "__main__":

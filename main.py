@@ -5,10 +5,10 @@ Dialectic Edge v7.1 — UX + FinBERT async + РФ-график.
 - Простой язык в выводах для обычных людей
 """
 
+import re
 import asyncio
 import logging
 import os
-import re
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -22,7 +22,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, BufferedInputFile,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 )
 
 from config import (
@@ -35,34 +35,72 @@ from config import (
     USING_DATA_DIR,
     DEBATE_SNAPSHOT_HOURS,
 )
-from news_fetcher import NewsFetcher
-from data_sources import fetch_full_context
-from web_search import get_full_realtime_context, search_news_context
-from meta_analyst import get_meta_context
-from sentiment import analyze_and_filter_async, format_for_agents
-from agents import DebateOrchestrator
+from web_search import get_full_realtime_context
 from report_sanitizer import sanitize_full_report
 from chart_generator import generate_main_chart, generate_russia_chart
 from storage import Storage
+from analysis_service import run_full_analysis as analysis_service_run_full_analysis, _fetcher as news_fetcher
+from data_sources import fetch_full_context
+from meta_analyst import get_meta_context
+from github_export import get_previous_digest, push_digest_cache
+from sentiment import analyze_and_filter_async, format_for_agents
+from user_profile import build_profile_instruction
+from news_fetcher import NewsFetcher
+from agents import DebateOrchestrator
+from tracker import save_predictions_from_report
+from database import log_report
+from web_search import search_news_context
 from database import (
     init_db, upsert_user, get_user, increment_requests,
-    get_daily_subscribers, set_daily_sub,
+    save_debate_session,
+    set_daily_sub,
     get_track_record, save_feedback, get_feedback_stats,
-    log_report, get_admin_stats,
-    save_debate_session, get_debate_session,
+    import_forecasts_from_markdown,
+    get_signals_subscribers, set_signals_sub, get_user_signals_status,
+    add_portfolio_position, get_portfolio, remove_portfolio_position,
+    add_backtest_signal, close_backtest_signal, get_backtest_signals, get_backtest_stats,
+    get_backtest_config, update_backtest_capital, set_backtest_enabled,
+    save_daily_context, get_daily_context,
+    get_predictions_summary,
 )
-from tracker import check_pending_predictions, save_predictions_from_report
+from tracker import check_pending_predictions
 from scheduler import Scheduler
 from user_profile import (
-    init_profiles_table, save_profile, get_profile,
-    build_profile_instruction, format_profile_card,
-    RISK_PROFILES, HORIZONS, MARKETS
+    init_profiles_table, get_profile,
+    RISK_PROFILES, HORIZONS,
+    format_profile_card, save_profile
 )
-from weekly_report import build_weekly_report, send_weekly_reports
-from russia_data import fetch_russia_context
+from weekly_report import build_weekly_report
+from russia_data import fetch_russia_context, fetch_cbr_data
 from russia_agents import run_russia_analysis
-from github_export import export_to_github, push_digest_cache, get_previous_digest
-from debate_storage import save_debate_redis, get_debate_redis, ping_redis
+from debate_storage import ping_redis, save_debate_redis
+
+# Phase 3 Handler Imports — Market, Debate, Profile, Admin
+from refactor.handlers import (
+    handle_market_command,
+    store_and_link_debate,
+    handle_debate_navigation_callback,
+    show_profile_settings,
+    handle_profile_callback,
+    setup_admins,
+    handle_stats_command,
+    handle_health_command,
+    handle_logs_command,
+    handle_sysinfo_command,
+)
+
+# Phase 4 Provider Imports — AI, Cache, Database, Market Data, News, Storage
+from refactor.handlers.utils import (
+    build_short_report,
+    clean_markdown,
+    debate_plain_text,
+    extract_signal_pct_and_stars,
+    hydrate_debate_from_report,
+    main_report_keyboard,
+    parse_report_parts,
+    split_message,
+    strip_digest_summary_text,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,9 +108,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
+bot: Optional[Bot] = None
 dp = Dispatcher()
-fetcher = NewsFetcher()
 storage = Storage()
 
 FREE_DAILY_LIMIT = 5
@@ -81,83 +118,20 @@ scheduler: Scheduler = None
 
 # Хранилище дебатов для листания по кнопкам
 # {user_id: {"rounds": [...], "full_report": str}}
-debate_cache: dict = {}
 
 # Кэш РФ анализа (обновляется вместе с /daily)
-russia_cache: dict = {}  # {"report": str, "timestamp": str}
+russia_cache: dict = {}  # {"report": str, "timestamp": str, "sections": {...}, "ts": float}
+debate_cache: dict = {}  # {user_id: {"rounds": [...], "full": str}}
 
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────────
-
-def clean_markdown(text: str) -> str:
-    lines = text.split("\n")
-    clean_lines = []
-    for line in lines:
-        if line.count("*") % 2 != 0:
-            line = line.replace("*", "")
-        if line.count("_") % 2 != 0:
-            line = line.replace("_", "")
-        if line.count("`") % 2 != 0:
-            line = line.replace("`", "")
-        clean_lines.append(line)
-    return "\n".join(clean_lines)
+def get_bot() -> Bot:
+    global bot
+    if bot is None:
+        bot = Bot(token=BOT_TOKEN)
+    return bot
 
 
-def debate_plain_text(text: str) -> str:
-    """
-    Текст раунда дебатов без parse_mode: ответы моделей часто ломают Telegram Markdown
-    (незакрытые *, _, ссылки) → Bad Request: can't parse entities.
-    """
-    t = clean_markdown(text)
-    t = re.sub(r"[*_`#]", "", t)
-    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)
-    t = re.sub(r"\n{3,}", "\n\n", t)
-    return t.strip()
-
-
-def strip_digest_summary_text(text: str) -> str:
-    """Убирает ###, **, ` и линии --- из краткой выжимки Bull/Bear в шапке дайджеста."""
-    if not text or not text.strip():
-        return text
-    out: list[str] = []
-    for line in text.split("\n"):
-        s = line.strip()
-        if not s:
-            continue
-        if re.match(r"^[-_*═─]{3,}\s*$", s):
-            continue
-        s = re.sub(r"^#{1,6}\s*", "", s)
-        s = re.sub(r"\*+", "", s)
-        s = re.sub(r"_+", "", s)
-        s = re.sub(r"`+", "", s)
-        s = s.strip()
-        if s:
-            out.append(s)
-    return "\n".join(out) if out else text.strip()
-
-
-def split_message(text: str, max_len: int = 3800) -> list:
-    # Агрессивно чистим весь markdown — убираем *, _, `, #
-    import re
-    text = re.sub(r'[*_`#]', '', text)
-    # Убираем двойные пробелы и лишние пустые строки
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = text.strip()
-
-    if len(text) <= max_len:
-        return [text]
-    chunks = []
-    while len(text) > max_len:
-        split_at = text.rfind("\n", 0, max_len)
-        if split_at == -1 or split_at < max_len // 2:
-            split_at = text.rfind(" ", 0, max_len)
-        if split_at == -1:
-            split_at = max_len
-        chunks.append(text[:split_at].rstrip())
-        text = text[split_at:].lstrip("\n ")
-    if text.strip():
-        chunks.append(text.strip())
-    return chunks
+# ─── Утилиты вынесены в refactor/handlers/utils.py ───────────────────────────────────
 
 
 async def check_limit(user_id: int) -> bool:
@@ -361,6 +335,65 @@ def hydrate_debate_from_report(full_report: str) -> dict | None:
     return {"rounds": [section], "full": full_report}
 
 
+def extract_verdict_from_report(report: str) -> str | None:
+    """Extract verdict from report synthesis section."""
+    markers = [
+        "⚖️ *ВЕРДИКТ И ТОРГОВЫЙ ПЛАН*",
+        "⚖️ ВЕРДИКТ И ТОРГОВЫЙ ПЛАН",
+        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
+        "ИТОГОВЫЙ СИНТЕЗ",
+    ]
+    synth_start = None
+    for m in markers:
+        if m in report:
+            synth_start = report.find(m)
+            break
+    
+    if synth_start is None:
+        return None
+    
+    synth = report[synth_start:synth_start + 1500]
+    synth_upper = synth.upper()
+    
+    if "БЫЧ" in synth_upper or "BULL" in synth_upper:
+        return "BUY"
+    elif "МЕДВЕЖ" in synth_upper or "BEAR" in synth_upper:
+        return "SELL"
+    else:
+        return "NEUTRAL"
+
+
+def extract_symbols_from_report(report: str, prices: dict) -> tuple[dict, dict, dict, dict]:
+    """Extract symbols, entry prices, stop losses, targets from report."""
+    entries = {}
+    stop_losses = {}
+    targets = {}
+    timeframes = {}
+    
+    symbol_pattern = re.compile(r"\$?(BTC|ETH|SOL|SPY|ES)[\s:]*\$?([\d,]+)", re.IGNORECASE)
+    
+    for match in symbol_pattern.finditer(report):
+        sym = match.group(1).upper()
+        try:
+            price_str = match.group(2).replace(",", "")
+            price = float(price_str)
+            if price > 100:
+                if sym not in entries:
+                    entries[sym] = price
+                else:
+                    stop_losses[sym] = price
+        except:
+            pass
+    
+    for sym, price in prices.items():
+        if sym not in entries:
+            entries[sym] = price
+        timeframes[sym] = "1h"
+    
+    return entries, stop_losses, targets, timeframes
+
+
 def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     Возвращает СПИСОК сообщений для отправки.
@@ -536,7 +569,7 @@ async def send_daily_digest_bundle(
     logger.info(f"Отправляю {len(messages)} сообщений. Размеры: {[len(m) for m in messages]}")
     for i, msg in enumerate(messages):
         logger.info(f"Отправляю чанк {i+1}/{len(messages)}, размер: {len(msg)}")
-        await bot.send_message(chat_id, msg)
+        await bot.send_message(chat_id, clean_markdown(msg), parse_mode="Markdown")
         if i == 0:
             await send_digest_chart(chat_id, report, prices_dict or {}, stars_str, pct_val)
         await asyncio.sleep(0.3)
@@ -552,30 +585,6 @@ async def send_daily_digest_bundle(
     if rounds_out:
         await asyncio.sleep(0.25)
         await send_debates_attachment(chat_id, rounds_out)
-
-
-def debates_keyboard(user_id: int, round_idx: int, total_rounds: int) -> InlineKeyboardMarkup:
-    """Клавиатура для листания раундов дебатов."""
-    buttons = []
-
-    nav_row = []
-    if round_idx > 0:
-        nav_row.append(InlineKeyboardButton(
-            text="◀️ Назад",
-            callback_data=f"debate:{user_id}:{round_idx - 1}"
-        ))
-    nav_row.append(InlineKeyboardButton(
-        text=f"📄 {round_idx + 1}/{total_rounds}",
-        callback_data="debate:noop"
-    ))
-    if round_idx < total_rounds - 1:
-        nav_row.append(InlineKeyboardButton(
-            text="Вперёд ▶️",
-            callback_data=f"debate:{user_id}:{round_idx + 1}"
-        ))
-
-    buttons.append(nav_row)
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def main_report_keyboard(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
@@ -603,97 +612,130 @@ async def handle_debate_page(callback: CallbackQuery):
     if len(parts) < 3:
         await callback.answer()
         return
-
-    _, user_id_str, action = parts[0], parts[1], parts[2]
-
-    if action == "noop":
+    if parts[1] == "noop" or parts[2] == "noop":
         await callback.answer()
         return
-
     try:
-        kb_uid = int(user_id_str)
+        kb_uid = int(parts[1])
+        round_idx = int(parts[2])
     except ValueError:
         await callback.answer()
         return
-
     if kb_uid != callback.from_user.id:
         await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
         return
+    await handle_debate_navigation_callback(callback, callback.from_user.id, round_idx)
 
-    user_id = callback.from_user.id
+
+# ─── TEST COMMAND ─────────────────────────────────────────────────────────────
+@dp.message(F.text.startswith("/tt"))
+async def cmd_test_bot(message: Message):
+    """Test command."""
+    await message.answer("TT WORKS!")
+
+
+def format_signal_trader_status_message(status: dict) -> str:
+    msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
+    msg += "═" * 25 + "\n"
+    msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
+    msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
+    msg += f"🎯 Консенсус 2-3 дайджестов: *{status.get('consensus_verdict', 'NEUTRAL')}*\n"
+
+    recent_contexts = status.get("recent_contexts", []) or []
+    if recent_contexts:
+        msg += "\n🧠 *Последние дайджесты:*\n"
+        for row in recent_contexts[:3]:
+            created_at = (row.get("created_at", "") or "")[:16].replace("T", " ")
+            verdict = row.get("verdict", "NEUTRAL")
+            symbols = ", ".join((row.get("symbols", []) or [])[:3]) or "—"
+            msg += f"• {created_at} → {verdict} | {symbols}\n"
+    else:
+        msg += "\n💭 Нет свежих дайджестов — нужен /daily\n"
+
+    active_positions = status.get("active_positions", []) or []
+    if active_positions:
+        msg += "\n📍 *Открытая позиция:*\n"
+        for pos in active_positions[:1]:
+            msg += f"• {pos['symbol']} {pos['direction']} @ ${pos['entry_price']:,.2f}\n"
+            if pos.get("target"):
+                msg += f"  тейк ${pos['target']:,.2f}"
+                if pos.get("stop"):
+                    msg += f" | стоп ${pos['stop']:,.2f}"
+                msg += "\n"
+    else:
+        msg += "\n📭 Открытых позиций нет\n"
+
+    top_candidates = status.get("top_candidates", []) or []
+    if top_candidates:
+        msg += "\n📊 *Лучшие кандидаты сейчас:*\n"
+        for candidate in top_candidates[:3]:
+            signal_dir = candidate.get("signal_direction", "NEUTRAL")
+            ready_mark = "✅" if candidate.get("ready") else "⏳"
+            msg += (
+                f"• {candidate['symbol']} {candidate['direction']} {ready_mark}\n"
+                f"  вход ${candidate['entry']:,.2f} | цена ${candidate['current_price']:,.2f}\n"
+                f"  score {candidate['total_score']:.1f} | signal {signal_dir}\n"
+            )
+    else:
+        msg += "\n📊 Подходящих кандидатов пока нет\n"
+
+    msg += "\n" + "═" * 25 + "\n"
+    msg += f"💰 Всего закрытых сделок: {status['total_trades']}\n"
+    msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}"
+    return msg
+
+
+@dp.message(F.text.startswith("/signalstatus"))
+async def cmd_signal_status(message: Message):
+    """Check signal trader status with entry prices."""
     try:
-        round_idx = int(action)
-    except ValueError:
-        await callback.answer()
+        from signal_trader import get_signal_trader_status
+        
+        status = await get_signal_trader_status()
+        msg = format_signal_trader_status_message(status)
+        await message.answer(msg, parse_mode="Markdown")
         return
-
-    cache = debate_cache.get(user_id)
-    if not cache:
-        report_redis = await get_debate_redis(user_id)
-        cache = hydrate_debate_from_report(report_redis) if report_redis else None
-        if cache:
-            debate_cache[user_id] = cache
-    if not cache:
-        report_db = await get_debate_session(user_id)
-        cache = hydrate_debate_from_report(report_db) if report_db else None
-        if cache:
-            debate_cache[user_id] = cache
-    if not cache:
-        storage.reload_from_disk()
-        snap = storage.get_user_debate_snapshot(user_id)
-        cache = hydrate_debate_from_report(snap) if snap else None
-        if cache:
-            debate_cache[user_id] = cache
-
-    if not cache:
-        storage.reload_from_disk()
-        rep_user = storage.get_user_last_cached_report(user_id)
-        cache = hydrate_debate_from_report(rep_user) if rep_user else None
-        if cache:
-            debate_cache[user_id] = cache
-    if not cache:
-        storage.reload_from_disk()
+        
         cached = storage.get_cached_report()
-        rep = cached.get("report") if cached else None
-        cache = hydrate_debate_from_report(rep) if rep else None
-        if cache:
-            debate_cache[user_id] = cache
-
-    if not cache:
-        logger.warning(
-            "debate hydrate miss user_id=%s — кэш пуст (редеплой/другой воркер). "
-            "Файл .txt с дебатами уже в чате под дайджестом.",
-            user_id,
-        )
-        await callback.answer(
-            "Дебаты в файле dialectic_debates_….txt — пролистай чат ниже кнопок. "
-            "Кнопки листания работают только пока бот не перезапускали.",
-            show_alert=True,
-        )
-        return
-
-    rounds = cache["rounds"]
-    if round_idx >= len(rounds):
-        await callback.answer()
-        return
-
-    round_text = debate_plain_text(rounds[round_idx])
-
-    if len(round_text) > 4080:
-        round_text = round_text[:4050] + "\n\n(…сокращено)"
-
-    kb = debates_keyboard(user_id, round_idx, len(rounds))
-
-    try:
-        await callback.message.edit_text(round_text, reply_markup=kb)
+        
+        msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
+        msg += "═" * 25 + "\n"
+        msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
+        msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
+        
+        if cached and cached.get("report"):
+            report = cached["report"]
+            verdict = extract_verdict_from_report(report) or "NEUTRAL"
+            entries, _, _, _ = extract_symbols_from_report(report, cached.get("prices", {}))
+            
+            msg += f"\n🎯 *Вердикт:* {verdict}\n"
+            
+            if entries:
+                msg += "\n📊 *Точки входа и сигналы:*\n"
+                for symbol, price in entries.items():
+                    if price:
+                        if verdict == "BUY":
+                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                            msg += f"    → BUY когда цена ≤ ${price:,.0f}\n"
+                        elif verdict == "SELL":
+                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                            msg += f"    → SELL когда цена ≥ ${price:,.0f}\n"
+                        else:
+                            msg += f"  • {symbol}: ${price:,.0f}\n"
+            else:
+                msg += "\n📭 Нет точек входа — сделай /daily\n"
+        else:
+            msg += "\n📭 Нет кэша — сделай /daily\n"
+        
+        msg += "\n" + "═" * 25 + "\n"
+        msg += f"💰 Всего сделок: {status['total_trades']}\n"
+        msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
+        msg += "═" * 25
+        
+        await message.answer(msg, parse_mode="Markdown")
     except Exception as e:
-        logger.warning("debate edit_text: %s", e)
-        try:
-            await callback.message.answer(round_text, reply_markup=kb)
-        except Exception as e2:
-            logger.error("debate answer fallback: %s", e2)
-
-    await callback.answer()
+        logger.error(f"signal_status error: {e}")
+        await message.answer(f"Ошибка: {e}")
 
 
 # ─── /start ───────────────────────────────────────────────────────────────────
@@ -706,6 +748,13 @@ async def cmd_start(message: Message):
         message.from_user.first_name or ""
     )
     name = message.from_user.first_name or "трейдер"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Портфель", callback_data="portfolio:menu:")],
+        [InlineKeyboardButton(text="📈 Профиль", callback_data="cmd:profile"), InlineKeyboardButton(text="📋 Дайджест", callback_data="cmd:daily")],
+        [InlineKeyboardButton(text="💰 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📊 Трек-рекорд", callback_data="cmd:trackrecord")],
+    ])
+    
     await message.answer(
         f"👋 Привет, *{name}*!\n\n"
         "🧠 *Dialectic Edge* — честный AI-аналитик рынков\n\n"
@@ -718,12 +767,16 @@ async def cmd_start(message: Message):
         "• /profile — настрой риск-профиль (важно сделать первым)\n"
         "• /daily — дайджест рынков\n"
         "• /analyze [текст] — анализ новости\n"
-        "• /trackrecord — история точности агентов\n"
+        "• /trackrecord — история точности (всё)\n"
+        "• /trackrecordglobal — Global прогнозы\n"
+        "• /trackrecordrussia — Россия Edge 🇷🇺\n"
         "• /weeklyreport — отчёт за неделю\n"
         "• /subscribe — авторассылка\n"
         "• /markets — текущие цены\n"
-        "• /russia — анализ для российского рынка 🇷🇺\n\n"
+        "• /status — краткий статус (можно закрепить)\n"
+        "• /portfolio — твой портфель\n\n"
         "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
+        reply_markup=kb,
         parse_mode="Markdown"
     )
 
@@ -805,13 +858,13 @@ async def handle_profile(callback: CallbackQuery):
 
 # ─── Ядро анализа ─────────────────────────────────────────────────────────────
 
-async def run_full_analysis(
+async def legacy_run_full_analysis(
     user_id: int,
     custom_news: str = "",
     custom_mode: bool = False
 ) -> tuple[str, dict]:
     tasks = [
-        fetcher.fetch_all(),
+        news_fetcher.fetch_all(),
         fetch_full_context(),
         get_full_realtime_context(),
         get_profile(user_id),
@@ -908,7 +961,7 @@ async def run_full_analysis(
 
     # ── Сохраняем прогнозы ────────────────────────────────────────────────────
     source = custom_news[:300] if custom_mode else str(news)[:300]
-    await save_predictions_from_report(report, source_news=source)
+    await save_predictions_from_report(report, source_news=source, bot=get_bot(), admin_ids=ADMIN_IDS)
     await log_report(
         user_id,
         "analyze" if custom_mode else "daily",
@@ -933,7 +986,7 @@ async def run_full_analysis(
 # ─── /daily ───────────────────────────────────────────────────────────────────
 
 async def run_daily_analysis(user_id: int) -> str:
-    report, _ = await run_full_analysis(user_id)
+    report, _ = await analysis_service_run_full_analysis(user_id)
     return report
 
 
@@ -946,7 +999,7 @@ async def deliver_scheduled_daily(user_id: int) -> None:
             prices = cached.get("prices") or {}
             await send_daily_digest_bundle(user_id, user_id, report, prices)
             return
-        report, prices = await run_full_analysis(user_id)
+        report, prices = await analysis_service_run_full_analysis(user_id)
         await send_daily_digest_bundle(user_id, user_id, report, prices)
     except Exception as e:
         logger.warning("Рассылка дайджеста user %s: %s", user_id, e)
@@ -992,19 +1045,28 @@ async def cmd_daily(message: Message):
 
     try:
         await increment_requests(user_id)
-        report, prices = await run_full_analysis(user_id)
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        report, prices = await analysis_service_run_full_analysis(user_id)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        except Exception:
+            pass  # сообщение уже удалено или недоступно — не критично
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
     except Exception as e:
         logger.error(f"Daily error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`\n\n"
-            "Проверь: API ключи, интернет, BOT_TOKEN.",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`\n\n"
+                "Проверь: API ключи, интернет, BOT_TOKEN.",
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer(
+                f"❌ *Ошибка:* `{str(e)[:200]}`\n\nПроверь: API ключи, интернет, BOT_TOKEN.",
+                parse_mode="Markdown"
+            )
 
 
 # ─── /analyze ─────────────────────────────────────────────────────────────────
@@ -1042,20 +1104,26 @@ async def cmd_analyze(message: Message):
 
     try:
         await increment_requests(user_id)
-        report, prices = await run_full_analysis(
+        report, prices = await analysis_service_run_full_analysis(
             user_id, custom_news=user_news, custom_mode=True
         )
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        except Exception:
+            pass  # сообщение уже удалено — не критично
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
 
     except Exception as e:
         logger.error(f"Analyze error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`",
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
 
@@ -1136,6 +1204,11 @@ async def cmd_russia(message: Message):
         # Запускаем диалектический анализ
         report = await run_russia_analysis(global_report, russia_context)
 
+        # Санитайзер для russia — убирает галлюцинации (ставки банков и тд)
+        report, _san_lines_ru = sanitize_full_report(report)
+        if _san_lines_ru:
+            logger.info("Russia пост-фильтр: удалено строк: %d", _san_lines_ru)
+
         # Кэшируем
         from datetime import datetime
         import time
@@ -1143,30 +1216,129 @@ async def cmd_russia(message: Message):
         russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
         russia_cache["ts"]        = time.time()
 
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        except Exception:
+            pass  # сообщение уже удалено — не критично
 
         await send_russia_chart_photo(message.chat.id, report)
+        
+        # Парсим секции для навигации (пробуем разные разделители)
+        opportunities = ""
+        risks = ""
+        synthesis = ""
+        
+        # Пробуем разные разделители
+        for sep in ["─" * 30, "---", "___"]:
+            sections = report.split(sep)
+            if len(sections) >= 4:
+                opportunities = sections[1].strip() if len(sections) > 1 else ""
+                risks = sections[2].strip() if len(sections) > 2 else ""
+                synthesis = sections[3].strip() if len(sections) > 3 else ""
+                break
+        
+        # Если не получилось парсить — сохраняем весь отчёт
+        if not opportunities and not risks:
+            opportunities = "Раздел возможностей"
+            risks = "Раздел рисков"
+            synthesis = synthesis if synthesis else "Раздел итогов"
+        
+        # Сохраняем секции в кэш для навигации
+        russia_cache["sections"] = {
+            "opportunities": opportunities,
+            "risks": risks,
+            "synthesis": synthesis
+        }
+        
+        # Клавиатура навигации
+        nav_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 Возможности", callback_data="russia_nav:opp"),
+                InlineKeyboardButton(text="🔴 Риски", callback_data="russia_nav:risk"),
+            ],
+            [
+                InlineKeyboardButton(text="⚖️ Итог", callback_data="russia_nav:synth"),
+                InlineKeyboardButton(text="📊 Полный", callback_data="russia_nav:full"),
+            ]
+        ])
+        
         for chunk in split_message(report):
-            await message.answer(chunk, parse_mode="Markdown")
+            await message.answer(clean_markdown(chunk), parse_mode="Markdown")
 
         await message.answer(
             "💬 *Был ли анализ полезным?*",
             parse_mode="Markdown",
             reply_markup=feedback_keyboard("russia")
         )
+        
+        await message.answer(
+            "📍 *Навигация по разделам:*",
+            parse_mode="Markdown",
+            reply_markup=nav_keyboard
+        )
 
     except Exception as e:
         logger.error(f"Russia error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`",
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
 
 # ─── Выбор перед /russia ──────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("russia_nav:"))
+async def handle_russia_nav(callback: CallbackQuery):
+    await callback.answer()
+    data = callback.data.split(":")
+    section = data[1] if len(data) > 1 else "full"
+    
+    # Проверяем есть ли кэш
+    if not russia_cache.get("report"):
+        await callback.message.answer(
+            "⚠️ Нет сохранённого отчёта.\nЗапусти /russia сначала!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    sections = russia_cache.get("sections", {})
+    full_report = russia_cache.get("report", "")
+    
+    text = ""
+    if section == "opp":
+        text = sections.get("opportunities", "Раздел не найден. Запусти /russia заново.")
+    elif section == "risk":
+        text = sections.get("risks", "Раздел не найден. Запусти /russia заново.")
+    elif section == "synth":
+        text = sections.get("synthesis", "Раздел не найден. Запусти /russia заново.")
+    elif section == "full":
+        text = full_report[:3500] if full_report else "Отчёт не найден. Запусти /russia заново."
+    else:
+        text = "Выбери раздел:"
+    
+    nav_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 Возможности", callback_data="russia_nav:opp"),
+            InlineKeyboardButton(text="🔴 Риски", callback_data="russia_nav:risk"),
+        ],
+        [
+            InlineKeyboardButton(text="⚖️ Итог", callback_data="russia_nav:synth"),
+            InlineKeyboardButton(text="📊 Полный", callback_data="russia_nav:full"),
+        ]
+    ])
+    
+    await callback.message.answer(
+        f"📍 *Раздел:* {section.upper()}\n\n{text[:3500]}",
+        parse_mode="Markdown",
+        reply_markup=nav_keyboard
+    )
+
 
 @dp.callback_query(F.data.startswith("russia_choice:"))
 async def handle_russia_choice(callback: CallbackQuery):
@@ -1204,14 +1376,17 @@ async def handle_russia_choice(callback: CallbackQuery):
         russia_cache["timestamp"] = datetime.now().strftime("%d.%m.%Y %H:%M")
         russia_cache["ts"]        = time.time()
 
-        await bot.delete_message(
-            chat_id=callback.message.chat.id,
-            message_id=wait_msg.message_id
-        )
+        try:
+            await bot.delete_message(
+                chat_id=callback.message.chat.id,
+                message_id=wait_msg.message_id
+            )
+        except Exception:
+            pass  # сообщение уже удалено — не критично
 
         await send_russia_chart_photo(callback.message.chat.id, report)
         for chunk in split_message(report):
-            await callback.message.answer(chunk, parse_mode="Markdown")
+            await callback.message.answer(clean_markdown(chunk), parse_mode="Markdown")
 
         await callback.message.answer(
             "💬 *Был ли анализ полезным?*",
@@ -1221,12 +1396,15 @@ async def handle_russia_choice(callback: CallbackQuery):
 
     except Exception as e:
         logger.error(f"Russia choice error: {e}", exc_info=True)
-        await bot.edit_message_text(
-            f"❌ *Ошибка:* `{str(e)[:200]}`",
-            chat_id=callback.message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown"
-        )
+        try:
+            await bot.edit_message_text(
+                f"❌ *Ошибка:* `{str(e)[:200]}`",
+                chat_id=callback.message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await callback.message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
 # ─── /markets ─────────────────────────────────────────────────────────────────
@@ -1253,80 +1431,558 @@ async def cmd_markets(message: Message):
         )
 
 
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    await upsert_user(message.from_user.id)
+    wait_msg = await message.answer("⏳ Загружаю...")
+    try:
+        prices, _ = await get_full_realtime_context()
+        cbr_data = await fetch_cbr_data()
+        
+        now = datetime.now().strftime("%d.%m %H:%M UTC")
+        
+        lines = [
+            f"📊 СТАТУС РЫНКОВ",
+            f"_{now}_",
+            ""
+        ]
+        
+        # Крипта
+        lines.append("💰 КРИПТА")
+        for k, label, icon in [
+            ("BTC", "Bitcoin", "₿"),
+            ("ETH", "Ethereum", "Ξ"),
+        ]:
+            if k in prices:
+                p = prices[k]
+                price = p.get("price", 0)
+                change = p.get("change_24h", 0)
+                emoji = "🟢" if change >= 0 else "🔴"
+                lines.append(f"{icon} {label}: ${price:,.0f} {emoji}{change:+.1f}%")
+        
+        # Валюты
+        if cbr_data:
+            lines.append("")
+            lines.append("💵 ВАЛЮТЫ (ЦБ РФ)")
+            for line in cbr_data.strip().split('\n')[:3]:
+                if line.strip():
+                    lines.append(line)
+        
+        # Фондовые
+        lines.append("")
+        lines.append("📈 ИНДЕКСЫ")
+        for k, label in [("SPX", "S&P"), ("NDX", "Nasdaq"), ("VIX", "VIX")]:
+            if k in prices:
+                p = prices[k]
+                price = p.get("price", 0)
+                change = p.get("change_24h", 0)
+                emoji = "🟢" if change >= 0 else "🔴"
+                lines.append(f"{label}: {price:,.0f} {emoji}{change:+.1f}%")
+        
+        # Макро
+        if "MACRO" in prices:
+            m = prices["MACRO"]
+            fng = m.get("fng", {})
+            fv = fng.get("val", "N/A")
+            fs = fng.get("status", "")
+            lines.append("")
+            lines.append(f"F&Greed: {fv}/100 ({fs})")
+        
+        lines.append("")
+        lines.append("⚠️ Не финансовый совет")
+        
+        await bot.edit_message_text(
+            "\n".join(lines),
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+
+@dp.message(Command("signals"))
+async def cmd_signals(message: Message):
+    from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
+    import os
+    
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    wait_msg = await message.answer("⏳ Загружаю сигналы...")
+    
+    try:
+        github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+        
+        binance_data = await fetch_binance_signals()
+        verdict = await fetch_verdict(github_repo)
+        signals = analyze_signals(binance_data, verdict)
+        msg = build_signals_message(signals, binance_data, verdict)
+        
+        is_enabled = await get_user_signals_status(user_id)
+        
+        if is_enabled:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
+                [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+                [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
+            ])
+            status_text = "\n\n✅ *Сигналы включены* — буду присылать когда появится сигнал"
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
+                [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+                [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
+            ])
+            status_text = "\n\n━━━━━━━━━━━━━━━━━━━━━\nНажми 'Включить сигналы' — бот будет сам присылать когда:\n• 80%+ трейдеров в одну сторону\n• или 60%+ совпадение с вердиктом"
+        
+        await bot.edit_message_text(
+            msg + status_text,
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        await bot.edit_message_text(
+            f"❌ Ошибка: {e}",
+            chat_id=message.chat.id,
+            message_id=wait_msg.message_id
+        )
+
+
+@dp.callback_query(F.data.startswith("signals:"))
+async def cb_signals(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    action = callback.data.split(":")[1] if ":" in callback.data else ""
+    
+    if action == "enable":
+        await set_signals_sub(user_id, True)
+        await callback.answer("✅ Сигналы включены! Буду присылать когда появится сигнал.", show_alert=True)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
+            [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
+        ])
+        
+        await callback.message.edit_text(
+            callback.message.text + "\n\n✅ *Сигналы включены!*",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    elif action == "disable":
+        await set_signals_sub(user_id, False)
+        await callback.answer("🔕 Сигналы выключены.", show_alert=True)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
+            [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
+        ])
+        
+        await callback.message.edit_text(
+            callback.message.text.replace("✅ *Сигналы включены!*", ""),
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    elif action == "check":
+        await callback.answer("📡 Проверяю...")
+        
+        import os
+        github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+        from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
+        
+        binance_data = await fetch_binance_signals()
+        verdict = await fetch_verdict(github_repo)
+        signals = analyze_signals(binance_data, verdict)
+        msg = build_signals_message(signals, binance_data, verdict)
+        
+        is_enabled = await get_user_signals_status(user_id)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔕 Выключить сигналы" if is_enabled else "🔔 Включить сигналы", 
+                                 callback_data="signals:disable" if is_enabled else "signals:enable")],
+            [InlineKeyboardButton(text="📡 Обновить", callback_data="signals:check")],
+            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
+        ])
+        
+        status_text = "\n\n✅ *Сигналы включены*" if is_enabled else ""
+        
+        await callback.message.edit_text(
+            msg + status_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    elif action == "backtest":
+        signals_data = await get_backtest_signals()
+        stats = await get_backtest_stats()
+        
+        total = stats.get("total", 0) or 0
+        wins = stats.get("wins", 0) or 0
+        losses = stats.get("losses", 0) or 0
+        total_pnl = stats.get("total_pnl", 0) or 0
+        avg_pnl = stats.get("avg_pnl_pct", 0) or 0
+        win_rate = (wins / total * 100) if total > 0 else 0
+        
+        msg = f"📊 *БЭКТЕСТ РЕЗУЛЬТАТЫ*\n\n"
+        msg += f"Всего сделок: {total}\n"
+        msg += f"Win Rate: {win_rate:.1f}%\n"
+        msg += f"Total PnL: ${total_pnl:+,.2f}\n"
+        msg += f"Avg PnL: {avg_pnl:+.2f}%\n\n"
+        msg += "Последние сделки:\n"
+        
+        for s in signals_data[:5]:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            pnl = s.get("pnl", 0) or 0
+            emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+            msg += f"{symbol} {direction} {emoji} ${pnl:+,.0f}\n"
+        
+        await callback.message.edit_text(msg, parse_mode="Markdown")
+        await callback.message.edit_text(
+            msg + status_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    else:
+        await callback.answer()
+
+
 # ─── /trackrecord ─────────────────────────────────────────────────────────────
 
-@dp.message(Command("trackrecord"))
-async def cmd_trackrecord(message: Message):
+@dp.message(Command("market"))
+async def cmd_market(message: Message):
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+    if not await check_limit(user_id):
+        await message.answer(
+            f"в›” *Р›РёРјРёС‚* вЂ” {FREE_DAILY_LIMIT} Р·Р°РїСЂРѕСЃРѕРІ/РґРµРЅСЊ (free)",
+            parse_mode="Markdown"
+        )
+        return
+    await increment_requests(user_id)
+    await handle_market_command(message, message.text or "/market")
+
+
+async def _cmd_trackrecord(message: Message, report_type: str = None, title: str = "АГЕНТОВ", filter_type: str = "all"):
     await upsert_user(message.from_user.id)
     try:
-        data     = await get_track_record()
-        stats    = data["stats"]
-        recent   = data["recent"]
-        by_asset = data["by_asset"]
+        import aiohttp
+        import re
 
-        total   = stats.get("total") or 0
-        wins    = stats.get("wins") or 0
-        losses  = stats.get("losses") or 0
-        pending = stats.get("pending") or 0
-        avg_pnl = stats.get("avg_pnl") or 0
-        best    = stats.get("best_call") or 0
-        worst   = stats.get("worst_call") or 0
+        content = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://raw.githubusercontent.com/borzenkovandrej07-alt/DIALECTIC_EDg/main/FORECASTS.md",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        content = await resp.text()
+        except Exception as e:
+            logger.warning(f"Failed to fetch FORECASTS.md: {e}")
+        
+        if not content:
+            await message.answer("📊 Не удалось загрузить FORECASTS.md")
+            return
+
+        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "рбк", "офз", "usd/rub", "нефть"]
+
+        last_update_match = re.search(r'Последнее обновление:\s*(\d{2}\.\d{2}\.\d{4})', content)
+        last_update = last_update_match.group(1) if last_update_match else "—"
+
+        total = 0
+        wins = 0
+        cautions = 0
+        losses = 0
+        winrate = 0
+        winrate_conservative = 0
+        protection = 0
+        period = ""
+
+        total_match = re.search(r'Всего прогнозов.*?\|.*?(\d+)', content)
+        if total_match:
+            total = int(total_match.group(1))
+        
+        wins_match = re.search(r'✅ Верно.*?\|.*?(\d+)', content)
+        if wins_match:
+            wins = int(wins_match.group(1))
+        
+        cautions_match = re.search(r'⚠️ Правильная осторожность.*?\|.*?(\d+)', content)
+        if cautions_match:
+            cautions = int(cautions_match.group(1))
+        
+        losses_match = re.search(r'❌ Неверно.*?\|.*?(\d+)', content)
+        if losses_match:
+            losses = int(losses_match.group(1))
+        
+        winrate_match = re.search(r'Точность \(с осторожностью\).*?\*\*(\d+\.?\d*)%', content)
+        if winrate_match:
+            winrate = float(winrate_match.group(1))
+        
+        winrate_conservative_match = re.search(r'Точность \(только направление\).*?\*\*(\d+\.?\d*)%', content)
+        if winrate_conservative_match:
+            winrate_conservative = float(winrate_conservative_match.group(1))
+        
+        protection_match = re.search(r'Защита капитала.*?\*\*(\d+\.?\d*)%', content)
+        if protection_match:
+            protection = float(protection_match.group(1))
+        
+        period_match = re.search(r'Период.*?(\d{2}\.\d{2}\.\d{4}.*\d{2}\.\d{2}\.\d{4})', content)
+        if period_match:
+            period = period_match.group(1)
+
+        categories = []
+        in_categories = False
+        for line in content.split('\n'):
+            if '## 📋 Точность по категориям' in line:
+                in_categories = True
+                continue
+            if in_categories and line.strip().startswith('|') and '---' not in line and 'Категория' not in line:
+                parts = [p.strip() for p in line.split('|')[1:-1]]
+                if len(parts) >= 3:
+                    categories.append({"name": parts[0], "stats": parts[1], "accuracy": parts[2]})
+            elif in_categories and (line.strip().startswith('##') or line.strip() == ''):
+                if len(categories) > 0:
+                    break
+
+        predictions = []
+        
+        russia_keywords = ["руб", "рф", "россия", "сбер", "газпром", "лукойл", "роснефть", "мосбирж", "офз", "нефть", "росси"]
+        
+        in_forecasts = False
+        for line in content.split('\n'):
+            if '## 📝 Все прогнозы' in line:
+                in_forecasts = True
+                continue
+            if in_forecasts and line.strip().startswith('|') and '---' not in line:
+                if '№' in line or 'Дата' in line:
+                    continue
+                parts = [p.strip() for p in line.split('|')[1:-1]]
+                if len(parts) >= 7:
+                    try:
+                        date = parts[1] if len(parts) > 1 else ""
+                        pred_type = parts[2] if len(parts) > 2 else ""
+                        asset = parts[3] if len(parts) > 3 else ""
+                        forecast = parts[4] if len(parts) > 4 else ""
+                        fact = parts[5] if len(parts) > 5 else ""
+                        result = parts[6] if len(parts) > 6 else ""
+                        
+                        is_russia = "Russia" in pred_type or any(kw in asset.lower() for kw in russia_keywords)
+                        
+                        # Фильтрация по типу
+                        if report_type == "global" and is_russia:
+                            continue
+                        if report_type == "russia" and not is_russia:
+                            continue
+                        
+                        predictions.append({
+                            "date": date,
+                            "type": pred_type,
+                            "asset": asset,
+                            "forecast": forecast[:30],
+                            "fact": fact[:30],
+                            "result": result,
+                            "is_russia": is_russia
+                        })
+                    except:
+                        pass
+            if in_forecasts and line.strip().startswith('##') and 'Все прогнозы' not in line:
+                break
+        
+        # Парсим статы из таблицы
+        total_match = re.search(r'Всего прогнозов.*?(\d+)', content)
+        if total_match:
+            total = int(total_match.group(1))
+        
+        wins_match = re.search(r'Прибыльных.*?(\d+)', content)
+        if wins_match:
+            wins = int(wins_match.group(1))
+        
+        losses_match = re.search(r'Убыточных.*?(\d+)', content)
+        if losses_match:
+            losses = int(losses_match.group(1))
+        
+        # Фильтрация по типу
+        if filter_type and filter_type != "all":
+            filtered = []
+            for p in predictions:
+                result = p["result"]
+                if filter_type == "win" and ("Верно" in result or "✅" in result):
+                    filtered.append(p)
+                elif filter_type == "loss" and ("Неверно" in result or "❌" in result):
+                    filtered.append(p)
+                elif filter_type == "caution" and ("Осторожность" in result or "⚠️" in result):
+                    filtered.append(p)
+            predictions = filtered
+
+        # Считаем статистику из отфильтрованных прогнозов
+        wins = sum(1 for p in predictions if "Верно" in p["result"] or "✅" in p["result"])
+        cautions = sum(1 for p in predictions if "Осторожность" in p["result"] or "⚠️" in p["result"])
+        losses = sum(1 for p in predictions if "Неверно" in p["result"] or "❌" in p["result"])
+        total = wins + cautions + losses
 
         if total == 0:
             await message.answer(
-                "📊 *Track Record*\n\n"
-                "_Прогнозы накапливаются. Запусти /daily — агенты начнут делать прогнозы._\n\n"
-                "Через 1-2 недели активного использования здесь появится реальная статистика.",
+                "📊 TRACK RECORD\n\nПрогнозов не найдено с таким фильтром.",
                 parse_mode="Markdown"
             )
             return
 
-        finished  = wins + losses
-        winrate   = (wins / finished * 100) if finished > 0 else 0
-        wr_emoji  = "🟢" if winrate >= 55 else "🟡" if winrate >= 45 else "🔴"
-        pnl_emoji = "🟢" if avg_pnl >= 0 else "🔴"
+        icon = "🌍" if report_type == "global" else "🇷🇺" if report_type == "russia" else "📊"
+        
+        filter_label = ""
+        if filter_type and filter_type != "all":
+            filter_label = f" [{filter_type.upper()}]"
+        
+        def make_bar(value: int, total: int, length: int = 10) -> str:
+            if total == 0:
+                return "░" * length
+            pct = value / total
+            filled = int(pct * length)
+            return "█" * filled + "░" * (length - filled)
 
+        finished = total
         lines = [
-            "📊 *TRACK RECORD АГЕНТОВ*\n",
-            f"*Всего прогнозов:* {total}",
-            f"*Завершено:* {finished} | ⏳ Ждут: {pending}",
+            f"{icon} 📊 DIALECTIC EDGE — TRACK RECORD{filter_label}",
+            f"_{period}_" if period else f"_{last_update}_",
+            "",
+            "═" * 40,
+            "🎯 ОБЩАЯ СТАТИСТИКА",
+            "═" * 40,
         ]
 
         if finished > 0:
-            lines += [
-                f"*Winrate:* {wr_emoji} *{winrate:.0f}%* ({wins}✅ / {losses}❌)",
-                f"*Средний P&L:* {pnl_emoji} *{avg_pnl:+.1f}%*",
-            ]
-            if best:               lines.append(f"*Лучший:* 🚀 +{best:.1f}%")
-            if worst and worst < 0: lines.append(f"*Худший:* 💥 {worst:.1f}%")
+            win_bar = make_bar(wins, finished)
+            loss_bar = make_bar(losses, finished)
+            caution_bar = make_bar(cautions, finished)
+            lines.extend([
+                f"✅ WIN   [{win_bar}] {wins}/{finished} ({wins*100//finished}%)",
+                f"⚠️ CAUT  [{caution_bar}] {cautions}/{finished} ({cautions*100//finished}%)",
+                f"❌ LOSS  [{loss_bar}] {losses}/{finished} ({losses*100//finished}%)",
+            ])
 
-        if by_asset:
-            lines.append("\n*🏆 Топ активов:*")
-            for a in by_asset[:3]:
-                wr = (a['wins'] / a['calls'] * 100) if a['calls'] else 0
-                lines.append(
-                    f"• {a['asset']}: {wr:.0f}% winrate "
-                    f"({a['calls']} сигналов, avg {a['avg_pnl']:+.1f}%)"
-                )
+        # Точность только из отфильтрованных
+        if finished > 0:
+            winrate_calc = wins / finished * 100
+            wr_emoji = "🟢" if winrate_calc >= 55 else "🟡" if winrate_calc >= 45 else "🔴"
+            lines.append(f"Точность: {wr_emoji} {winrate_calc:.1f}%")
 
-        if recent:
-            lines.append("\n*📋 Последние сигналы:*")
-            for r in recent[:5]:
-                emoji = "✅" if r["result"] == "win" else "❌"
-                pnl   = r.get("pnl_pct") or 0
-                lines.append(
-                    f"{emoji} {r['asset']} {r['direction']} "
-                    f"→ *{pnl:+.1f}%* _{(r.get('created_at') or '')[:10]}_"
-                )
+        # Категории показываем только без фильтра
+        if categories and (not filter_type or filter_type == "all"):
+            lines.append("")
+            lines.append("📈 КАТЕГОРИИ")
+            for cat in categories[:6]:
+                lines.append(f"  {cat['name']}: {cat['accuracy']}")
 
-        lines.append(
-            "\n⚠️ _Прошлые результаты не гарантируют будущих. Не финансовый совет._"
-        )
-        await message.answer("\n".join(lines), parse_mode="Markdown")
+        lines.append("")
+        lines.append("📝 ПРОГНОЗЫ")
+        
+        for p in predictions:
+            date = p.get("date", "")[:8]
+            asset = p.get("asset", "")[:15]
+            forecast = p.get("forecast", "")[:30]
+            result = p.get("result", "")
+            fact = p.get("fact", "")[:30]
+            
+            if "Верно" in result:
+                res_emoji = "✅"
+            elif "Неверно" in result:
+                res_emoji = "❌"
+            elif "Осторожность" in result:
+                res_emoji = "⚠️"
+            else:
+                res_emoji = "⏳"
+            
+            # Для LOSS/CAUTION показываем больше инфы
+            if filter_type and filter_type != "all" and fact:
+                lines.append(f"{res_emoji} {date} {asset}")
+                lines.append(f"   Прогноз: {forecast}")
+                lines.append(f"   Факт:    {fact}")
+            else:
+                lines.append(f"{res_emoji} {date} {asset:<15} {forecast:<30}")
+
+        lines.append("")
+        lines.append("⚠️ Прошлые результаты не гарантируют будущих.")
+
+        keyboard_buttons = []
+        
+        type_label = {"global": "GLOBAL", "russia": "РОССИЯ", None: "ВСЕ"}.get(report_type, "ВСЕ")
+        
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="🌍 Global", callback_data=f"tr_type:global"),
+            InlineKeyboardButton(text="🇷🇺 Россия", callback_data=f"tr_type:russia"),
+            InlineKeyboardButton(text="📊 Все", callback_data=f"tr_type:all"),
+        ])
+        
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="✅ WIN", callback_data=f"tr_filter:win:{type_label}"),
+            InlineKeyboardButton(text="❌ LOSS", callback_data=f"tr_filter:loss:{type_label}"),
+            InlineKeyboardButton(text="⚠️ CAUTION", callback_data=f"tr_filter:caution:{type_label}"),
+            InlineKeyboardButton(text="📋 Все", callback_data=f"tr_filter:all:{type_label}"),
+        ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        
+        full_text = "\n".join(lines)
+        
+        if len(full_text) > 4000:
+            part1 = "\n".join(lines[:40])
+            part2 = "\n".join(lines[40:])
+            await message.answer(part1, parse_mode="Markdown")
+            await message.answer(part2, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await message.answer(full_text, parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as e:
         logger.error(f"Trackrecord error: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.callback_query(F.data.startswith("tr_type:"))
+async def cb_tr_type(callback: CallbackQuery):
+    await callback.answer()
+    data = callback.data.split(":")
+    report_type = data[1] if len(data) > 1 and data[1] != "all" else None
+    title = "GLOBAL" if report_type == "global" else "РОССИЯ" if report_type == "russia" else "АГЕНТОВ"
+    await _cmd_trackrecord(callback.message, report_type=report_type, title=title)
+
+
+@dp.callback_query(F.data.startswith("tr_filter:"))
+async def cb_tr_filter(callback: CallbackQuery):
+    await callback.answer()
+    data = callback.data.split(":")
+    if len(data) < 3:
+        return
+    
+    filter_type = data[1]
+    type_label = data[2]
+    
+    report_type = "global" if type_label == "GLOBAL" else "russia" if type_label == "РОССИЯ" else None
+    
+    await _cmd_trackrecord(callback.message, report_type=report_type, title=f"{type_label} ({filter_type.upper()})", filter_type=filter_type)
+
+
+@dp.message(Command("trackrecord"))
+async def cmd_trackrecord(message: Message):
+    await _cmd_trackrecord(message, report_type=None, title="АГЕНТОВ (ВСЕ)")
+
+
+@dp.message(Command("trackrecordglobal"))
+async def cmd_trackrecord_global(message: Message):
+    await _cmd_trackrecord(message, report_type="global", title="GLOBAL")
+
+
+@dp.message(Command("trackrecordrussia"))
+async def cmd_trackrecord_russia(message: Message):
+    await _cmd_trackrecord(message, report_type="russia", title="РОССИЯ EDGE")
 
 
 # ─── /weeklyreport ────────────────────────────────────────────────────────────
@@ -1348,6 +2004,7 @@ async def cmd_weekly(message: Message):
 
 
 # ─── /subscribe ───────────────────────────────────────────────────────────────
+from datetime import datetime
 
 @dp.message(Command("subscribe"))
 async def cmd_subscribe(message: Message):
@@ -1356,39 +2013,165 @@ async def cmd_subscribe(message: Message):
     user      = await get_user(user_id)
     is_subbed = user.get("daily_sub", 0) if user else 0
     sub_time  = user.get("sub_time", "08:00") if user else "08:00"
-    parts     = message.text.split()
+    
+    from datetime import datetime
+    current_utc = datetime.utcnow().strftime("%H:%M UTC")
 
-    if len(parts) == 1:
-        status = f"✅ Активна (каждый день в *{sub_time} UTC*)" if is_subbed else "❌ Отключена"
-        await message.answer(
-            f"📬 *Авторассылка*\nСтатус: {status}\n\n"
-            f"• `/subscribe on` — включить в 08:00 UTC\n"
-            f"• `/subscribe on 09:30` — своё время\n"
-            f"• `/subscribe off` — отключить",
-            parse_mode="Markdown"
-        )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🌅 06:00 UTC", callback_data="sub_time:06:00"),
+            InlineKeyboardButton(text="🌅 08:00 UTC", callback_data="sub_time:08:00"),
+        ],
+        [
+            InlineKeyboardButton(text="☀️ 10:00 UTC", callback_data="sub_time:10:00"),
+            InlineKeyboardButton(text="☀️ 12:00 UTC", callback_data="sub_time:12:00"),
+        ],
+        [
+            InlineKeyboardButton(text="💬 Своё время", callback_data="sub_time:custom"),
+        ],
+        [
+            InlineKeyboardButton(text="❌ Отключить", callback_data="sub_time:off"),
+        ]
+    ])
+
+    if is_subbed:
+        status = f"✅ Активна в {sub_time} UTC"
+    else:
+        status = "❌ Отключена"
+
+    await message.answer(
+        f"📬 *Авторассылка*\n"
+        f"Статус: {status}\n\n"
+        f"⏰ Сейчас: {current_utc}\n\n"
+        f"🌍 *Важно:* Бот работает по UTC.\n"
+        f"Если тебе нужно 10:00 МСК → выбирай 07:00 UTC\n"
+        f"Если нужно 10:00 (Минск/Алматы) → выбирай 07:00-08:00 UTC\n\n"
+        f"Выбери время:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data.startswith("sub_time:"))
+async def cb_subscribe(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    data = callback.data.split(":")
+    
+    if len(data) < 2:
         return
-
-    action   = parts[1].lower()
-    time_str = parts[2] if len(parts) > 2 else "08:00"
-    try:
-        h, m = time_str.split(":")
-        assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
-        time_str = f"{int(h):02d}:{int(m):02d}"
-    except Exception:
-        await message.answer("❌ Формат: HH:MM, например `08:30`", parse_mode="Markdown")
-        return
-
-    if action == "on":
-        await set_daily_sub(user_id, True, time_str)
-        await message.answer(
-            f"✅ *Подписка активна*\nКаждый день в *{time_str} UTC*\n\n"
-            f"Отключить: `/subscribe off`",
-            parse_mode="Markdown"
-        )
-    elif action == "off":
+    
+    action = data[1]
+    
+    if action == "off":
         await set_daily_sub(user_id, False)
-        await message.answer("❌ *Подписка отключена*", parse_mode="Markdown")
+        await callback.message.edit_text(
+            "❌ *Подписка отключена*",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if action == "custom":
+        await callback.message.edit_text(
+            "💬 *Введи время в формате HH:MM*\n\n"
+            "Например: `09:30`\n\n"
+            "Напоминаю: бот работает по UTC!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    time_str = action
+    await set_daily_sub(user_id, True, time_str)
+    
+    await callback.message.edit_text(
+        f"✅ *Подписка активана*\n\n"
+        f"📬 Ежедневно в *{time_str} UTC*\n\n"
+        f"❌ Отключить: нажми кнопку ниже",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отключить подписку", callback_data="sub_time:off")]
+        ])
+    )
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_text_input(message: Message):
+    """Handle portfolio input OR time subscription."""
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    # Check portfolio state first
+    state = user_portfolio_state.get(user_id)
+    if state:
+        if state["step"] == "amount":
+            try:
+                amount = float(text.replace(",", "."))
+                assert amount > 0
+                state["amount"] = amount
+                state["step"] = "price"
+                await message.answer(f"По какой цене купил {state['symbol']}?\nВведи цену (например 65000)")
+            except:
+                await message.answer("Введи число, например 0.5")
+            return
+        elif state["step"] == "price":
+            try:
+                price = float(text.replace(",", "."))
+                assert price > 0
+                symbol = state["symbol"]
+                amount = state["amount"]
+                await add_portfolio_position(user_id, symbol, amount, price)
+                await message.answer(f"✅ Добавлено: {symbol} | {amount} шт. | ${price:,.0f}")
+                del user_portfolio_state[user_id]
+            except:
+                await message.answer("Введи цену, например 65000")
+            return
+    
+    # Check time input (for subscription)
+    user = await get_user(user_id)
+    if not user:
+        return
+    
+    if ":" in text and len(text) == 5:
+        try:
+            h, m = text.split(":")
+            h, m = int(h), int(m)
+            assert 0 <= h <= 23 and 0 <= m <= 59
+            time_str = f"{h:02d}:{m:02d}"
+            await set_daily_sub(user_id, True, time_str)
+            await message.answer(f"✅ Подписка активана\n📬 Ежедневно в {time_str} UTC")
+            return
+        except:
+            pass
+    
+    # If not portfolio and not time, do nothing
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user:
+        return
+    
+    text = message.text.strip()
+    
+    if ":" not in text or len(text) != 5:
+        await message.answer("❌ Формат: HH:MM (например 09:30)")
+        return
+    
+    try:
+        h, m = text.split(":")
+        h, m = int(h), int(m)
+        assert 0 <= h <= 23 and 0 <= m <= 59
+    except:
+        await message.answer("❌ Некорректное время. Пример: 09:30")
+        return
+    
+    time_str = f"{h:02d}:{m:02d}"
+    await set_daily_sub(user_id, True, time_str)
+    
+    await message.answer(
+        f"✅ *Подписка активана*\n\n"
+        f"📬 Ежедневно в *{time_str} UTC*",
+        parse_mode="Markdown"
+    )
 
 
 # ─── /stats ───────────────────────────────────────────────────────────────────
@@ -1429,7 +2212,9 @@ async def cmd_stats(message: Message):
         f"Прогнозов: {tr_s.get('total',0)} | Winrate: {tr_wr:.0f}%\n\n"
         f"*Оценки пользователей:*\n"
         f"Оценок: {total_fb} | Позитивных: {satisfaction:.0f}%\n\n"
-        f"• /trackrecord — полная история точности\n"
+        f"• /trackrecord — история точности (всё)\n"
+        f"• /trackrecordglobal — Global\n"
+        f"• /trackrecordrussia — Россия Edge 🇷🇺\n"
         f"• /weeklyreport — отчёт за неделю\n"
         f"• /profile — изменить профиль",
         parse_mode="Markdown"
@@ -1454,7 +2239,9 @@ async def cmd_help(message: Message):
         "• `/daily force` — принудительно новый AI-прогон\n"
         "• `/analyze [текст]` — анализ новости\n"
         "• `/markets` — живые цены\n"
-        "• `/trackrecord` — история точности\n"
+        "• `/trackrecord` — история точности (всё)\n"
+        "• `/trackrecordglobal` — Global\n"
+        "• `/trackrecordrussia` — Россия Edge 🇷🇺\n"
         "• `/weeklyreport` — отчёт за неделю\n"
         "• `/subscribe on 08:00` — авторассылка\n"
         "• `/russia` — анализ для российского рынка 🇷🇺\n"
@@ -1468,6 +2255,8 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
+    await handle_stats_command(message)
+    return
     if message.from_user.id not in ADMIN_IDS:
         return
     stats    = await get_admin_stats()
@@ -1493,6 +2282,21 @@ async def cmd_admin(message: Message):
 
 # ─── Фидбек ───────────────────────────────────────────────────────────────────
 
+@dp.message(Command("health"))
+async def cmd_health(message: Message):
+    await handle_health_command(message)
+
+
+@dp.message(Command("logs"))
+async def cmd_logs(message: Message):
+    await handle_logs_command(message)
+
+
+@dp.message(Command("sysinfo"))
+async def cmd_sysinfo(message: Message):
+    await handle_sysinfo_command(message)
+
+
 @dp.callback_query(F.data.startswith("fb:"))
 async def handle_feedback(callback: CallbackQuery):
     _, rating_str, report_type = callback.data.split(":")
@@ -1502,13 +2306,58 @@ async def handle_feedback(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
 
 
+@dp.callback_query(F.data == "cmd_trackrecordglobal")
+async def cb_trackrecord_global(callback: CallbackQuery):
+    await callback.answer()
+    await _cmd_trackrecord(callback.message, report_type="global", title="GLOBAL")
+
+
+@dp.callback_query(F.data == "cmd_trackrecordrussia")
+async def cb_trackrecord_russia(callback: CallbackQuery):
+    await callback.answer()
+    await _cmd_trackrecord(callback.message, report_type="russia", title="РОССИЯ EDGE")
+
+
+@dp.callback_query(F.data == "cmd_trackrecord")
+async def cb_trackrecord_all(callback: CallbackQuery):
+    await callback.answer()
+    await _cmd_trackrecord(callback.message, report_type=None, title="АГЕНТОВ (ВСЕ)")
+
+
 # ─── Запуск ───────────────────────────────────────────────────────────────────
+
+async def set_bot_commands(bot: Bot):
+    from aiogram.types import BotCommand
+    commands = [
+        BotCommand(command="start", description="Перезапуск бота"),
+        BotCommand(command="help", description="Справка"),
+        BotCommand(command="daily", description="Дайджест рынков"),
+        BotCommand(command="trackrecordglobal", description="🌍 Global прогнозы"),
+        BotCommand(command="trackrecordrussia", description="🇷🇺 Россия Edge"),
+        BotCommand(command="trackrecord", description="📊 Вся статистика"),
+        BotCommand(command="markets", description="Текущие цены"),
+        BotCommand(command="status", description="Краткий статус"),
+        BotCommand(command="signals", description="📡 Сигналы копитрейдинг"),
+        BotCommand(command="tt", description="🧪 Тест"),
+        BotCommand(command="signalstatus", description="📊 Статус трейдера"),
+        BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
+        BotCommand(command="profile", description="Настройки профиля"),
+        BotCommand(command="subscribe", description="Авторассылка"),
+    ]
+    await bot.set_my_commands(commands)
+
 
 async def main():
     global scheduler
+    global bot
+    bot = get_bot()
+    
+    await set_bot_commands(bot)
 
     await init_db()
+    await import_forecasts_from_markdown()
     await init_profiles_table()
+    setup_admins(ADMIN_IDS)
     logger.info("🚀 Dialectic Edge v7.1 starting...")
     if int(os.getenv("RAILWAY_REPLICA_COUNT", "1") or "1") > 1:
         logger.warning(
@@ -1549,11 +2398,466 @@ async def main():
         check_predictions_fn=check_pending_predictions
     )
 
+    # Start signal trader in background
+    from signal_trader import run_signal_trader
+    signal_trader_task = asyncio.create_task(run_signal_trader(bot, ADMIN_IDS))
+
     await asyncio.gather(
         dp.start_polling(bot),
         scheduler.start()
     )
 
 
+# ─── Портфельный трекер ─────────────────────────────────────────────────────────
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+user_portfolio_state = {}  # user_id: {"symbol": str, "step": str}
+
+
+def portfolio_keyboard(has_positions: bool = True) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="portfolio:add_select:")],
+    ]
+    if has_positions:
+        buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data="portfolio:remove_select:")])
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="portfolio:refresh:")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def select_crypto_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="₿ Bitcoin", callback_data="portfolio:add_amount:BTC")],
+        [InlineKeyboardButton(text="Ξ Ethereum", callback_data="portfolio:add_amount:ETH")],
+        [InlineKeyboardButton(text="◎ Solana", callback_data="portfolio:add_amount:SOL")],
+        [InlineKeyboardButton(text="🥇 Gold", callback_data="portfolio:add_amount:GOLD")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="portfolio:menu:")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def show_portfolio(event):
+    """Show portfolio - works with both Message and CallbackQuery."""
+    user_id = event.from_user.id
+    
+    positions = await get_portfolio(user_id)
+    print(f"DEBUG: user_id={user_id}, positions={positions}")
+    
+    prices, _ = await get_full_realtime_context()
+    
+    symbol_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "GOLD": "GOLD"}
+    
+    lines = ["📊 ТВОЙ ПОРТФЕЛЬ", ""]
+    total_pnl = 0
+    total_value = 0
+    
+    for pos in positions:
+        symbol = pos["symbol"]
+        amount = pos["amount"]
+        entry = pos["entry_price"]
+        
+        price_key = symbol_map.get(symbol, symbol)
+        current_price = prices.get(price_key, {}).get("price", 0)
+        
+        if current_price:
+            value = amount * current_price
+            cost = amount * entry
+            pnl = value - cost
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0
+            total_pnl += pnl
+            total_value += value
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            lines.append(f"{symbol}: {amount} x ${current_price:,.0f} = ${value:,.0f}")
+            lines.append(f"  Вход: ${entry:,.0f} | PnL: {emoji}${pnl:+,.0f} ({pnl_pct:+.1f}%)")
+        else:
+            cost = amount * entry
+            total_value += cost
+            lines.append(f"{symbol}: {amount} x $??? | Вход: ${entry:,.0f}")
+    
+    if not positions:
+        lines.append("Портфель пуст")
+    
+    if total_value > 0:
+        total_cost = total_value - total_pnl if total_pnl > 0 else total_value
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+        emoji = "🟢" if total_pnl >= 0 else "🔴"
+        lines.extend(["", f"📈 Итого: ${total_value:,.0f} | {emoji} {total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)"])
+    
+    if hasattr(event, 'message'):
+        await event.message.answer("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
+    else:
+        await event.answer("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
+
+
+@dp.message(Command("portfolio"))
+async def cmd_portfolio(message: Message):
+    await upsert_user(message.from_user.id)
+    await show_portfolio(message)
+
+
+@dp.callback_query(F.data.startswith("portfolio:"))
+async def handle_portfolio_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    symbol = parts[2] if len(parts) > 2 else ""
+    
+    await callback.answer()
+    
+    if action == "add_select":
+        await callback.message.edit_text("Выбери криптовалюту:", reply_markup=select_crypto_keyboard())
+    
+    elif action == "add_amount":
+        user_portfolio_state[user_id] = {"symbol": symbol, "step": "amount"}
+        await callback.message.edit_text(f"Сколько {symbol} ты купил?\nВведи число (например 0.5)")
+    
+    elif action == "menu":
+        await callback.message.delete()
+        await show_portfolio(callback)
+    
+    elif action == "refresh":
+        await callback.message.edit_text("⏳ Обновляю...")
+        await show_portfolio(callback)
+    
+    elif action.startswith("cmd:"):
+        cmd = action.replace("cmd:", "")
+        await callback.message.delete()
+        if cmd == "profile":
+            await cmd_profile(callback.message)
+        elif cmd == "daily":
+            await cmd_daily(callback.message)
+        elif cmd == "status":
+            await cmd_status(callback.message)
+        elif cmd == "trackrecord":
+            await cmd_trackrecord(callback.message)
+    
+    elif action == "remove_select":
+        positions = await get_portfolio(user_id)
+        if not positions:
+            await callback.message.edit_text("Нечего удалять!", reply_markup=portfolio_keyboard(False))
+        else:
+            buttons = []
+            for pos in positions:
+                s = pos["symbol"]
+                a = pos["amount"]
+                buttons.append([InlineKeyboardButton(
+                    text=f"🗑 {s} ({a})",
+                    callback_data=portfolio_cb.new(action="confirm_remove", symbol=s)
+                )])
+            buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=portfolio_cb.new(action="menu", symbol=""))])
+            await callback.message.edit_text("Что удалить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    
+    elif action == "confirm_remove":
+        await remove_portfolio_position(user_id, symbol)
+        await callback.message.edit_text(f"✅ {symbol} удалён из портфеля")
+        await asyncio.sleep(1)
+        await callback.message.delete()
+        await cmd_portfolio(callback.message)
+
+
+@dp.message(Command("add"))
+async def cmd_add_portfolio(message: Message):
+    """Add position to portfolio."""
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    
+    parts = message.text.split()
+    
+    if len(parts) != 4:
+        await message.answer(
+            "❌ Неверный формат.\n\n"
+            "Пример: /add BTC 0.5 65000\n"
+            "Формат: /add СИМВОЛ КОЛИЧЕСТВО ЦЕНА_ВХОДА"
+        )
+        return
+    
+    try:
+        symbol = parts[1].upper()
+        amount = float(parts[2])
+        entry_price = float(parts[3])
+    except ValueError:
+        await message.answer("❌ Введите числа правильно.")
+        return
+    
+    allowed = ["BTC", "ETH", "SOL", "GOLD"]
+    if symbol not in allowed:
+        await message.answer(f"❌ Пока только: {', '.join(allowed)}")
+        return
+    
+    await add_portfolio_position(user_id, symbol, amount, entry_price)
+    
+    await message.answer(
+        f"✅ Добавлено:\n{symbol} | {amount} шт. | Вход: ${entry_price:,.0f}"
+    )
+
+
+@dp.message(Command("remove"))
+async def cmd_remove_portfolio(message: Message):
+    """Remove position from portfolio."""
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    
+    parts = message.text.split()
+    
+    if len(parts) != 2:
+        await message.answer("Пример: /remove BTC")
+        return
+    
+    symbol = parts[1].upper()
+    
+    await remove_portfolio_position(user_id, symbol)
+    
+    await message.answer(f"✅ Удалено: {symbol}")
+
+
+# ─── Backtest ───────────────────────────────────────────────────────────────────
+
+backtest_enabled = True  # Global toggle for backtest recording
+
+
+def backtest_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    buttons = []
+    if enabled:
+        buttons.append([InlineKeyboardButton(text="⏸ Остановить", callback_data="bt:toggle")])
+    else:
+        buttons.append([InlineKeyboardButton(text="▶️ Запустить", callback_data="bt:toggle")])
+    buttons.append([InlineKeyboardButton(text="📋 История сделок", callback_data="bt:history")])
+    buttons.append([InlineKeyboardButton(text="💰 Изменить баланс", callback_data="bt:capital")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(Command("backtest"))
+async def cmd_backtest(message: Message):
+    """Show backtest results with nice formatting and keyboard."""
+    signals = await get_backtest_signals()
+    stats = await get_backtest_stats()
+    config = await get_backtest_config()
+    
+    total = stats.get("total", 0) or 0
+    wins = stats.get("wins", 0) or 0
+    losses = stats.get("losses", 0) or 0
+    total_pnl = stats.get("total_pnl", 0) or 0
+    avg_pnl = stats.get("avg_pnl_pct", 0) or 0
+    
+    win_rate = (wins / total * 100) if total > 0 else 0
+    
+    capital = config.get("capital", 100.0)
+    enabled = config.get("enabled", 1)
+    
+    msg = "🤖 *ТЕСТОВЫЙ ТРЕЙДЕР*\n"
+    msg += "═" * 25 + "\n"
+    msg += f"Это бот который торгует по сигналам анализа.\n"
+    msg += f"Начинает с виртуального баланса и фармит $$$\n\n"
+    msg += f"💵 *Баланс:* `${capital:,.2f}`\n"
+    msg += f"📊 *Всего сделок:* {total}\n"
+    msg += f"🎯 *Win Rate:* {win_rate:.1f}%\n"
+    msg += f"💰 *Total PnL:* `${total_pnl:+,.2f}`\n"
+    msg += f"📈 *Avg PnL:* {avg_pnl:+.2f}%\n"
+    msg += "═" * 25 + "\n"
+    
+    open_positions = [s for s in signals if s.get("status") == "open"]
+    if open_positions:
+        msg += "\n🔵 *Открытые позиции:*\n"
+        for s in open_positions:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            entry = s.get("entry_price", 0)
+            emoji = "🟢" if direction == "BUY" else "🔴"
+            dir_text = "📈 ЛОНГ" if direction == "BUY" else "📉 ШОРТ"
+            msg += f"  {emoji} {symbol} {dir_text} @ ${entry:,.2f}\n"
+    else:
+        msg += "\n📭 *Нет открытых позиций*\n"
+    
+    closed = [s for s in signals if s.get("status") == "closed"]
+    if closed:
+        msg += "\n📋 *Последние сделки:*\n"
+        for s in closed[:5]:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            pnl = s.get("pnl", 0) or 0
+            pnl_pct = s.get("pnl_pct", 0) or 0
+            emoji = "🟢" if pnl > 0 else "🔴"
+            dir_text = "📈" if direction == "BUY" else "📉"
+            msg += f"  {emoji} {symbol} {dir_text} ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+    
+    status_text = "✅ Работает" if enabled else "❌ Остановлен"
+    msg += "═" * 25 + "\n"
+    msg += f"Статус: {status_text}"
+    
+    await message.answer(
+        msg, 
+        parse_mode="Markdown",
+        reply_markup=backtest_keyboard(bool(enabled))
+    )
+    
+    # Also export to GitHub
+    try:
+        from github_export import export_backtest_to_github
+        await export_backtest_to_github(signals, stats, config)
+    except Exception as e:
+        logger.warning(f"Backtest GitHub export failed: {e}")
+
+
+@dp.message(Command("backtest_toggle"))
+async def cmd_backtest_toggle(message: Message):
+    """Toggle backtest recording using database."""
+    config = await get_backtest_config()
+    enabled = not bool(config.get("enabled", 1))
+    await set_backtest_enabled(enabled)
+    status = "включён" if enabled else "выключен"
+    await message.answer(f"🤖 Бэктест {status}")
+
+
+@dp.callback_query(F.data.startswith("bt:"))
+async def cb_backtest(callback: CallbackQuery):
+    """Handle backtest keyboard buttons."""
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+    
+    if action == "toggle":
+        config = await get_backtest_config()
+        enabled = not bool(config.get("enabled", 1))
+        await set_backtest_enabled(enabled)
+        status = "✅ Работает" if enabled else "❌ Остановлен"
+        await callback.message.edit_text(
+            callback.message.text.split("Статус: ")[0] + f"Статус: {status}",
+            parse_mode="Markdown",
+            reply_markup=backtest_keyboard(bool(enabled))
+        )
+        await callback.answer(f"Бэктест {status}")
+    
+    elif action == "history":
+        signals = await get_backtest_signals()
+        closed = [s for s in signals if s.get("status") == "closed"]
+        
+        if not closed:
+            await callback.answer("Нет закрытых сделок", show_alert=True)
+            return
+        
+        msg = "📋 *История сделок*\n"
+        msg += "═" * 25 + "\n"
+        
+        wins = 0
+        losses = 0
+        for s in closed:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            pnl = s.get("pnl", 0) or 0
+            pnl_pct = s.get("pnl_pct", 0) or 0
+            date = s.get("created_at", "")[:10]
+            emoji = "🟢" if pnl > 0 else "🔴"
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+            dir_text = "📈" if direction == "BUY" else "📉"
+            msg += f"{date} {emoji} {symbol} {dir_text} ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+        
+        msg += "═" * 25 + "\n"
+        msg += f"Всего: {len(closed)} | 🟢 {wins} | 🔴 {losses}"
+        
+        await callback.message.answer(msg, parse_mode="Markdown")
+        await callback.answer()
+    
+    elif action == "capital":
+        await callback.message.answer(
+            "💰 *Изменить баланс*\n\n"
+            "Введите новую сумму:\n"
+            "/backtest_capital 500\n"
+            "или просто число",
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+    
+    else:
+        await callback.answer()
+
+
+@dp.message(Command("backtest_capital"))
+async def cmd_backtest_capital(message: Message):
+    """Set backtest capital."""
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("Использование: /backtest_capital [сумма]\nПример: /backtest_capital 500")
+            return
+        new_capital = float(parts[1].replace(",", ""))
+        if new_capital <= 0:
+            await message.answer("Сумма должна быть больше 0")
+            return
+        config = await update_backtest_capital(new_capital)
+        await message.answer(f"💵 Капитал изменён на ${config['capital']:,.2f}")
+    except ValueError:
+        await message.answer("Неверная сумма. Пример: /backtest_capital 500")
+
+
+@dp.message(Command("backtest_clear"))
+async def cmd_backtest_clear(message: Message):
+    """Clear backtest signals and reset capital."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM backtest_signals")
+        await db.execute("UPDATE backtest_config SET capital = 100.0, last_updated = datetime('now') WHERE id = 1")
+        await db.commit()
+    await message.answer("🗑 Бэктест очищен, капитал сброшен до $100")
+
+
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ─── Signal Trader Status ─────────────────────────────────────────────────────────
+
+
+@dp.message(Command("signalstatus"))
+async def cmd_signal_status(message: Message):
+    """Check signal trader status with entry prices."""
+    try:
+        from signal_trader import get_signal_trader_status
+        from database import get_daily_context
+        
+        status = await get_signal_trader_status()
+        msg = format_signal_trader_status_message(status)
+        await message.answer(msg, parse_mode="Markdown")
+        return
+        daily_ctx = await get_daily_context()
+        
+        msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
+        msg += "═" * 25 + "\n"
+        msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
+        msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
+        
+        if daily_ctx:
+            verdict = daily_ctx.get("verdict", "NEUTRAL") or "NEUTRAL"
+            entries = daily_ctx.get("entries", {}) or {}
+            
+            msg += f"\n🎯 *Вердикт:* {verdict}\n"
+            
+            if entries:
+                msg += "\n📊 *Точки входа и сигналы:*\n"
+                for symbol, price in entries.items():
+                    if price:
+                        if verdict == "BUY":
+                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                            msg += f"    → BUY когда цена ≤ ${price:,.0f}\n"
+                            msg += f"    → (цена упала на 3%+ от входа = доп. сигнал)\n"
+                        elif verdict == "SELL":
+                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                            msg += f"    → SELL когда цена ≥ ${price:,.0f}\n"
+                            msg += f"    → (цена выросла на 3%+ от входа = доп. сигнал)\n"
+                        else:
+                            msg += f"  • {symbol}: ${price:,.0f}\n"
+            else:
+                msg += "\n📭 Нет точек входа — сделай /daily\n"
+        else:
+            msg += "\n📭 Нет контекста — сделай /daily\n"
+        
+        msg += "\n" + "═" * 25 + "\n"
+        msg += f"💰 Всего сделок: {status['total_trades']}\n"
+        msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
+        msg += "═" * 25
+        
+        await message.answer(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"signal_status error: {e}")
+        import traceback
+        await message.answer(f"Ошибка: {e}\n\n{traceback.format_exc()}")

@@ -11,6 +11,8 @@ web_search.py — Реалтайм данные + реальный веб-пои
   Золото         → Yahoo GC=F + XAUUSD=X fallback
   Макро          → FRED API (CPI пересчитывается в YoY %)
   Веб-новости    → Tavily API (реальный поиск, не DDG-пустышка)
+  COT           → CFTC.gov (фьючерсное позиционирование)
+  ETF Flows     → Yahoo (институциональные потоки)
 """
 
 import asyncio
@@ -173,14 +175,26 @@ async def _coingecko_crypto(session) -> dict:
 async def _yahoo(session, ticker: str, key: str) -> dict | None:
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        async with session.get(url, params={"interval": "1d", "range": "2d"},
+        async with session.get(url, params={"interval": "1d", "range": "5d"},
                                timeout=TIMEOUT) as r:
             if r.status == 200:
                 data   = await r.json()
-                meta   = data["chart"]["result"][0]["meta"]
+                result = data["chart"]["result"][0]
+                meta   = result["meta"]
                 price  = float(meta.get("regularMarketPrice", 0))
-                prev   = float(meta.get("previousClose", price) or price)
-                change = ((price - prev) / prev * 100) if prev else 0.0
+                
+                change = 0.0
+                if result.get("indicators", {}).get("quote"):
+                    quotes = result["indicators"]["quote"][0]
+                    closes = quotes.get("close", [])
+                    if len(closes) >= 2 and closes[-1] is not None and closes[-2] is not None:
+                        prev_price = closes[-2]
+                        change = ((price - prev_price) / prev_price * 100) if prev_price else 0.0
+                    elif len(closes) >= 1 and closes[-1] is not None:
+                        prev = float(meta.get("previousClose", price) or price)
+                        if prev != price:
+                            change = ((price - prev) / prev * 100) if prev else 0.0
+                
                 if _sane(key, price):
                     return {"price": round(price, 2),
                             "change_24h": round(change, 3),
@@ -378,4 +392,24 @@ def format_prices_for_agents(prices: dict) -> str:
 async def get_full_realtime_context() -> tuple[dict, str]:
     prices    = await fetch_realtime_prices()
     formatted = format_prices_for_agents(prices)
+    
+    try:
+        from cot_data import format_cot_for_agents, get_cot_for_assets
+        cot_data = await get_cot_for_assets(["Bitcoin", "Gold", "Crude Oil"])
+        cot_formatted = format_cot_for_agents(cot_data)
+        formatted += "\n\n" + cot_formatted
+    except Exception as e:
+        logger.warning(f"COT data error: {e}")
+    
+    try:
+        from etf_flows import format_etf_flows_for_agents, get_market_breadth, get_etf_flows
+        etf_data = await get_etf_flows()
+        etf_formatted = format_etf_flows_for_agents(etf_data)
+        formatted += "\n\n" + etf_formatted
+        
+        breadth = await get_market_breadth()
+        prices["BREADTH"] = breadth
+    except Exception as e:
+        logger.warning(f"ETF flows error: {e}")
+    
     return prices, formatted
