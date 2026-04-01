@@ -552,17 +552,6 @@ async def send_daily_digest_bundle(
         debate_cache[user_id] = hid
     else:
         debate_cache[user_id] = {"rounds": parts["rounds"], "full": report}
-    
-    # Save daily context for signal trading
-    try:
-        verdict = extract_verdict_from_report(report)
-        entries, stop_losses, targets, timeframes = extract_symbols_from_report(report, prices_dict)
-        if verdict and entries:
-            await save_daily_context(verdict, list(entries.keys()), entries, stop_losses, targets, timeframes)
-            logger.info(f"Saved daily context: verdict={verdict}, symbols={list(entries.keys())}")
-    except Exception as e:
-        logger.warning(f"Failed to save daily context: {e}")
-    
     try:
         await save_debate_session(user_id, report)
     except Exception as e:
@@ -650,19 +639,20 @@ async def cmd_signal_status(message: Message):
     """Check signal trader status with entry prices."""
     try:
         from signal_trader import get_signal_trader_status
-        from database import get_daily_context
         
         status = await get_signal_trader_status()
-        daily_ctx = await get_daily_context()
+        
+        cached = storage.get_cached_report()
         
         msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
         msg += "═" * 25 + "\n"
         msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
         msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
         
-        if daily_ctx:
-            verdict = daily_ctx.get("verdict", "NEUTRAL") or "NEUTRAL"
-            entries = daily_ctx.get("entries", {}) or {}
+        if cached and cached.get("report"):
+            report = cached["report"]
+            verdict = extract_verdict_from_report(report) or "NEUTRAL"
+            entries, _, _, _ = extract_symbols_from_report(report, cached.get("prices", {}))
             
             msg += f"\n🎯 *Вердикт:* {verdict}\n"
             
@@ -681,7 +671,7 @@ async def cmd_signal_status(message: Message):
             else:
                 msg += "\n📭 Нет точек входа — сделай /daily\n"
         else:
-            msg += "\n📭 Нет контекста — сделай /daily\n"
+            msg += "\n📭 Нет кэша — сделай /daily\n"
         
         msg += "\n" + "═" * 25 + "\n"
         msg += f"💰 Всего сделок: {status['total_trades']}\n"
