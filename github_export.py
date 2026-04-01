@@ -358,29 +358,29 @@ async def export_backtest_to_github(signals: list[dict], stats: dict, config: di
     total = stats.get("total", 0) or 0
     wins = stats.get("wins", 0) or 0
     win_rate = (wins / total * 100) if total > 0 else 0
+    total_pnl = stats.get("total_pnl") or 0
+    avg_pnl_pct = stats.get("avg_pnl_pct") or 0
     
     lines.extend([
         f"- Всего сделок: **{total}**",
         f"- Win Rate: **{win_rate:.1f}%**",
-        f"- Total PnL: **${stats.get('total_pnl', 0):+,.2f}**",
-        f"- Avg PnL: **{stats.get('avg_pnl_pct', 0):+.2f}%**",
+        f"- Total PnL: **${total_pnl:+,.2f}**",
+        f"- Avg PnL: **{avg_pnl_pct:+.2f}%**",
         "",
         "## 📋 История сделок",
         "",
-        "| Дата | Символ | Направление | Вход | Выход | PnL | PnL % |",
-        "|------|--------|-------------|------|-------|-----|-------|",
     ])
     
     # Only show closed trades in table
     closed_signals = [s for s in signals if s.get("status") == "closed"]
     for s in closed_signals:
-        date = s.get("created_at", "")[:10]
-        symbol = s.get("symbol", "")
-        direction = s.get("direction", "")
-        entry = s.get("entry_price", 0) or 0
-        exit_price = s.get("exit_price", 0) or 0
-        pnl = s.get("pnl", 0) or 0
-        pnl_pct = s.get("pnl_pct", 0) or 0
+        date = s.get("created_at", "")[:10] or ""
+        symbol = s.get("symbol", "") or ""
+        direction = s.get("direction", "") or ""
+        entry = s.get("entry_price") or 0
+        exit_price = s.get("exit_price") or 0
+        pnl = s.get("pnl") or 0
+        pnl_pct = s.get("pnl_pct") or 0
         
         lines.append(f"| {date} | {symbol} | {direction} | ${entry:,.0f} | ${exit_price:,.0f} | ${pnl:+,.0f} | {pnl_pct:+.1f}% |")
     
@@ -389,11 +389,11 @@ async def export_backtest_to_github(signals: list[dict], stats: dict, config: di
     if open_signals:
         lines.extend(["", "## 🔵 Открытые позиции", ""])
         for s in open_signals:
-            date = s.get("created_at", "")[:10]
-            symbol = s.get("symbol", "")
-            direction = s.get("direction", "")
-            entry = s.get("entry_price", 0) or 0
-            qty = s.get("quantity", 0) or 0
+            date = s.get("created_at", "")[:10] or ""
+            symbol = s.get("symbol", "") or ""
+            direction = s.get("direction", "") or ""
+            entry = s.get("entry_price") or 0
+            qty = s.get("quantity") or 0
             lines.append(f"- **{symbol}** {direction} @ ${entry:,.2f} (qty: {qty:.4f}) — {date}")
     
     content = "\n".join(lines)
