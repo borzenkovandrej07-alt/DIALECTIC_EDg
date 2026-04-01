@@ -575,6 +575,55 @@ async def cmd_test_bot(message: Message):
     await message.answer("TT WORKS!")
 
 
+@dp.message(F.text.startswith("/signalstatus"))
+async def cmd_signal_status(message: Message):
+    """Check signal trader status with entry prices."""
+    try:
+        from signal_trader import get_signal_trader_status
+        from database import get_daily_context
+        
+        status = await get_signal_trader_status()
+        daily_ctx = await get_daily_context()
+        
+        msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
+        msg += "═" * 25 + "\n"
+        msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
+        msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
+        
+        if daily_ctx:
+            verdict = daily_ctx.get("verdict", "NEUTRAL") or "NEUTRAL"
+            entries = daily_ctx.get("entries", {}) or {}
+            
+            msg += f"\n🎯 *Вердикт:* {verdict}\n"
+            
+            if entries:
+                msg += "\n📊 *Точки входа и сигналы:*\n"
+                for symbol, price in entries.items():
+                    if price:
+                        if verdict == "BUY":
+                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                            msg += f"    → BUY когда цена ≤ ${price:,.0f}\n"
+                        elif verdict == "SELL":
+                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
+                            msg += f"    → SELL когда цена ≥ ${price:,.0f}\n"
+                        else:
+                            msg += f"  • {symbol}: ${price:,.0f}\n"
+            else:
+                msg += "\n📭 Нет точек входа — сделай /daily\n"
+        else:
+            msg += "\n📭 Нет контекста — сделай /daily\n"
+        
+        msg += "\n" + "═" * 25 + "\n"
+        msg += f"💰 Всего сделок: {status['total_trades']}\n"
+        msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
+        msg += "═" * 25
+        
+        await message.answer(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"signal_status error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
