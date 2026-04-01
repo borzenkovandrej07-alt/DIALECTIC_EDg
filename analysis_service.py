@@ -36,6 +36,8 @@ async def run_full_analysis(
     """
     Run the current production analysis pipeline and return full report + prices.
     """
+    from database import get_predictions_summary
+    
     tasks = [
         _fetcher.fetch_all(),
         fetch_full_context(),
@@ -43,8 +45,9 @@ async def run_full_analysis(
         get_profile(user_id),
         get_meta_context(),
         get_previous_digest(),
+        get_predictions_summary(days=5),
     ]
-    news, geo_context, realtime_result, profile, meta_context, prev_digest = await asyncio.gather(
+    news, geo_context, realtime_result, profile, meta_context, prev_digest, predictions_summary = await asyncio.gather(
         *tasks, return_exceptions=True
     )
 
@@ -63,6 +66,9 @@ async def run_full_analysis(
     if isinstance(prev_digest, Exception):
         logger.warning("previous digest failed: %s", prev_digest)
         prev_digest = ""
+    if isinstance(predictions_summary, Exception):
+        logger.warning("predictions summary failed: %s", predictions_summary)
+        predictions_summary = ""
 
     if isinstance(realtime_result, Exception):
         logger.warning("realtime context failed: %s", realtime_result)
@@ -84,6 +90,9 @@ async def run_full_analysis(
 
     if prev_digest and not custom_mode:
         news_context += f"\n\n{prev_digest}"
+    
+    if predictions_summary and not custom_mode:
+        news_context += f"\n\n{predictions_summary}"
 
     sentiment_result, confidence_instruction = await analyze_and_filter_async(
         news_context,

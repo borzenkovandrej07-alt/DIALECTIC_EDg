@@ -799,3 +799,65 @@ async def get_daily_context() -> dict | None:
             data["targets"] = json.loads(data.get("targets", "{}"))
             data["timeframes"] = json.loads(data.get("timeframes", "{}"))
             return data
+
+
+# ─── Recent Predictions for Context ─────────────────────────────────────────────
+
+async def get_recent_predictions(days: int = 5, limit: int = 10) -> list[dict]:
+    """Get recent predictions for context in analysis."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM predictions 
+            WHERE created_at > datetime('now', '-{} days')
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (days, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_predictions_summary(days: int = 5) -> str:
+    """Get formatted summary of recent predictions for AI context."""
+    predictions = await get_recent_predictions(days=days, limit=20)
+    
+    if not predictions:
+        return "Нет прошлых прогнозов за последние дни."
+    
+    lines = ["=== ПРОШЛЫЕ ПРОГНОЗЫ ==="]
+    
+    # Group by asset
+    by_asset = {}
+    for p in predictions:
+        asset = p.get("asset", "UNKNOWN")
+        if asset not in by_asset:
+            by_asset[asset] = []
+        by_asset[asset].append(p)
+    
+    for asset, preds in by_asset.items():
+        lines.append(f"\n{asset}:")
+        for p in preds[:3]:  # Max 3 per asset
+            direction = p.get("direction", "")
+            entry = p.get("entry_price") or 0
+            target = p.get("target_price") or 0
+            result = p.get("result", "pending")
+            date = p.get("created_at", "")[:10]
+            
+            if result == "pending":
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — в ожидании")
+            elif result == "win":
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — ✅ WIN")
+            elif result == "loss":
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — 🔴 LOSS")
+            else:
+                lines.append(f"  {date}: {direction} вход=${entry:.0f} цель=${target:.0f} — {result}")
+    
+    # Calculate accuracy
+    closed = [p for p in predictions if p.get("result") in ("win", "loss")]
+    wins = len([p for p in closed if p.get("result") == "win"])
+    accuracy = (wins / len(closed) * 100) if closed else 0
+    
+    lines.append(f"\nТочность: {wins}/{len(closed)} = {accuracy:.0f}%")
+    lines.append("=========================")
+    
+    return "\n".join(lines)

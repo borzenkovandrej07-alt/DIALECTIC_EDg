@@ -61,6 +61,7 @@ from database import (
     add_backtest_signal, close_backtest_signal, get_backtest_signals, get_backtest_stats,
     get_backtest_config, update_backtest_capital, set_backtest_enabled,
     save_daily_context, get_daily_context,
+    get_predictions_summary,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
