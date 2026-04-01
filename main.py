@@ -690,48 +690,9 @@ async def cmd_signal_status(message: Message):
     """Check signal trader status with entry prices."""
     try:
         from signal_trader import get_signal_trader_status
-        
+
         status = await get_signal_trader_status()
         msg = format_signal_trader_status_message(status)
-        await message.answer(msg, parse_mode="Markdown")
-        return
-        
-        cached = storage.get_cached_report()
-        
-        msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
-        msg += "═" * 25 + "\n"
-        msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
-        msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
-        
-        if cached and cached.get("report"):
-            report = cached["report"]
-            verdict = extract_verdict_from_report(report) or "NEUTRAL"
-            entries, _, _, _ = extract_symbols_from_report(report, cached.get("prices", {}))
-            
-            msg += f"\n🎯 *Вердикт:* {verdict}\n"
-            
-            if entries:
-                msg += "\n📊 *Точки входа и сигналы:*\n"
-                for symbol, price in entries.items():
-                    if price:
-                        if verdict == "BUY":
-                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
-                            msg += f"    → BUY когда цена ≤ ${price:,.0f}\n"
-                        elif verdict == "SELL":
-                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
-                            msg += f"    → SELL когда цена ≥ ${price:,.0f}\n"
-                        else:
-                            msg += f"  • {symbol}: ${price:,.0f}\n"
-            else:
-                msg += "\n📭 Нет точек входа — сделай /daily\n"
-        else:
-            msg += "\n📭 Нет кэша — сделай /daily\n"
-        
-        msg += "\n" + "═" * 25 + "\n"
-        msg += f"💰 Всего сделок: {status['total_trades']}\n"
-        msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
-        msg += "═" * 25
-        
         await message.answer(msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"signal_status error: {e}")
@@ -2803,61 +2764,3 @@ async def cmd_backtest_clear(message: Message):
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-# ─── Signal Trader Status ─────────────────────────────────────────────────────────
-
-
-@dp.message(Command("signalstatus"))
-async def cmd_signal_status(message: Message):
-    """Check signal trader status with entry prices."""
-    try:
-        from signal_trader import get_signal_trader_status
-        from database import get_daily_context
-        
-        status = await get_signal_trader_status()
-        msg = format_signal_trader_status_message(status)
-        await message.answer(msg, parse_mode="Markdown")
-        return
-        daily_ctx = await get_daily_context()
-        
-        msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
-        msg += "═" * 25 + "\n"
-        msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
-        msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
-        
-        if daily_ctx:
-            verdict = daily_ctx.get("verdict", "NEUTRAL") or "NEUTRAL"
-            entries = daily_ctx.get("entries", {}) or {}
-            
-            msg += f"\n🎯 *Вердикт:* {verdict}\n"
-            
-            if entries:
-                msg += "\n📊 *Точки входа и сигналы:*\n"
-                for symbol, price in entries.items():
-                    if price:
-                        if verdict == "BUY":
-                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
-                            msg += f"    → BUY когда цена ≤ ${price:,.0f}\n"
-                            msg += f"    → (цена упала на 3%+ от входа = доп. сигнал)\n"
-                        elif verdict == "SELL":
-                            msg += f"  • {symbol}: вход ${price:,.0f}\n"
-                            msg += f"    → SELL когда цена ≥ ${price:,.0f}\n"
-                            msg += f"    → (цена выросла на 3%+ от входа = доп. сигнал)\n"
-                        else:
-                            msg += f"  • {symbol}: ${price:,.0f}\n"
-            else:
-                msg += "\n📭 Нет точек входа — сделай /daily\n"
-        else:
-            msg += "\n📭 Нет контекста — сделай /daily\n"
-        
-        msg += "\n" + "═" * 25 + "\n"
-        msg += f"💰 Всего сделок: {status['total_trades']}\n"
-        msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
-        msg += "═" * 25
-        
-        await message.answer(msg, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"signal_status error: {e}")
-        import traceback
-        await message.answer(f"Ошибка: {e}\n\n{traceback.format_exc()}")

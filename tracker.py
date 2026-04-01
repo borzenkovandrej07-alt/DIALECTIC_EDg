@@ -372,8 +372,7 @@ async def save_predictions_from_report(report_text: str, source_news: str = "", 
     predictions = extract_predictions_from_report(report_text)
 
     saved = 0
-    trades_executed = []
-    
+
     # Extract verdict from report
     verdict = "NEUTRAL"
     vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
@@ -417,26 +416,10 @@ async def save_predictions_from_report(report_text: str, source_news: str = "", 
                 timeframe=pred["timeframe"],
                 source_news=source_news[:300],
             )
+
             saved += 1
         except Exception as e:
             logger.warning(f"Не удалось сохранить прогноз: {e}")
-
-    # Send notification to admins about executed trades
-    if trades_executed and bot and admin_ids:
-        msg = "🎯 *ТЕСТОВЫЙ ТРЕЙДЕР - СДЕЛКА*\n"
-        msg += "═" * 25 + "\n"
-        for t in trades_executed:
-            emoji = "🟢" if t["direction"] == "BUY" else "🔴"
-            direction_text = "ПОКУПКА" if t["direction"] == "BUY" else "ПРОДАЖА"
-            msg += f"{emoji} *{t['symbol']}* {direction_text}\n"
-            msg += f"   Вход: ${t['entry_price']:,.2f}\n"
-            msg += f"   Баланс: ${t['capital']:,.2f}\n"
-        msg += "═" * 25
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, msg, parse_mode="Markdown")
-            except Exception as e:
-                logger.warning(f"Failed to notify admin {admin_id}: {e}")
 
     if saved:
         logger.info(f"Сохранено {saved} прогнозов из отчёта")
