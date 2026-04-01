@@ -26,6 +26,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.getenv("GITHUB_REPO", "spermoeshka/DIALECTIC_EDg")
 FORECASTS_FILE   = "FORECASTS.md"
 DIGEST_CACHE_FILE = "DIGEST_CACHE.md"
+BACKTEST_FILE = "BACKTEST.md"
 
 TIMEOUT = aiohttp.ClientTimeout(total=15)
 
@@ -330,6 +331,55 @@ async def get_previous_digest() -> str:
         "=== ЗАДАЧА: если прошлый вердикт оказался неверным — объясни почему. "
         "Если верным — укажи это как подтверждение сигнала. ===\n"
     )
+
+
+# ─── BACKTEST.md — история бэктеста ──────────────────────────────────────────────
+
+async def export_backtest_to_github(signals: list[dict], stats: dict) -> bool:
+    """Экспортирует результаты бэктеста в BACKTEST.md на GitHub."""
+    if not GITHUB_TOKEN:
+        return False
+    
+    lines = [
+        "# 📊 Dialectic Edge — Backtest Results",
+        f"> Обновлено: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "## 📈 Статистика",
+        "",
+        f"- Всего сделок: **{stats.get('total', 0)}**",
+        f"- Win Rate: **{stats.get('wins', 0) / max(stats.get('total', 1), 1) * 100:.1f}%**",
+        f"- Total PnL: **${stats.get('total_pnl', 0):+,.2f}**",
+        f"- Avg PnL: **{stats.get('avg_pnl_pct', 0):+.2f}%**",
+        "",
+        "## 📋 История сделок",
+        "",
+        "| Дата | Символ | Направление | Вход | Выход | PnL | PnL % |",
+        "|------|--------|-------------|------|-------|-----|-------|",
+    ]
+    
+    for s in signals:
+        date = s.get("created_at", "")[:10]
+        symbol = s.get("symbol", "")
+        direction = s.get("direction", "")
+        entry = s.get("entry_price", 0) or 0
+        exit_price = s.get("exit_price", 0) or 0
+        pnl = s.get("pnl", 0) or 0
+        pnl_pct = s.get("pnl_pct", 0) or 0
+        
+        lines.append(f"| {date} | {symbol} | {direction} | ${entry:,.0f} | ${exit_price:,.0f} | ${pnl:+,.0f} | {pnl_pct:+.1f}% |")
+    
+    content = "\n".join(lines)
+    
+    _, sha = await _github_get(BACKTEST_FILE)
+    success = await _github_put(
+        BACKTEST_FILE, content, sha,
+        f"📊 Update backtest {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]"
+    )
+    
+    if success:
+        logger.info("✅ BACKTEST.md обновлён на GitHub")
+    
+    return success
 
 
 if __name__ == "__main__":

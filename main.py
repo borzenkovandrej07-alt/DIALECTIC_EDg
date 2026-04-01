@@ -2438,6 +2438,13 @@ async def cmd_backtest(message: Message):
     lines.extend(["", f"🤖 Бэктест: {status} (/backtest_toggle)"])
     
     await message.answer("\n".join(lines))
+    
+    # Also export to GitHub
+    try:
+        from github_export import export_backtest_to_github
+        await export_backtest_to_github(signals, stats)
+    except Exception as e:
+        logger.warning(f"Backtest GitHub export failed: {e}")
 
 
 @dp.message(Command("backtest_toggle"))
