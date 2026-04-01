@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 # ИСПРАВЛЕНО: импортируем из config чтобы все модули использовали один путь
-from config import DB_PATH
+from config import DB_PATH, DIGEST_SNAPSHOT_MAX_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,28 @@ async def init_db():
                 targets         TEXT,  -- JSON dict of target prices
                 timeframes      TEXT,  -- JSON dict of timeframes
                 news_summary    TEXT,  -- brief news context
-                expires_at      TEXT   -- when this context expires (default 24h)
+                expires_at      TEXT,  -- when this context expires (default 24h)
+                prompt_versions TEXT,  -- JSON: версии пайплайна/промптов
+                model_inputs_snapshot TEXT  -- JSON: усечённый снимок входов модели
+            )
+        """)
+
+        async def _add_column_if_missing(table: str, column: str, decl: str):
+            async with db.execute(f"PRAGMA table_info({table})") as cur:
+                cols = [row[1] for row in await cur.fetchall()]
+            if column not in cols:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {decl}")
+
+        await _add_column_if_missing("daily_context", "prompt_versions", "prompt_versions TEXT")
+        await _add_column_if_missing("daily_context", "model_inputs_snapshot", "model_inputs_snapshot TEXT")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trade_decision_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at  TEXT DEFAULT (datetime('now')),
+                cycle_type  TEXT NOT NULL,
+                signal_id   INTEGER,
+                payload     TEXT NOT NULL
             )
         """)
 
@@ -802,6 +823,16 @@ def _decode_daily_context_row(row) -> dict | None:
     data["stop_losses"] = json.loads(data.get("stop_losses", "{}") or "{}")
     data["targets"] = json.loads(data.get("targets", "{}") or "{}")
     data["timeframes"] = json.loads(data.get("timeframes", "{}") or "{}")
+    pv = data.get("prompt_versions") or "{}"
+    try:
+        data["prompt_versions"] = json.loads(pv) if isinstance(pv, str) else (pv or {})
+    except Exception:
+        data["prompt_versions"] = {}
+    ms = data.get("model_inputs_snapshot") or "{}"
+    try:
+        data["model_inputs_snapshot"] = json.loads(ms) if isinstance(ms, str) else (ms or {})
+    except Exception:
+        data["model_inputs_snapshot"] = {}
     return data
 
 
@@ -812,16 +843,22 @@ async def save_daily_context(
     stop_losses: dict,
     targets: dict,
     timeframes: dict,
-    news_summary: str = ""
+    news_summary: str = "",
+    prompt_versions: dict | None = None,
+    model_inputs_snapshot: dict | None = None,
 ) -> int:
     """Save daily context from /daily and keep recent history for consensus trading."""
     import json
 
+    pv_json = json.dumps(prompt_versions or {}, ensure_ascii=False)[:8000]
+    snap_json = json.dumps(model_inputs_snapshot or {}, ensure_ascii=False)[:DIGEST_SNAPSHOT_MAX_CHARS]
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO daily_context (
-                verdict, symbols, entries, stop_losses, targets, timeframes, news_summary, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+72 hours'))
+                verdict, symbols, entries, stop_losses, targets, timeframes, news_summary, expires_at,
+                prompt_versions, model_inputs_snapshot
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+72 hours'), ?, ?)
         """, (
             verdict,
             json.dumps(symbols),
@@ -829,7 +866,9 @@ async def save_daily_context(
             json.dumps(stop_losses),
             json.dumps(targets),
             json.dumps(timeframes),
-            news_summary[:500]
+            news_summary[:500],
+            pv_json,
+            snap_json,
         ))
 
         await db.execute("""
@@ -877,6 +916,52 @@ async def get_recent_daily_contexts(limit: int = 3, max_age_hours: int | None = 
         async with db.execute(query, params) as cursor:
             rows = await cursor.fetchall()
             return [_decode_daily_context_row(row) for row in rows if row]
+
+
+async def append_trade_decision_log(cycle_type: str, payload: dict, signal_id: int | None = None) -> int:
+    """Аудит решений автотрейда / сигналов (JSON payload)."""
+    import json
+
+    raw = json.dumps(payload, ensure_ascii=False)
+    if len(raw) > 65000:
+        raw = raw[:65000] + '"…[truncated]"}'
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT INTO trade_decision_log (cycle_type, signal_id, payload)
+            VALUES (?, ?, ?)
+            """,
+            (cycle_type, signal_id, raw),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def get_recent_trade_decisions(limit: int = 5) -> list[dict]:
+    import json
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT id, created_at, cycle_type, signal_id, payload
+            FROM trade_decision_log
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            out = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["payload"] = json.loads(item.get("payload") or "{}")
+                except Exception:
+                    item["payload"] = {}
+                out.append(item)
+            return out
 
 
 # ─── Recent Predictions for Context ─────────────────────────────────────────────

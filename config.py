@@ -108,3 +108,21 @@ DISCLAIMER = (
     "Используй как один из инструментов мышления, не как сигнал к действию.\n\n"
     "⚠️ *Не является финансовым советом. DYOR. Торговля = риск потери капитала.*"
 )
+
+# ─── ФИЧЕФЛАГИ И ЛИМИТЫ (одно место; переопределение через env) ─────────────
+# Глобально выключить цикл бумажного автотрейда (даже если backtest enabled в БД)
+FEATURE_AUTOTRADE = os.getenv("FEATURE_AUTOTRADE", "1").strip().lower() in ("1", "true", "yes", "on")
+# Источники данных для bias крипты в автотрейде
+DATA_SOURCE_BINANCE_SIGNALS = os.getenv("DATA_SOURCE_BINANCE_SIGNALS", "1").strip().lower() in ("1", "true", "yes", "on")
+# Писать в trade_decision_log каждый пропуск цикла (шумно; для отладки)
+LOG_AUTOTRADE_SKIPS = os.getenv("LOG_AUTOTRADE_SKIPS", "0").strip().lower() in ("1", "true", "yes", "on")
+# Параметры автотрейда (раньше были константами в signal_trader)
+AUTOTRADE_INTERVAL_SEC = int(os.getenv("AUTOTRADE_INTERVAL_SEC", "300"))
+AUTOTRADE_RECENT_CONTEXT_LIMIT = int(os.getenv("AUTOTRADE_RECENT_CONTEXT_LIMIT", "3"))
+AUTOTRADE_CONTEXT_MAX_AGE_HOURS = int(os.getenv("AUTOTRADE_CONTEXT_MAX_AGE_HOURS", "72"))
+AUTOTRADE_ENTRY_TOLERANCE_PCT = float(os.getenv("AUTOTRADE_ENTRY_TOLERANCE_PCT", "0.02"))
+AUTOTRADE_OPEN_SCORE_THRESHOLD = float(os.getenv("AUTOTRADE_OPEN_SCORE_THRESHOLD", "18"))
+AUTOTRADE_REVERSAL_SCORE_THRESHOLD = float(os.getenv("AUTOTRADE_REVERSAL_SCORE_THRESHOLD", "16"))
+AUTOTRADE_SIGNAL_BIAS_CACHE_SEC = int(os.getenv("AUTOTRADE_SIGNAL_BIAS_CACHE_SEC", "300"))
+# Ограничить размер JSON-снимка контекста модели в БД (символов)
+DIGEST_SNAPSHOT_MAX_CHARS = int(os.getenv("DIGEST_SNAPSHOT_MAX_CHARS", "12000"))

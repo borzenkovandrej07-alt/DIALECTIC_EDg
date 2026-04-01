@@ -361,7 +361,14 @@ def _parse_timeframe(raw: str) -> str:
     return "1w"  # дефолт
 
 
-async def save_predictions_from_report(report_text: str, source_news: str = "", bot=None, admin_ids: list = None):
+async def save_predictions_from_report(
+    report_text: str,
+    source_news: str = "",
+    bot=None,
+    admin_ids: list = None,
+    prompt_versions: dict | None = None,
+    model_inputs_snapshot: dict | None = None,
+):
     """Извлекает и сохраняет все прогнозы из отчёта."""
     vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
     if vm:
@@ -401,7 +408,9 @@ async def save_predictions_from_report(report_text: str, source_news: str = "", 
             stop_losses=stop_losses,
             targets=targets,
             timeframes=timeframes,
-            news_summary=source_news[:300]
+            news_summary=source_news[:300],
+            prompt_versions=prompt_versions,
+            model_inputs_snapshot=model_inputs_snapshot,
         )
         logger.info(f"Saved daily context: verdict={verdict}, symbols={symbols}")
     

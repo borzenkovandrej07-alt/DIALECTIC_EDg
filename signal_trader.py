@@ -11,23 +11,37 @@ import json
 import logging
 from datetime import datetime, timedelta
 
+from config import (
+    AUTOTRADE_CONTEXT_MAX_AGE_HOURS,
+    AUTOTRADE_ENTRY_TOLERANCE_PCT,
+    AUTOTRADE_INTERVAL_SEC,
+    AUTOTRADE_OPEN_SCORE_THRESHOLD,
+    AUTOTRADE_RECENT_CONTEXT_LIMIT,
+    AUTOTRADE_REVERSAL_SCORE_THRESHOLD,
+    AUTOTRADE_SIGNAL_BIAS_CACHE_SEC,
+    DATA_SOURCE_BINANCE_SIGNALS,
+    FEATURE_AUTOTRADE,
+    LOG_AUTOTRADE_SKIPS,
+)
 from database import (
     add_backtest_signal,
+    append_trade_decision_log,
     close_backtest_signal,
     get_backtest_config,
     get_backtest_signals,
     get_backtest_stats,
     get_recent_daily_contexts,
+    get_recent_trade_decisions,
 )
 
 logger = logging.getLogger(__name__)
 
-INTERVAL_SECONDS = 300
-RECENT_CONTEXT_LIMIT = 3
-CONTEXT_MAX_AGE_HOURS = 72
-ENTRY_TOLERANCE_PCT = 0.02
-OPEN_SCORE_THRESHOLD = 18.0
-REVERSAL_SCORE_THRESHOLD = 16.0
+INTERVAL_SECONDS = AUTOTRADE_INTERVAL_SEC
+RECENT_CONTEXT_LIMIT = AUTOTRADE_RECENT_CONTEXT_LIMIT
+CONTEXT_MAX_AGE_HOURS = AUTOTRADE_CONTEXT_MAX_AGE_HOURS
+ENTRY_TOLERANCE_PCT = AUTOTRADE_ENTRY_TOLERANCE_PCT
+OPEN_SCORE_THRESHOLD = AUTOTRADE_OPEN_SCORE_THRESHOLD
+REVERSAL_SCORE_THRESHOLD = AUTOTRADE_REVERSAL_SCORE_THRESHOLD
 CRYPTO_SIGNAL_SYMBOLS = {"BTC", "ETH", "SOL", "BNB"}
 
 _signal_cache: dict = {}
@@ -210,15 +224,19 @@ async def _fetch_crypto_signal_bias(symbols: list[str], consensus_verdict: str) 
     if not crypto_symbols:
         return {}
 
+    if not DATA_SOURCE_BINANCE_SIGNALS:
+        return {}
+
     now = datetime.now()
-    if _signal_cache_time and (now - _signal_cache_time).total_seconds() < 300:
+    if _signal_cache_time and (now - _signal_cache_time).total_seconds() < AUTOTRADE_SIGNAL_BIAS_CACHE_SEC:
         return {symbol: _signal_cache.get(symbol, {}) for symbol in crypto_symbols}
 
     try:
         from signals import fetch_binance_signals, build_signal_bias_map
 
         raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
-        bias = build_signal_bias_map(raw, None)
+        sig_verdict = _consensus_to_signal_verdict(consensus_verdict) if consensus_verdict else None
+        bias = build_signal_bias_map(raw, sig_verdict)
         _signal_cache = bias
         _signal_cache_time = now
         return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
@@ -448,9 +466,24 @@ async def _notify_admins(bot, admin_ids: list[int], event: dict):
             continue
 
 
+def _scoring_legend() -> dict:
+    return {
+        "digest_context_weights_newest_first": [3, 2, 1],
+        "digest_score": "weighted_support * 4 + (aligned consensus +4 | opposite -6)",
+        "signal_crypto": "build_signal_bias_map.score * 0.35; NEUTRAL -2; direction clash -5",
+        "signal_non_crypto": "-2 (plan from digest; weak external confirmation)",
+        "proximity": "near planned entry within ENTRY_TOLERANCE_PCT else penalty",
+        "open_total_score_min": OPEN_SCORE_THRESHOLD,
+        "reversal_signal_abs_score_min": REVERSAL_SCORE_THRESHOLD,
+    }
+
+
 async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     """Run one paper-trading cycle."""
     events = []
+    if not FEATURE_AUTOTRADE:
+        return events
+
     config = await get_backtest_config()
     if not config.get("enabled", 1):
         return events
@@ -465,7 +498,8 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     symbols = {candidate["symbol"] for candidate in consensus.get("candidates", [])}
     symbols.update(position["symbol"] for position in open_positions)
     prices = await fetch_current_prices(list(symbols))
-    signal_bias = await _fetch_crypto_signal_bias(list(symbols), consensus.get("consensus_verdict", "NEUTRAL"))
+    cv = consensus.get("consensus_verdict", "NEUTRAL")
+    signal_bias = await _fetch_crypto_signal_bias(list(symbols), cv)
 
     for position in open_positions:
         closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
@@ -487,9 +521,66 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
 
     best = ranked[0]
     if not best.get("ready"):
+        if LOG_AUTOTRADE_SKIPS:
+            await append_trade_decision_log(
+                "autotrade_skip_not_ready",
+                {
+                    "reason": best.get("blocked_reason") or "below_open_threshold",
+                    "threshold": OPEN_SCORE_THRESHOLD,
+                    "best": {k: best.get(k) for k in (
+                        "symbol", "direction", "total_score", "digest_score",
+                        "proximity_score", "signal_score_component", "signal_direction",
+                        "blocked_reason", "ready",
+                    )},
+                    "runner_up": ({k: ranked[1].get(k) for k in (
+                        "symbol", "direction", "total_score", "signal_direction",
+                    )} if len(ranked) > 1 else None),
+                    "consensus_verdict": consensus.get("consensus_verdict"),
+                    "digest_contexts_used": consensus.get("contexts", []),
+                    "signal_bias_excerpt": {
+                        sym: {
+                            "direction": signal_bias.get(sym, {}).get("direction"),
+                            "score": signal_bias.get(sym, {}).get("score"),
+                            "reasons": (signal_bias.get(sym, {}).get("reasons") or [])[:4],
+                        }
+                        for sym in sorted(set(signal_bias.keys()) | {best.get("symbol")})
+                    },
+                    "scoring_legend": _scoring_legend(),
+                },
+            )
         if events:
             await _export_backtest_snapshot()
         return events
+
+    decision_audit = {
+        "action": "open_simulated",
+        "why": "Highest-ranked candidate met proximity + total_score threshold",
+        "chosen": {k: best.get(k) for k in (
+            "symbol", "direction", "entry", "target", "stop", "support",
+            "digest_score", "proximity_score", "signal_score_component", "total_score",
+            "signal_direction", "signal_reasons", "current_price", "context_dates",
+        )},
+        "runner_up": ({k: ranked[1].get(k) for k in (
+            "symbol", "direction", "total_score", "signal_direction", "digest_score",
+        )} if len(ranked) > 1 else None),
+        "digest_contexts_used": consensus.get("contexts", []),
+        "consensus_verdict": consensus.get("consensus_verdict"),
+        "verdict_score": consensus.get("verdict_score"),
+        "signal_bias": {
+            sym: {
+                "direction": signal_bias.get(sym, {}).get("direction"),
+                "score": signal_bias.get(sym, {}).get("score"),
+                "strength": signal_bias.get(sym, {}).get("strength"),
+                "reasons": (signal_bias.get(sym, {}).get("reasons") or [])[:6],
+            }
+            for sym in sorted(signal_bias.keys())
+        },
+        "scoring_legend": _scoring_legend(),
+        "feature_flags": {
+            "FEATURE_AUTOTRADE": FEATURE_AUTOTRADE,
+            "DATA_SOURCE_BINANCE_SIGNALS": DATA_SOURCE_BINANCE_SIGNALS,
+        },
+    }
 
     notes = (
         f"Digest consensus {consensus.get('consensus_verdict')} | "
@@ -504,6 +595,7 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
         "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
         "signal_direction": best.get("signal_direction", "NEUTRAL"),
         "signal_reasons": best.get("signal_reasons", []),
+        "decision_audit": decision_audit,
     }, ensure_ascii=False)
 
     result = await add_backtest_signal(
@@ -517,7 +609,26 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     )
 
     if result.get("status") != "opened":
+        await append_trade_decision_log(
+            "autotrade_open_failed",
+            {"decision_audit": decision_audit, "result": result},
+            signal_id=None,
+        )
         return events
+
+    sid = result.get("signal_id")
+    await append_trade_decision_log(
+        "autotrade_opened",
+        decision_audit,
+        signal_id=sid,
+    )
+    logger.info(
+        "autotrade_opened %s %s score=%s audit=%s",
+        best["symbol"],
+        best["direction"],
+        best.get("total_score"),
+        json.dumps(decision_audit, ensure_ascii=False)[:2000],
+    )
 
     opened_event = {
         "event": "opened",
@@ -583,6 +694,12 @@ async def get_signal_trader_status() -> dict:
             "support": int(meta.get("support") or 0),
         })
 
+    digest_pv = (latest_context or {}).get("prompt_versions") or {}
+    snap_time = (latest_context or {}).get("model_inputs_snapshot") or {}
+    snap_ts = snap_time.get("generated_at_utc") if isinstance(snap_time, dict) else None
+
+    recent_decisions = await get_recent_trade_decisions(4)
+
     return {
         "enabled": config.get("enabled", 1),
         "capital": float(config.get("capital", 100.0) or 100.0),
@@ -595,4 +712,9 @@ async def get_signal_trader_status() -> dict:
         "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
         "recent_contexts": consensus.get("contexts", []),
         "top_candidates": candidate_rows,
+        "latest_digest_prompt_versions": digest_pv,
+        "latest_digest_snapshot_utc": snap_ts,
+        "recent_decisions": recent_decisions,
+        "autotrade_feature_on": FEATURE_AUTOTRADE,
+        "binance_signals_enabled": DATA_SOURCE_BINANCE_SIGNALS,
     }

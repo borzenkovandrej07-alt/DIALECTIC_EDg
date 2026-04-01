@@ -18,6 +18,8 @@ from news_fetcher import NewsFetcher
 from report_sanitizer import sanitize_full_report
 from sentiment import analyze_and_filter_async, format_for_agents
 from storage import Storage
+from config import DIGEST_SNAPSHOT_MAX_CHARS
+from prompt_versions import get_digest_prompt_manifest
 from tracker import save_predictions_from_report
 from user_profile import build_profile_instruction, get_profile
 from web_search import get_full_realtime_context, search_news_context
@@ -26,6 +28,58 @@ logger = logging.getLogger(__name__)
 
 _fetcher = NewsFetcher()
 _storage = Storage()
+
+
+def build_digest_persist_metadata(
+    *,
+    custom_mode: bool,
+    news_context: str,
+    live_prices: str,
+    profile: dict,
+    sentiment_result,
+    prices_dict: dict,
+) -> tuple[dict, dict]:
+    """
+    Версии промптов/пайплайна + усечённый снимок входов модели на момент дайджеста.
+    """
+    from datetime import datetime, timezone
+
+    def _clip(s: str, n: int) -> str:
+        s = s or ""
+        return s if len(s) <= n else s[: n - 3] + "..."
+
+    lean_prices: dict = {}
+    for k, v in (prices_dict or {}).items():
+        if k == "SENTIMENT":
+            lean_prices[k] = v
+        elif isinstance(v, (int, float)):
+            lean_prices[k] = float(v)
+        elif isinstance(v, dict) and "price" in v:
+            try:
+                lean_prices[k] = float(v.get("price"))
+            except (TypeError, ValueError):
+                lean_prices[k] = str(v)[:120]
+
+    prompt_versions = get_digest_prompt_manifest()
+    snapshot = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "custom_mode": custom_mode,
+        "profile_excerpt": {
+            "risk": profile.get("risk"),
+            "horizon": profile.get("horizon"),
+            "markets": profile.get("markets"),
+        },
+        "sentiment": {
+            "label": getattr(sentiment_result, "label", None),
+            "score": getattr(sentiment_result, "score", None),
+            "confidence": getattr(sentiment_result, "confidence", None),
+        },
+        "news_context_excerpt": _clip(news_context, min(DIGEST_SNAPSHOT_MAX_CHARS // 2, 8000)),
+        "live_prices_excerpt": _clip(str(live_prices), 4000),
+        "prices_dict_lean": lean_prices,
+        "notes": "Полный news_context усечён; отчёт агентов хранится отдельно в predictions/дебатах.",
+    }
+    return prompt_versions, snapshot
 
 
 async def run_full_analysis(
@@ -137,7 +191,20 @@ async def run_full_analysis(
     report = report.replace(separator, separator + signal_line, 1)
 
     source = custom_news[:300] if custom_mode else str(news)[:300]
-    await save_predictions_from_report(report, source_news=source)
+    pv, snap = build_digest_persist_metadata(
+        custom_mode=custom_mode,
+        news_context=news_context,
+        live_prices=str(live_prices),
+        profile=profile if isinstance(profile, dict) else {},
+        sentiment_result=sentiment_result,
+        prices_dict=prices_dict,
+    )
+    await save_predictions_from_report(
+        report,
+        source_news=source,
+        prompt_versions=pv,
+        model_inputs_snapshot=snap,
+    )
     await log_report(
         user_id,
         "analyze" if custom_mode else "daily",

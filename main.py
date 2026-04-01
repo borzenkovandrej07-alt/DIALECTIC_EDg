@@ -39,7 +39,11 @@ from web_search import get_full_realtime_context
 from report_sanitizer import sanitize_full_report
 from chart_generator import generate_main_chart, generate_russia_chart
 from storage import Storage
-from analysis_service import run_full_analysis as analysis_service_run_full_analysis, _fetcher as news_fetcher
+from analysis_service import (
+    run_full_analysis as analysis_service_run_full_analysis,
+    _fetcher as news_fetcher,
+    build_digest_persist_metadata,
+)
 from data_sources import fetch_full_context
 from meta_analyst import get_meta_context
 from github_export import get_previous_digest, push_digest_cache
@@ -638,8 +642,19 @@ def format_signal_trader_status_message(status: dict) -> str:
     msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
     msg += "═" * 25 + "\n"
     msg += f"Статус: {'✅ Работает' if status['enabled'] else '❌ Остановлен'}\n"
+    msg += f"Автоторг (фича): {'✅' if status.get('autotrade_feature_on') else '⏸ env FEATURE_AUTOTRADE=0'}\n"
+    msg += f"Bias Binance/Bybit: {'✅' if status.get('binance_signals_enabled') else '⏸ DATA_SOURCE…=0'}\n"
     msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
     msg += f"🎯 Консенсус 2-3 дайджестов: *{status.get('consensus_verdict', 'NEUTRAL')}*\n"
+
+    pv = status.get("latest_digest_prompt_versions") or {}
+    if pv:
+        ver = pv.get("digest_pipeline_version", "—")
+        msg += f"\n📌 *Версия пайплайна дайджеста:* `{ver}`\n"
+        if status.get("latest_digest_snapshot_utc"):
+            msg += f"_Снимок входов модели (UTC):_ `{status['latest_digest_snapshot_utc'][:19]}`\n"
+    else:
+        msg += "\n📌 Версии промптов появятся после следующего полного `/daily`\n"
 
     recent_contexts = status.get("recent_contexts", []) or []
     if recent_contexts:
@@ -678,6 +693,28 @@ def format_signal_trader_status_message(status: dict) -> str:
             )
     else:
         msg += "\n📊 Подходящих кандидатов пока нет\n"
+
+    decisions = status.get("recent_decisions") or []
+    if decisions:
+        msg += "\n🧾 *Последние решения автотрейда:*\n"
+        for row in decisions[:3]:
+            created = (row.get("created_at", "") or "")[:16].replace("T", " ")
+            ctype = row.get("cycle_type", "")
+            payload = row.get("payload") or {}
+            if ctype == "autotrade_opened":
+                ch = payload.get("chosen") or {}
+                msg += (
+                    f"• {created} открыто: *{ch.get('symbol')}* {ch.get('direction')} "
+                    f"score `{ch.get('total_score')}` sig `{ch.get('signal_direction')}`\n"
+                )
+            elif ctype == "autotrade_skip_not_ready":
+                b = payload.get("best") or {}
+                msg += (
+                    f"• {created} пропуск: `{b.get('symbol', '—')}` score `{b.get('total_score')}` "
+                    f"({payload.get('reason', 'not_ready')})\n"
+                )
+            else:
+                msg += f"• {created} `{ctype}`\n"
 
     msg += "\n" + "═" * 25 + "\n"
     msg += f"💰 Всего закрытых сделок: {status['total_trades']}\n"
@@ -922,7 +959,22 @@ async def legacy_run_full_analysis(
 
     # ── Сохраняем прогнозы ────────────────────────────────────────────────────
     source = custom_news[:300] if custom_mode else str(news)[:300]
-    await save_predictions_from_report(report, source_news=source, bot=get_bot(), admin_ids=ADMIN_IDS)
+    _pv, _snap = build_digest_persist_metadata(
+        custom_mode=custom_mode,
+        news_context=news_context,
+        live_prices=str(live_prices),
+        profile=profile if isinstance(profile, dict) else {},
+        sentiment_result=sentiment_result,
+        prices_dict=prices_dict,
+    )
+    await save_predictions_from_report(
+        report,
+        source_news=source,
+        bot=get_bot(),
+        admin_ids=ADMIN_IDS,
+        prompt_versions=_pv,
+        model_inputs_snapshot=_snap,
+    )
     await log_report(
         user_id,
         "analyze" if custom_mode else "daily",
