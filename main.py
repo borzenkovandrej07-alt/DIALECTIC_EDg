@@ -2635,7 +2635,8 @@ if __name__ == "__main__":
 
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
 
-from signal_trader import get_signal_trader_status, get_daily_context
+from signal_trader import get_signal_trader_status
+from database import get_daily_context
 
 
 @dp.message(Command("signal_status"))
