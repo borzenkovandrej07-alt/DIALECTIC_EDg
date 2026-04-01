@@ -2220,14 +2220,11 @@ def select_crypto_keyboard() -> InlineKeyboardMarkup:
 
 async def show_portfolio(message_or_callback):
     """Show portfolio - works with both Message and CallbackQuery."""
-    if hasattr(message_or_callback, 'from_user'):
-        user_id = message_or_callback.from_user.id
-        chat_id = message_or_callback.from_user.id
-        send_func = message_or_callback.answer
-    else:
-        return
+    user_id = message_or_callback.from_user.id
     
     positions = await get_portfolio(user_id)
+    print(f"DEBUG: user_id={user_id}, positions={positions}")  # DEBUG
+    
     prices, _ = await get_full_realtime_context()
     
     symbol_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "GOLD": "GOLD"}
@@ -2268,7 +2265,7 @@ async def show_portfolio(message_or_callback):
         emoji = "🟢" if total_pnl >= 0 else "🔴"
         lines.extend(["", f"📈 Итого: ${total_value:,.0f} | {emoji} {total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)"])
     
-    await send_func("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
+    await message_or_callback.message.answer("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
 
 
 @dp.message(Command("portfolio"))
