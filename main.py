@@ -2635,13 +2635,14 @@ if __name__ == "__main__":
 
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
 
-from signal_trader import get_signal_trader_status
-
 
 @dp.message(Command("signal_status"))
 async def cmd_signal_status(message: Message):
     """Check signal trader status with entry prices."""
     try:
+        from signal_trader import get_signal_trader_status
+        from database import get_daily_context
+        
         status = await get_signal_trader_status()
         daily_ctx = await get_daily_context()
         
@@ -2651,8 +2652,8 @@ async def cmd_signal_status(message: Message):
         msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
         
         if daily_ctx:
-            verdict = daily_ctx.get("verdict", "NEUTRAL")
-            entries = daily_ctx.get("entries", {})
+            verdict = daily_ctx.get("verdict", "NEUTRAL") or "NEUTRAL"
+            entries = daily_ctx.get("entries", {}) or {}
             
             msg += f"\n🎯 *Вердикт:* {verdict}\n"
             
@@ -2683,4 +2684,6 @@ async def cmd_signal_status(message: Message):
         await message.answer(msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"signal_status error: {e}")
+        import traceback
+        await message.answer(f"Ошибка: {e}\n\n{traceback.format_exc()}")
         await message.answer(f"Ошибка: {e}")
