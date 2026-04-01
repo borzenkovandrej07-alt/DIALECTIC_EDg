@@ -402,7 +402,7 @@ async def get_full_realtime_context() -> tuple[dict, str]:
         logger.warning(f"COT data error: {e}")
     
     try:
-        from etf_flows import format_etf_flows_for_agents, get_market_breadth
+        from etf_flows import format_etf_flows_for_agents, get_market_breadth, get_etf_flows
         etf_data = await get_etf_flows()
         etf_formatted = format_etf_flows_for_agents(etf_data)
         formatted += "\n\n" + etf_formatted
