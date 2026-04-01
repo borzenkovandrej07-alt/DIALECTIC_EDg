@@ -173,14 +173,26 @@ async def _coingecko_crypto(session) -> dict:
 async def _yahoo(session, ticker: str, key: str) -> dict | None:
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        async with session.get(url, params={"interval": "1d", "range": "2d"},
+        async with session.get(url, params={"interval": "1d", "range": "5d"},
                                timeout=TIMEOUT) as r:
             if r.status == 200:
                 data   = await r.json()
-                meta   = data["chart"]["result"][0]["meta"]
+                result = data["chart"]["result"][0]
+                meta   = result["meta"]
                 price  = float(meta.get("regularMarketPrice", 0))
-                prev   = float(meta.get("previousClose", price) or price)
-                change = ((price - prev) / prev * 100) if prev else 0.0
+                
+                change = 0.0
+                if result.get("indicators", {}).get("quote"):
+                    quotes = result["indicators"]["quote"][0]
+                    closes = quotes.get("close", [])
+                    if len(closes) >= 2 and closes[-1] is not None and closes[-2] is not None:
+                        prev_price = closes[-2]
+                        change = ((price - prev_price) / prev_price * 100) if prev_price else 0.0
+                    elif len(closes) >= 1 and closes[-1] is not None:
+                        prev = float(meta.get("previousClose", price) or price)
+                        if prev != price:
+                            change = ((price - prev) / prev * 100) if prev else 0.0
+                
                 if _sane(key, price):
                     return {"price": round(price, 2),
                             "change_24h": round(change, 3),
