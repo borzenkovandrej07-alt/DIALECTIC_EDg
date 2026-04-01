@@ -23,7 +23,7 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-INTERVAL_SECONDS = 60  # Проверка каждую минуту
+INTERVAL_SECONDS = 300  # Проверка каждые 5 минут
 
 TRADE_SYMBOLS = ["BTC", "ETH", "SOL"]
 TRADE_THRESHOLD = 0.02  # 2% движение для автотрейдера
