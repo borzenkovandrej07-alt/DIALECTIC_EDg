@@ -568,6 +568,13 @@ async def handle_debate_page(callback: CallbackQuery):
     await handle_debate_navigation_callback(callback, callback.from_user.id, round_idx)
 
 
+# ─── TEST COMMAND ─────────────────────────────────────────────────────────────
+@dp.message(F.text.startswith("/tt"))
+async def cmd_test_bot(message: Message):
+    """Test command."""
+    await message.answer("TT WORKS!")
+
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
@@ -2636,15 +2643,6 @@ if __name__ == "__main__":
 
 
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
-
-
-from aiogram.filters import Command
-
-
-@dp.message(F.text.startswith("/tt"))
-async def cmd_test_bot(message: Message):
-    """Test command."""
-    await message.answer("TT WORKS!")
 
 
 @dp.message(Command("signalstatus"))
