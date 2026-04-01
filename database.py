@@ -96,6 +96,18 @@ async def init_db():
                 updated_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                symbol      TEXT NOT NULL,
+                amount      REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                added_at    TEXT DEFAULT (datetime('now')),
+                UNIQUE(user_id, symbol)
+            )
+        """)
 
         await db.commit()
 
@@ -481,3 +493,39 @@ async def get_admin_stats() -> dict:
             "subscribers":   subscribers,
             "total_reports": total_reports,
         }
+
+
+async def add_portfolio_position(user_id: int, symbol: str, amount: float, entry_price: float) -> bool:
+    """Add or update portfolio position."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO portfolio (user_id, symbol, amount, entry_price)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, symbol) DO UPDATE SET
+                amount = excluded.amount,
+                entry_price = excluded.entry_price
+        """, (user_id, symbol.upper(), amount, entry_price))
+        await db.commit()
+    return True
+
+
+async def get_portfolio(user_id: int) -> list[dict]:
+    """Get user portfolio."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT symbol, amount, entry_price, added_at
+            FROM portfolio WHERE user_id = ?
+            ORDER BY added_at DESC
+        """, (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def remove_portfolio_position(user_id: int, symbol: str) -> bool:
+    """Remove position from portfolio."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM portfolio WHERE user_id = ? AND symbol = ?",
+                        (user_id, symbol.upper()))
+        await db.commit()
+    return True

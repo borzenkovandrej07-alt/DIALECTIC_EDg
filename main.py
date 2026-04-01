@@ -57,6 +57,7 @@ from database import (
     get_track_record, save_feedback, get_feedback_stats,
     import_forecasts_from_markdown,
     get_signals_subscribers, set_signals_sub, get_user_signals_status,
+    add_portfolio_position, get_portfolio, remove_portfolio_position,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
@@ -2131,6 +2132,130 @@ async def main():
         dp.start_polling(bot),
         scheduler.start()
     )
+
+
+# ─── Портфельный трекер ─────────────────────────────────────────────────────────
+
+@dp.message(Command("portfolio"))
+async def cmd_portfolio(message: Message):
+    """Show user portfolio."""
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    
+    await message.answer("⏳ Загружаю портфель...")
+    
+    positions = await get_portfolio(user_id)
+    
+    if not positions:
+        await message.answer(
+            "📊 Твой портфель пуст.\n\n"
+            "Добавить позицию: /add BTC 0.5 65000\n"
+            "Формат: /add СИМВОЛ КОЛИЧЕСТВО ЦЕНА_ВХОДА"
+        )
+        return
+    
+    prices, _ = await get_full_realtime_context()
+    
+    symbol_map = {
+        "BTC": "BTC", "ETH": "ETH", "SOL": "SOL",
+        "GOLD": "GOLD", "OIL": "OIL_WTI",
+    }
+    
+    lines = ["📊 ТВОЙ ПОРТФЕЛЬ", ""]
+    total_pnl = 0
+    total_value = 0
+    
+    for pos in positions:
+        symbol = pos["symbol"]
+        amount = pos["amount"]
+        entry = pos["entry_price"]
+        
+        price_key = symbol_map.get(symbol, symbol)
+        current_price = prices.get(price_key, {}).get("price", 0)
+        
+        if current_price:
+            value = amount * current_price
+            cost = amount * entry
+            pnl = value - cost
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0
+            
+            total_pnl += pnl
+            total_value += value
+            
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            lines.append(
+                f"{symbol}: {amount} x ${current_price:,.0f} = ${value:,.0f}\n"
+                f"  Вход: ${entry:,.0f} | PnL: {emoji}${pnl:+,.0f} ({pnl_pct:+.1f}%)"
+            )
+        else:
+            cost = amount * entry
+            total_value += cost
+            lines.append(f"{symbol}: {amount} x $??? (цена недоступна)\n  Вход: ${entry:,.0f}")
+    
+    total_cost = total_value - total_pnl
+    total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+    emoji = "🟢" if total_pnl >= 0 else "🔴"
+    
+    lines.extend(["", f"📈 Итого: ${total_value:,.0f} | {emoji} {total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)"])
+    lines.append("")
+    lines.append("Удалить: /remove BTC")
+    
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("add"))
+async def cmd_add_portfolio(message: Message):
+    """Add position to portfolio."""
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    
+    parts = message.text.split()
+    
+    if len(parts) != 4:
+        await message.answer(
+            "❌ Неверный формат.\n\n"
+            "Пример: /add BTC 0.5 65000\n"
+            "Формат: /add СИМВОЛ КОЛИЧЕСТВО ЦЕНА_ВХОДА"
+        )
+        return
+    
+    try:
+        symbol = parts[1].upper()
+        amount = float(parts[2])
+        entry_price = float(parts[3])
+    except ValueError:
+        await message.answer("❌ Введите числа правильно.")
+        return
+    
+    allowed = ["BTC", "ETH", "SOL", "GOLD"]
+    if symbol not in allowed:
+        await message.answer(f"❌ Пока только: {', '.join(allowed)}")
+        return
+    
+    await add_portfolio_position(user_id, symbol, amount, entry_price)
+    
+    await message.answer(
+        f"✅ Добавлено:\n{symbol} | {amount} шт. | Вход: ${entry_price:,.0f}"
+    )
+
+
+@dp.message(Command("remove"))
+async def cmd_remove_portfolio(message: Message):
+    """Remove position from portfolio."""
+    user_id = message.from_user.id
+    await upsert_user(user_id)
+    
+    parts = message.text.split()
+    
+    if len(parts) != 2:
+        await message.answer("Пример: /remove BTC")
+        return
+    
+    symbol = parts[1].upper()
+    
+    await remove_portfolio_position(user_id, symbol)
+    
+    await message.answer(f"✅ Удалено: {symbol}")
 
 
 if __name__ == "__main__":
