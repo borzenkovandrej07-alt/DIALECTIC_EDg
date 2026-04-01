@@ -2638,10 +2638,10 @@ if __name__ == "__main__":
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
 
 
-from aiogram.filters import Command, Text
+from aiogram.filters import Command
 
 
-@dp.message(Text(startswith="/tt"))
+@dp.message(F.text.startswith("/tt"))
 async def cmd_test_bot(message: Message):
     """Test command."""
     await message.answer("TT WORKS!")
