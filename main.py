@@ -2168,6 +2168,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="markets", description="Текущие цены"),
         BotCommand(command="status", description="Краткий статус"),
         BotCommand(command="signals", description="📡 Сигналы копитрейдинг"),
+        BotCommand(command="signal_status", description="📊 Статус трейдера"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
         BotCommand(command="profile", description="Настройки профиля"),
         BotCommand(command="subscribe", description="Авторассылка"),
