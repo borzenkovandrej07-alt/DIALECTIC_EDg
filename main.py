@@ -1355,12 +1355,14 @@ async def cmd_signals(message: Message):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
                 [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+                [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
             ])
             status_text = "\n\n✅ *Сигналы включены* — буду присылать когда появится сигнал"
         else:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
                 [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
+                [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
             ])
             status_text = "\n\n━━━━━━━━━━━━━━━━━━━━━\nНажми 'Включить сигналы' — бот будет сам присылать когда:\n• 80%+ трейдеров в одну сторону\n• или 60%+ совпадение с вердиктом"
         
@@ -1432,9 +1434,43 @@ async def cb_signals(callback: CallbackQuery):
             [InlineKeyboardButton(text="🔕 Выключить сигналы" if is_enabled else "🔔 Включить сигналы", 
                                  callback_data="signals:disable" if is_enabled else "signals:enable")],
             [InlineKeyboardButton(text="📡 Обновить", callback_data="signals:check")],
+            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
         ])
         
         status_text = "\n\n✅ *Сигналы включены*" if is_enabled else ""
+        
+        await callback.message.edit_text(
+            msg + status_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    elif action == "backtest":
+        signals_data = await get_backtest_signals()
+        stats = await get_backtest_stats()
+        
+        total = stats.get("total", 0) or 0
+        wins = stats.get("wins", 0) or 0
+        losses = stats.get("losses", 0) or 0
+        total_pnl = stats.get("total_pnl", 0) or 0
+        avg_pnl = stats.get("avg_pnl_pct", 0) or 0
+        win_rate = (wins / total * 100) if total > 0 else 0
+        
+        msg = f"📊 *БЭКТЕСТ РЕЗУЛЬТАТЫ*\n\n"
+        msg += f"Всего сделок: {total}\n"
+        msg += f"Win Rate: {win_rate:.1f}%\n"
+        msg += f"Total PnL: ${total_pnl:+,.2f}\n"
+        msg += f"Avg PnL: {avg_pnl:+.2f}%\n\n"
+        msg += "Последние сделки:\n"
+        
+        for s in signals_data[:5]:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            pnl = s.get("pnl", 0) or 0
+            emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+            msg += f"{symbol} {direction} {emoji} ${pnl:+,.0f}\n"
+        
+        await callback.message.edit_text(msg, parse_mode="Markdown")
         await callback.message.edit_text(
             msg + status_text,
             parse_mode="Markdown",
