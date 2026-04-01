@@ -1874,7 +1874,7 @@ async def cb_subscribe(callback: CallbackQuery):
     )
 
 
-@dp.message()
+@dp.message(F.text & ~F.text.startswith("/"))
 async def handle_custom_time(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
