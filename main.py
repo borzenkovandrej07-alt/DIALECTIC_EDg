@@ -2218,10 +2218,14 @@ def select_crypto_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-@dp.message(Command("portfolio"))
-async def cmd_portfolio(message: Message):
-    user_id = message.from_user.id
-    await upsert_user(user_id)
+async def show_portfolio(message_or_callback):
+    """Show portfolio - works with both Message and CallbackQuery."""
+    if hasattr(message_or_callback, 'from_user'):
+        user_id = message_or_callback.from_user.id
+        chat_id = message_or_callback.from_user.id
+        send_func = message_or_callback.answer
+    else:
+        return
     
     positions = await get_portfolio(user_id)
     prices, _ = await get_full_realtime_context()
@@ -2264,7 +2268,13 @@ async def cmd_portfolio(message: Message):
         emoji = "🟢" if total_pnl >= 0 else "🔴"
         lines.extend(["", f"📈 Итого: ${total_value:,.0f} | {emoji} {total_pnl:+,.0f} ({total_pnl_pct:+.1f}%)"])
     
-    await message.answer("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
+    await send_func("\n".join(lines), reply_markup=portfolio_keyboard(bool(positions)))
+
+
+@dp.message(Command("portfolio"))
+async def cmd_portfolio(message: Message):
+    await upsert_user(message.from_user.id)
+    await show_portfolio(message)
 
 
 @dp.callback_query(F.data.startswith("portfolio:"))
@@ -2285,11 +2295,11 @@ async def handle_portfolio_callback(callback: CallbackQuery):
     
     elif action == "menu":
         await callback.message.delete()
-        await cmd_portfolio(callback.message)
+        await show_portfolio(callback.message)
     
     elif action == "refresh":
-        await callback.message.delete()
-        await cmd_portfolio(callback.message)
+        await callback.message.edit_text("⏳ Обновляю...")
+        await show_portfolio(callback.message)
     
     elif action.startswith("cmd:"):
         cmd = action.replace("cmd:", "")
