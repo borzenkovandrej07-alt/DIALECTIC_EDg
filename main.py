@@ -2168,7 +2168,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="markets", description="Текущие цены"),
         BotCommand(command="status", description="Краткий статус"),
         BotCommand(command="signals", description="📡 Сигналы копитрейдинг"),
-        BotCommand(command="signal_status", description="📊 Статус трейдера"),
+        BotCommand(command="signalstatus", description="📊 Статус трейдера"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
         BotCommand(command="profile", description="Настройки профиля"),
         BotCommand(command="subscribe", description="Авторассылка"),
@@ -2637,7 +2637,7 @@ if __name__ == "__main__":
 # ─── Signal Trader Status ─────────────────────────────────────────────────────────
 
 
-@dp.message(Command("signal_status"))
+@dp.message(Command("signalstatus"))
 async def cmd_signal_status(message: Message):
     """Check signal trader status with entry prices."""
     try:
