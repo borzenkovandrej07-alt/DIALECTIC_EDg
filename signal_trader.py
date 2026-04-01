@@ -105,7 +105,10 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
 async def check_and_trade(bot, admin_ids: list) -> list[dict]:
     """
     Проверить цены и исполнить сделки.
-    Приоритет: 1) /daily контекст 2) автотрейдер 3) Binance сигналы (подтверждение)
+    Логика:
+    - Если вердикт BUY + сигналы LONG → ПОКУПАЕМ СЕЙЧАС
+    - Если вердикт SELL + сигналы SHORT → ПРОДАЕМ СЕЙЧАС
+    - Закрываем: когда цена упала на 3%+ или противоположный сигнал
     """
     global last_prices
     executed = []
@@ -121,7 +124,6 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
     # Получаем контекст /daily и Binance сигналы
     daily_context = await get_daily_context()
     binance_signals = await get_binance_signals()
-    is_daily_fresh = is_daily_context_fresh(daily_context)
     entries = get_daily_entries(daily_context) if daily_context else {}
     verdict = daily_context.get("verdict", "").upper() if daily_context else ""
     
@@ -133,37 +135,23 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
         if not current_price:
             continue
         
-        last_price = last_prices.get(symbol)
+        # Проверяем Binance сигналы для этого символа
+        binance_dir = binance_signals.get(symbol, {}).get("direction", "")
         
-        # === ПРИОРИТЕТ 1: /daily контекст (любой свежести — главное есть точки входа) ===
-        if verdict and entries and symbol in entries and is_daily_fresh:
+        # === ГЛАВНАЯ ЛОГИКА: Покупаем/продаём СЕЙЧАС если есть совпадение ===
+        if symbol not in open_positions and verdict and entries:
             entry_price = entries.get(symbol)
             if not entry_price:
                 continue
             
-            # Уже есть позиция по этому символу?
-            if symbol in open_positions:
-                continue
-            
-            # Проверяем сигнал от /daily — покупаем/продаём когда цена дошла до точки входа
-            trade_triggered = False
-            trigger_reason = ""
-            
-            if verdict == "BUY" and current_price <= entry_price:
-                trade_triggered = True
-                trigger_reason = f"Вердикт BUY, цена {current_price} дошла до входа {entry_price}"
-            
-            elif verdict == "SELL" and current_price >= entry_price:
-                trade_triggered = True
-                trigger_reason = f"Вердикт SELL, цена {current_price} дошла до входа {entry_price}"
-            
-            if trade_triggered:
-                direction = "BUY" if verdict == "BUY" else "SELL"
+            # BUY если: вердикт BUY + (сигнал LONG или цена ниже точки входа)
+            if verdict == "BUY" and (binance_dir == "LONG" or current_price <= entry_price):
+                direction = "BUY"
                 result = await add_backtest_signal(
                     symbol=symbol,
                     direction=direction,
                     entry_price=current_price,
-                    source="daily_context"
+                    source="daily_signal"
                 )
                 
                 if result.get("status") == "opened":
@@ -171,22 +159,18 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                         "symbol": symbol,
                         "direction": direction,
                         "entry_price": current_price,
-                        "source": "daily_context",
-                        "reason": trigger_reason,
+                        "source": "daily_signal",
                         "capital": result.get("capital_after", 0)
                     })
                     
-                    # Проверяем Binance сигналы для подтверждения
-                    binance_confirm = binance_signals.get(symbol, {}).get("direction", "")
-                    binance_note = f" | Binance: {binance_confirm}" if binance_confirm else ""
-                    
+                    binance_note = f" | Binance: {binance_dir}" if binance_dir else ""
                     emoji = "🟢"
-                    msg = f"🎯 *ПРИОРИТЕТ: /daily*\n"
+                    msg = f"🎯 *СИГНАЛ BUY!*\n"
                     msg += "═" * 25 + "\n"
-                    msg += f"{emoji} *{symbol}* {'📈 ЛОНГ' if direction == 'BUY' else '📉 ШОРТ'}\n"
-                    msg += f"Вход: ${current_price:,.2f}\n"
-                    msg += f"Вердикт: {verdict}\n"
-                    msg += f"Причина: {trigger_reason}{binance_note}\n"
+                    msg += f"{emoji} *{symbol}* 📈 ЛОНГ\n"
+                    msg += f"Купили по: ${current_price:,.2f}\n"
+                    msg += f"Точка входа: ${entry_price:,.0f}\n"
+                    msg += f"Источник: {verdict}{binance_note}\n"
                     msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
                     msg += "═" * 25
                     
@@ -196,86 +180,46 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                         except:
                             pass
                     
-                    logger.info(f"Trade from daily: {symbol} {direction} at {current_price}")
+                    logger.info(f"Trade: {symbol} BUY at {current_price}")
                     continue
-        
-        # === ПРИОРИТЕТ 2: Если есть точки входа из /daily (любого возраста) — автотрейдер от них ===
-        if entries and symbol in entries and symbol not in open_positions:
-            base_price = entries.get(symbol)
-            if base_price:
-                change_pct = (current_price - base_price) / base_price
+            
+            # SELL если: вердикт SELL + (сигнал SHORT или цена выше точки входа)
+            elif verdict == "SELL" and (binance_dir == "SHORT" or current_price >= entry_price):
+                direction = "SELL"
+                result = await add_backtest_signal(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=current_price,
+                    source="daily_signal"
+                )
                 
-                # BUY если цена УПАЛА от точки входа (цена ниже — значит有机会买入)
-                if change_pct < 0:  # Любое снижение от точки входа
-                    direction = "BUY"
-                    result = await add_backtest_signal(
-                        symbol=symbol,
-                        direction=direction,
-                        entry_price=current_price,
-                        source="auto_trader"
-                    )
+                if result.get("status") == "opened":
+                    executed.append({
+                        "symbol": symbol,
+                        "direction": direction,
+                        "entry_price": current_price,
+                        "source": "daily_signal",
+                        "capital": result.get("capital_after", 0)
+                    })
                     
-                    if result.get("status") == "opened":
-                        executed.append({
-                            "symbol": symbol,
-                            "direction": direction,
-                            "entry_price": current_price,
-                            "source": "auto_trader",
-                            "capital": result.get("capital_after", 0)
-                        })
-                        
-                        emoji = "🟢"
-                        msg = f"🎯 *АВТОТРЕЙДЕР*\n"
-                        msg += "═" * 25 + "\n"
-                        msg += f"{emoji} *{symbol}* 📈 ЛОНГ\n"
-                        msg += f"Вход: ${current_price:,.2f}\n"
-                        msg += f"От точки входа: {change_pct*100:+.1f}%\n"
-                        msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
-                        msg += "═" * 25
-                        
-                        for admin_id in admin_ids:
-                            try:
-                                await bot.send_message(admin_id, msg, parse_mode="Markdown")
-                            except:
-                                pass
-                        
-                        logger.info(f"Auto trade: {symbol} BUY at {current_price}")
-                
-                # SELL если цена ВЫРОСЛА от точки входа (цена выше — значит можно продать)
-                elif change_pct > 0:  # Любой рост от точки входа
-                    direction = "SELL"
-                    result = await add_backtest_signal(
-                        symbol=symbol,
-                        direction=direction,
-                        entry_price=current_price,
-                        source="auto_trader"
-                    )
+                    binance_note = f" | Binance: {binance_dir}" if binance_dir else ""
+                    emoji = "🔴"
+                    msg = f"🎯 *СИГНАЛ SELL!*\n"
+                    msg += "═" * 25 + "\n"
+                    msg += f"{emoji} *{symbol}* 📉 ШОРТ\n"
+                    msg += f"Продали по: ${current_price:,.2f}\n"
+                    msg += f"Точка входа: ${entry_price:,.0f}\n"
+                    msg += f"Источник: {verdict}{binance_note}\n"
+                    msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
+                    msg += "═" * 25
                     
-                    if result.get("status") == "opened":
-                        executed.append({
-                            "symbol": symbol,
-                            "direction": direction,
-                            "entry_price": current_price,
-                            "source": "auto_trader",
-                            "capital": result.get("capital_after", 0)
-                        })
-                        
-                        emoji = "🔴"
-                        msg = f"🎯 *АВТОТРЕЙДЕР*\n"
-                        msg += "═" * 25 + "\n"
-                        msg += f"{emoji} *{symbol}* 📉 ШОРТ\n"
-                        msg += f"Вход: ${current_price:,.2f}\n"
-                        msg += f"От точки входа: {change_pct*100:+.1f}%\n"
-                        msg += f"💵 Баланс: ${result.get('capital_after', 0):,.2f}\n"
-                        msg += "═" * 25
-                        
-                        for admin_id in admin_ids:
-                            try:
-                                await bot.send_message(admin_id, msg, parse_mode="Markdown")
-                            except:
-                                pass
-                        
-                        logger.info(f"Auto trade: {symbol} SELL at {current_price}")
+                    for admin_id in admin_ids:
+                        try:
+                            await bot.send_message(admin_id, msg, parse_mode="Markdown")
+                        except:
+                            pass
+                    
+                    logger.info(f"Trade: {symbol} SELL at {current_price}")
         
         # === Проверка открытых позиций: тейк-профит / стоп-лосс ===
         if symbol in open_positions:
@@ -288,13 +232,13 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
             
             change_pct = (current_price - entry) / entry if direction == "BUY" else (entry - current_price) / entry
             
-            # Check take profit
+            # Check take profit (+3%)
             if change_pct >= TAKE_PROFIT:
                 from database import close_backtest_signal
                 result = await close_backtest_signal(pos["id"], current_price)
                 if result:
                     emoji = "🟢"
-                    msg = f"🎯 *АВТОТРЕЙДЕР - ТЕЙК-ПРОФИТ*\n"
+                    msg = f"🎯 *ТЕЙК-ПРОФИТ!*\n"
                     msg += "═" * 25 + "\n"
                     msg += f"{emoji} {symbol} {direction} ЗАКРЫТ\n"
                     msg += f"Вход: ${entry:,.2f}\n"
@@ -309,15 +253,15 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                         except:
                             pass
                     
-                    logger.info(f"Auto close: {symbol} TP at {current_price}")
+                    logger.info(f"Closed: {symbol} TP at {current_price}")
             
-            # Check stop loss
+            # Check stop loss (-3%)
             elif change_pct <= -STOP_LOSS:
                 from database import close_backtest_signal
                 result = await close_backtest_signal(pos["id"], current_price)
                 if result:
                     emoji = "🔴"
-                    msg = f"🎯 *АВТОТРЕЙДЕР - СТОП-ЛОСС*\n"
+                    msg = f"🎯 *СТОП-ЛОСС!*\n"
                     msg += "═" * 25 + "\n"
                     msg += f"{emoji} {symbol} {direction} ЗАКРЫТ\n"
                     msg += f"Вход: ${entry:,.2f}\n"
@@ -332,10 +276,12 @@ async def check_and_trade(bot, admin_ids: list) -> list[dict]:
                         except:
                             pass
                     
-                    logger.info(f"Auto close: {symbol} SL at {current_price}")
+                    logger.info(f"Closed: {symbol} SL at {current_price}")
     
     # Update last prices for next iteration
     last_prices = prices
+    
+    return executed
     
     return executed
 
