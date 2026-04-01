@@ -108,6 +108,22 @@ async def init_db():
                 UNIQUE(user_id, symbol)
             )
         """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_signals (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at  TEXT DEFAULT (datetime('now')),
+                symbol      TEXT NOT NULL,
+                direction   TEXT NOT NULL,  -- BUY or SELL
+                entry_price REAL,
+                exit_price  REAL,
+                status      TEXT DEFAULT 'open',  -- open, closed
+                pnl         REAL DEFAULT 0,
+                pnl_pct     REAL DEFAULT 0,
+                signal_source TEXT,  -- daily, manual, etc
+                notes       TEXT
+            )
+        """)
 
         await db.commit()
 
@@ -529,3 +545,75 @@ async def remove_portfolio_position(user_id: int, symbol: str) -> bool:
                         (user_id, symbol.upper()))
         await db.commit()
     return True
+
+
+# ─── Backtest Signals ─────────────────────────────────────────────────────────────
+
+async def add_backtest_signal(symbol: str, direction: str, entry_price: float, source: str = "daily") -> int:
+    """Add a new backtest signal (open position)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO backtest_signals (symbol, direction, entry_price, status, signal_source)
+            VALUES (?, ?, ?, 'open', ?)
+        """, (symbol.upper(), direction.upper(), entry_price, source))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def close_backtest_signal(signal_id: int, exit_price: float) -> dict:
+    """Close a backtest signal and calculate PnL."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM backtest_signals WHERE id = ?", (signal_id,)) as cursor:
+            signal = await cursor.fetchone()
+            if not signal:
+                return None
+        
+        entry_price = signal["entry_price"]
+        direction = signal["direction"]
+        
+        if direction == "BUY":
+            pnl = exit_price - entry_price
+            pnl_pct = (pnl / entry_price * 100) if entry_price > 0 else 0
+        else:  # SELL/SHORT
+            pnl = entry_price - exit_price
+            pnl_pct = (pnl / entry_price * 100) if entry_price > 0 else 0
+        
+        await db.execute("""
+            UPDATE backtest_signals 
+            SET status = 'closed', exit_price = ?, pnl = ?, pnl_pct = ?
+            WHERE id = ?
+        """, (exit_price, pnl, pnl_pct, signal_id))
+        await db.commit()
+        
+        return {"pnl": pnl, "pnl_pct": pnl_pct}
+
+
+async def get_backtest_signals() -> list[dict]:
+    """Get all backtest signals."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM backtest_signals ORDER BY created_at DESC
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_backtest_stats() -> dict:
+    """Get backtest statistics."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        async with db.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as total_pnl,
+                AVG(pnl_pct) as avg_pnl_pct
+            FROM backtest_signals WHERE status = 'closed'
+        """) as cursor:
+            stats = dict(await cursor.fetchone())
+        
+        return stats

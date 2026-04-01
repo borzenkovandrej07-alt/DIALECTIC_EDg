@@ -18,6 +18,7 @@ tracker.py — Автоматическая проверка прогнозов 
 import asyncio
 import logging
 import re
+import os
 from datetime import datetime, timedelta
 
 from market_data import MarketDataFetcher
@@ -371,6 +372,8 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
     predictions = extract_predictions_from_report(report_text)
 
     saved = 0
+    backtest_enabled = os.getenv("BACKTEST_ENABLED", "true").lower() == "true"
+    
     for pred in predictions:
         try:
             await save_prediction(
@@ -382,6 +385,18 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
                 timeframe=pred["timeframe"],
                 source_news=source_news[:300],
             )
+            
+            # Save to backtest if enabled
+            if backtest_enabled and pred.get("entry_price"):
+                from database import add_backtest_signal
+                direction = "BUY" if pred["direction"] in ["LONG", "BUY"] else "SELL"
+                await add_backtest_signal(
+                    symbol=pred["asset"],
+                    direction=direction,
+                    entry_price=pred["entry_price"],
+                    source="daily"
+                )
+            
             saved += 1
         except Exception as e:
             logger.warning(f"Не удалось сохранить прогноз: {e}")

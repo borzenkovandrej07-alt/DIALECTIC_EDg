@@ -58,6 +58,7 @@ from database import (
     import_forecasts_from_markdown,
     get_signals_subscribers, set_signals_sub, get_user_signals_status,
     add_portfolio_position, get_portfolio, remove_portfolio_position,
+    add_backtest_signal, close_backtest_signal, get_backtest_signals, get_backtest_stats,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
@@ -2390,6 +2391,71 @@ async def cmd_remove_portfolio(message: Message):
     await remove_portfolio_position(user_id, symbol)
     
     await message.answer(f"✅ Удалено: {symbol}")
+
+
+# ─── Backtest ───────────────────────────────────────────────────────────────────
+
+backtest_enabled = True  # Global toggle for backtest recording
+
+
+@dp.message(Command("backtest"))
+async def cmd_backtest(message: Message):
+    """Show backtest results."""
+    signals = await get_backtest_signals()
+    stats = await get_backtest_stats()
+    
+    lines = ["📊 BACKTEST РЕЗУЛЬТАТЫ", ""]
+    
+    total = stats.get("total", 0) or 0
+    wins = stats.get("wins", 0) or 0
+    losses = stats.get("losses", 0) or 0
+    total_pnl = stats.get("total_pnl", 0) or 0
+    avg_pnl = stats.get("avg_pnl_pct", 0) or 0
+    
+    win_rate = (wins / total * 100) if total > 0 else 0
+    
+    lines.append(f"📈 Всего сделок: {total}")
+    lines.append(f"✅ Win Rate: {win_rate:.1f}% ({wins} wins / {losses} losses)")
+    lines.append(f"💰 Total PnL: ${total_pnl:+,.2f}")
+    lines.append(f"📊 Avg PnL: {avg_pnl:+.2f}%")
+    lines.append("")
+    lines.append("Последние сделки:")
+    
+    for s in signals[:10]:
+        symbol = s["symbol"]
+        direction = s["direction"]
+        status = s["status"]
+        pnl = s.get("pnl", 0) or 0
+        emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        
+        if status == "open":
+            lines.append(f"  {symbol} {direction} — 🔵 OPEN")
+        else:
+            lines.append(f"  {symbol} {direction} — {emoji} ${pnl:+,.2f}")
+    
+    global backtest_enabled
+    status = "✅ ВКЛ" if backtest_enabled else "❌ ВЫКЛ"
+    lines.extend(["", f"🤖 Бэктест: {status} (/backtest_toggle)"])
+    
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("backtest_toggle"))
+async def cmd_backtest_toggle(message: Message):
+    """Toggle backtest recording."""
+    global backtest_enabled
+    backtest_enabled = not backtest_enabled
+    status = "включён" if backtest_enabled else "выключен"
+    await message.answer(f"🤖 Бэктест {status}")
+
+
+@dp.message(Command("backtest_clear"))
+async def cmd_backtest_clear(message: Message):
+    """Clear backtest signals."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM backtest_signals")
+        await db.commit()
+    await message.answer("🗑 Бэктест очищен")
 
 
 if __name__ == "__main__":
