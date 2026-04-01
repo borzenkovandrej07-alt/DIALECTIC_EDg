@@ -361,7 +361,7 @@ def _parse_timeframe(raw: str) -> str:
     return "1w"  # дефолт
 
 
-async def save_predictions_from_report(report_text: str, source_news: str = ""):
+async def save_predictions_from_report(report_text: str, source_news: str = "", bot=None, admin_ids: list = None):
     """Извлекает и сохраняет все прогнозы из отчёта."""
     vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
     if vm:
@@ -372,7 +372,12 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
     predictions = extract_predictions_from_report(report_text)
 
     saved = 0
-    backtest_enabled = os.getenv("BACKTEST_ENABLED", "true").lower() == "true"
+    from database import get_backtest_config
+    config = await get_backtest_config()
+    backtest_enabled = config.get("enabled", 1)
+    
+    # Track trades for notification
+    trades_executed = []
     
     for pred in predictions:
         try:
@@ -390,16 +395,37 @@ async def save_predictions_from_report(report_text: str, source_news: str = ""):
             if backtest_enabled and pred.get("entry_price"):
                 from database import add_backtest_signal
                 direction = "BUY" if pred["direction"] in ["LONG", "BUY"] else "SELL"
-                await add_backtest_signal(
+                result = await add_backtest_signal(
                     symbol=pred["asset"],
                     direction=direction,
                     entry_price=pred["entry_price"],
                     source="daily"
                 )
+                if result.get("status") == "opened":
+                    trades_executed.append({
+                        "symbol": pred["asset"],
+                        "direction": direction,
+                        "entry_price": pred["entry_price"],
+                        "capital": result.get("capital_after", 0)
+                    })
             
             saved += 1
         except Exception as e:
             logger.warning(f"Не удалось сохранить прогноз: {e}")
+
+    # Send notification to admins about executed trades
+    if trades_executed and bot and admin_ids:
+        msg_parts = ["🔔 НОВЫЕ СДЕЛКИ БЭКТЕСТА", ""]
+        for t in trades_executed:
+            emoji = "🟢" if t["direction"] == "BUY" else "🔴"
+            msg_parts.append(f"{emoji} {t['symbol']} {t['direction']} @ ${t['entry_price']:,.2f}")
+            msg_parts.append(f"   Капитал: ${t['capital']:,.2f}")
+        msg = "\n".join(msg_parts)
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(admin_id, msg)
+            except Exception as e:
+                logger.warning(f"Failed to notify admin {admin_id}: {e}")
 
     if saved:
         logger.info(f"Сохранено {saved} прогнозов из отчёта")

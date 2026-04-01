@@ -59,6 +59,7 @@ from database import (
     get_signals_subscribers, set_signals_sub, get_user_signals_status,
     add_portfolio_position, get_portfolio, remove_portfolio_position,
     add_backtest_signal, close_backtest_signal, get_backtest_signals, get_backtest_stats,
+    get_backtest_config, update_backtest_capital, set_backtest_enabled,
 )
 from tracker import check_pending_predictions
 from scheduler import Scheduler
@@ -788,7 +789,7 @@ async def legacy_run_full_analysis(
 
     # ── Сохраняем прогнозы ────────────────────────────────────────────────────
     source = custom_news[:300] if custom_mode else str(news)[:300]
-    await save_predictions_from_report(report, source_news=source)
+    await save_predictions_from_report(report, source_news=source, bot=get_bot(), admin_ids=ADMIN_IDS)
     await log_report(
         user_id,
         "analyze" if custom_mode else "daily",
@@ -2441,6 +2442,7 @@ async def cmd_backtest(message: Message):
     """Show backtest results."""
     signals = await get_backtest_signals()
     stats = await get_backtest_stats()
+    config = await get_backtest_config()
     
     lines = ["📊 BACKTEST РЕЗУЛЬТАТЫ", ""]
     
@@ -2452,24 +2454,42 @@ async def cmd_backtest(message: Message):
     
     win_rate = (wins / total * 100) if total > 0 else 0
     
+    capital = config.get("capital", 100.0)
+    enabled = config.get("enabled", 1)
+    
+    lines.append(f"💵 Капитал: ${capital:,.2f}")
     lines.append(f"📈 Всего сделок: {total}")
     lines.append(f"✅ Win Rate: {win_rate:.1f}% ({wins} wins / {losses} losses)")
     lines.append(f"💰 Total PnL: ${total_pnl:+,.2f}")
     lines.append(f"📊 Avg PnL: {avg_pnl:+.2f}%")
     lines.append("")
-    lines.append("Последние сделки:")
+    lines.append("Открытые позиции:")
     
-    for s in signals[:10]:
+    open_positions = [s for s in signals if s.get("status") == "open"]
+    if not open_positions:
+        lines.append("  нет")
+    else:
+        for s in open_positions:
+            symbol = s["symbol"]
+            direction = s["direction"]
+            entry = s.get("entry_price", 0)
+            qty = s.get("quantity", 0) or 0
+            lines.append(f"  {symbol} {direction} @ ${entry:,.2f} (qty: {qty:.4f})")
+    
+    lines.append("")
+    lines.append("Последние закрытые:")
+    
+    closed = [s for s in signals if s.get("status") == "closed"]
+    for s in closed[:5]:
         symbol = s["symbol"]
         direction = s["direction"]
-        status = s["status"]
         pnl = s.get("pnl", 0) or 0
+        pnl_pct = s.get("pnl_pct", 0) or 0
         emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
-        
-        if status == "open":
-            lines.append(f"  {symbol} {direction} — 🔵 OPEN")
-        else:
-            lines.append(f"  {symbol} {direction} — {emoji} ${pnl:+,.2f}")
+        lines.append(f"  {symbol} {direction} {emoji} ${pnl:+,.2f} ({pnl_pct:+.2f}%)")
+    
+    status = "✅ ВКЛ" if enabled else "❌ ВЫКЛ"
+    lines.extend(["", f"🤖 Статус: {status} (/backtest_toggle)", f"💰 Изменить капитал: /backtest_capital [сумма]"])
     
     global backtest_enabled
     status = "✅ ВКЛ" if backtest_enabled else "❌ ВЫКЛ"
@@ -2487,20 +2507,40 @@ async def cmd_backtest(message: Message):
 
 @dp.message(Command("backtest_toggle"))
 async def cmd_backtest_toggle(message: Message):
-    """Toggle backtest recording."""
-    global backtest_enabled
-    backtest_enabled = not backtest_enabled
-    status = "включён" if backtest_enabled else "выключен"
+    """Toggle backtest recording using database."""
+    config = await get_backtest_config()
+    enabled = not bool(config.get("enabled", 1))
+    await set_backtest_enabled(enabled)
+    status = "включён" if enabled else "выключен"
     await message.answer(f"🤖 Бэктест {status}")
+
+
+@dp.message(Command("backtest_capital"))
+async def cmd_backtest_capital(message: Message):
+    """Set backtest capital."""
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("Использование: /backtest_capital [сумма]\nПример: /backtest_capital 500")
+            return
+        new_capital = float(parts[1].replace(",", ""))
+        if new_capital <= 0:
+            await message.answer("Сумма должна быть больше 0")
+            return
+        config = await update_backtest_capital(new_capital)
+        await message.answer(f"💵 Капитал изменён на ${config['capital']:,.2f}")
+    except ValueError:
+        await message.answer("Неверная сумма. Пример: /backtest_capital 500")
 
 
 @dp.message(Command("backtest_clear"))
 async def cmd_backtest_clear(message: Message):
-    """Clear backtest signals."""
+    """Clear backtest signals and reset capital."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM backtest_signals")
+        await db.execute("UPDATE backtest_config SET capital = 100.0, last_updated = datetime('now') WHERE id = 1")
         await db.commit()
-    await message.answer("🗑 Бэктест очищен")
+    await message.answer("🗑 Бэктест очищен, капитал сброшен до $100")
 
 
 if __name__ == "__main__":

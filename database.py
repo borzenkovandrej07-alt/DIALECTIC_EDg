@@ -121,8 +121,25 @@ async def init_db():
                 pnl         REAL DEFAULT 0,
                 pnl_pct     REAL DEFAULT 0,
                 signal_source TEXT,  -- daily, manual, etc
-                notes       TEXT
+                notes       TEXT,
+                quantity    REAL DEFAULT 0,  -- amount of asset
+                trade_log   TEXT  -- JSON log of trade actions
             )
+        """)
+        
+        # Backtest config table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_config (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                capital     REAL DEFAULT 100.0,
+                enabled     INTEGER DEFAULT 1,
+                last_updated TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        
+        # Initialize default config if not exists
+        await db.execute("""
+            INSERT OR IGNORE INTO backtest_config (id, capital, enabled) VALUES (1, 100.0, 1)
         """)
 
         await db.commit()
@@ -549,15 +566,76 @@ async def remove_portfolio_position(user_id: int, symbol: str) -> bool:
 
 # ─── Backtest Signals ─────────────────────────────────────────────────────────────
 
-async def add_backtest_signal(symbol: str, direction: str, entry_price: float, source: str = "daily") -> int:
-    """Add a new backtest signal (open position)."""
+async def add_backtest_signal(symbol: str, direction: str, entry_price: float, source: str = "daily") -> dict:
+    """Add a new backtest signal (open position) - executes trade on capital."""
+    config = await get_backtest_config()
+    
+    if not config.get("enabled", 1):
+        return {"status": "disabled", "message": "Backtest is disabled"}
+    
+    capital = config.get("capital", 100.0)
+    
+    # Check for opposite open position and close it
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            INSERT INTO backtest_signals (symbol, direction, entry_price, status, signal_source)
-            VALUES (?, ?, ?, 'open', ?)
-        """, (symbol.upper(), direction.upper(), entry_price, source))
-        await db.commit()
-        return cursor.lastrowid
+        db.row_factory = aiosqlite.Row
+        opposite_dir = "SELL" if direction.upper() == "BUY" else "BUY"
+        async with db.execute("""
+            SELECT * FROM backtest_signals 
+            WHERE symbol = ? AND direction = ? AND status = 'open'
+            ORDER BY created_at DESC LIMIT 1
+        """, (symbol.upper(), opposite_dir)) as cursor:
+            open_pos = await cursor.fetchone()
+        
+        if open_pos:
+            # Close opposite position first
+            pnl = 0
+            pnl_pct = 0
+            notes = f"Auto-closed by opposite signal {direction}"
+            
+            if open_pos["direction"] == "BUY":
+                pnl = entry_price - open_pos["entry_price"]
+            else:
+                pnl = open_pos["entry_price"] - entry_price
+            
+            if open_pos["entry_price"] > 0:
+                pnl_pct = (pnl / open_pos["entry_price"] * 100)
+            
+            # Calculate new capital
+            quantity = open_pos.get("quantity", 1) or 1
+            new_capital = capital + (pnl * quantity)
+            
+            await db.execute("""
+                UPDATE backtest_signals 
+                SET status = 'closed', exit_price = ?, pnl = ?, pnl_pct = ?, notes = ?
+                WHERE id = ?
+            """, (entry_price, pnl, pnl_pct, notes, open_pos["id"]))
+            
+            capital = new_capital
+    
+    # Calculate quantity based on capital (use 100% for now)
+    quantity = capital / entry_price if entry_price > 0 else 0
+    
+    cursor = await db.execute("""
+        INSERT INTO backtest_signals (symbol, direction, entry_price, status, signal_source, quantity)
+        VALUES (?, ?, ?, 'open', ?, ?)
+    """, (symbol.upper(), direction.upper(), entry_price, source, quantity))
+    
+    await db.execute("""
+        UPDATE backtest_config SET capital = ?, last_updated = datetime('now') WHERE id = 1
+    """, (capital,))
+    
+    await db.commit()
+    
+    return {
+        "status": "opened",
+        "signal_id": cursor.lastrowid,
+        "symbol": symbol.upper(),
+        "direction": direction.upper(),
+        "entry_price": entry_price,
+        "quantity": quantity,
+        "capital_before": capital - (entry_price * quantity),
+        "capital_after": capital
+    }
 
 
 async def close_backtest_signal(signal_id: int, exit_price: float) -> dict:
@@ -617,3 +695,34 @@ async def get_backtest_stats() -> dict:
             stats = dict(await cursor.fetchone())
         
         return stats
+
+
+# ─── Backtest Config ─────────────────────────────────────────────────────────────
+
+async def get_backtest_config() -> dict:
+    """Get backtest configuration (capital, enabled)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM backtest_config WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else {"capital": 100.0, "enabled": 1}
+
+
+async def update_backtest_capital(new_capital: float) -> dict:
+    """Update backtest capital."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE backtest_config SET capital = ?, last_updated = datetime('now') WHERE id = 1
+        """, (new_capital,))
+        await db.commit()
+    return await get_backtest_config()
+
+
+async def set_backtest_enabled(enabled: bool) -> dict:
+    """Enable or disable backtest."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE backtest_config SET enabled = ?, last_updated = datetime('now') WHERE id = 1
+        """, (1 if enabled else 0,))
+        await db.commit()
+    return await get_backtest_config()
