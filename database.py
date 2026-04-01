@@ -370,8 +370,10 @@ async def get_track_record(report_type: str = None) -> dict:
         db.row_factory = aiosqlite.Row
 
         where_clause = ""
+        params = []
         if report_type:
-            where_clause = f" AND report_type = '{report_type}'"
+            where_clause = " AND report_type = ?"
+            params = [report_type]
 
         async with db.execute(f"""
             SELECT
@@ -385,7 +387,7 @@ async def get_track_record(report_type: str = None) -> dict:
                 MIN(pnl_pct) as worst_call
             FROM predictions
             WHERE result != 'expired'{where_clause}
-        """) as cursor:
+        """, params) as cursor:
             stats = dict(await cursor.fetchone())
 
         async with db.execute(f"""

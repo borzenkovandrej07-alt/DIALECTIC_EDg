@@ -39,7 +39,17 @@ from web_search import get_full_realtime_context
 from report_sanitizer import sanitize_full_report
 from chart_generator import generate_main_chart, generate_russia_chart
 from storage import Storage
-from analysis_service import run_full_analysis as analysis_service_run_full_analysis
+from analysis_service import run_full_analysis as analysis_service_run_full_analysis, _fetcher as news_fetcher
+from data_sources import fetch_full_context
+from meta_analyst import get_meta_context
+from github_export import get_previous_digest, push_digest_cache
+from sentiment import analyze_and_filter_async, format_for_agents
+from user_profile import build_profile_instruction
+from news_fetcher import NewsFetcher
+from agents import DebateOrchestrator
+from tracker import save_predictions_from_report
+from database import log_report
+from web_search import search_news_context
 from database import (
     init_db, upsert_user, get_user, increment_requests,
     save_debate_session,
@@ -551,98 +561,6 @@ async def handle_debate_page(callback: CallbackQuery):
         await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
         return
     await handle_debate_navigation_callback(callback, callback.from_user.id, round_idx)
-    return
-
-    _, user_id_str, action = parts[0], parts[1], parts[2]
-
-    if action == "noop":
-        await callback.answer()
-        return
-
-    try:
-        kb_uid = int(user_id_str)
-    except ValueError:
-        await callback.answer()
-        return
-
-    if kb_uid != callback.from_user.id:
-        await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
-        return
-
-    user_id = callback.from_user.id
-    try:
-        round_idx = int(action)
-    except ValueError:
-        await callback.answer()
-        return
-
-    cache = debate_cache.get(user_id)
-    if not cache:
-        report_redis = await get_debate_redis(user_id)
-        cache = hydrate_debate_from_report(report_redis) if report_redis else None
-        if cache:
-            debate_cache[user_id] = cache
-    if not cache:
-        report_db = await get_debate_session(user_id)
-        cache = hydrate_debate_from_report(report_db) if report_db else None
-        if cache:
-            debate_cache[user_id] = cache
-    if not cache:
-        storage.reload_from_disk()
-        snap = storage.get_user_debate_snapshot(user_id)
-        cache = hydrate_debate_from_report(snap) if snap else None
-        if cache:
-            debate_cache[user_id] = cache
-
-    if not cache:
-        storage.reload_from_disk()
-        rep_user = storage.get_user_last_cached_report(user_id)
-        cache = hydrate_debate_from_report(rep_user) if rep_user else None
-        if cache:
-            debate_cache[user_id] = cache
-    if not cache:
-        storage.reload_from_disk()
-        cached = storage.get_cached_report()
-        rep = cached.get("report") if cached else None
-        cache = hydrate_debate_from_report(rep) if rep else None
-        if cache:
-            debate_cache[user_id] = cache
-
-    if not cache:
-        logger.warning(
-            "debate hydrate miss user_id=%s — кэш пуст (редеплой/другой воркер). "
-            "Файл .txt с дебатами уже в чате под дайджестом.",
-            user_id,
-        )
-        await callback.answer(
-            "Дебаты в файле dialectic_debates_….txt — пролистай чат ниже кнопок. "
-            "Кнопки листания работают только пока бот не перезапускали.",
-            show_alert=True,
-        )
-        return
-
-    rounds = cache["rounds"]
-    if round_idx >= len(rounds):
-        await callback.answer()
-        return
-
-    round_text = debate_plain_text(rounds[round_idx])
-
-    if len(round_text) > 4080:
-        round_text = round_text[:4050] + "\n\n(…сокращено)"
-
-    kb = debates_keyboard(user_id, round_idx, len(rounds))
-
-    try:
-        await callback.message.edit_text(round_text, reply_markup=kb)
-    except Exception as e:
-        logger.warning("debate edit_text: %s", e)
-        try:
-            await callback.message.answer(round_text, reply_markup=kb)
-        except Exception as e2:
-            logger.error("debate answer fallback: %s", e2)
-
-    await callback.answer()
 
 
 # ─── /start ───────────────────────────────────────────────────────────────────
@@ -763,7 +681,7 @@ async def legacy_run_full_analysis(
     custom_mode: bool = False
 ) -> tuple[str, dict]:
     tasks = [
-        fetcher.fetch_all(),
+        news_fetcher.fetch_all(),
         fetch_full_context(),
         get_full_realtime_context(),
         get_profile(user_id),
