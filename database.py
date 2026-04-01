@@ -708,9 +708,17 @@ async def get_backtest_stats() -> dict:
                 AVG(pnl_pct) as avg_pnl_pct
             FROM backtest_signals WHERE status = 'closed'
         """) as cursor:
-            stats = dict(await cursor.fetchone())
-        
-        return stats
+            row = await cursor.fetchone()
+            if not row:
+                return {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "avg_pnl_pct": 0.0}
+            d = dict(row)
+            return {
+                "total": d.get("total") or 0,
+                "wins": d.get("wins") or 0,
+                "losses": d.get("losses") or 0,
+                "total_pnl": d.get("total_pnl") or 0.0,
+                "avg_pnl_pct": d.get("avg_pnl_pct") or 0.0
+            }
 
 
 # ─── Backtest Config ─────────────────────────────────────────────────────────────
@@ -721,7 +729,12 @@ async def get_backtest_config() -> dict:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM backtest_config WHERE id = 1") as cursor:
             row = await cursor.fetchone()
-            return dict(row) if row else {"capital": 100.0, "enabled": 1}
+            if not row:
+                return {"capital": 100.0, "enabled": 1}
+            d = dict(row)
+            d["capital"] = d.get("capital") or 100.0
+            d["enabled"] = d.get("enabled") or 1
+            return d
 
 
 async def update_backtest_capital(new_capital: float) -> dict:
