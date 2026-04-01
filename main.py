@@ -2244,9 +2244,11 @@ async def handle_portfolio_callback(callback: CallbackQuery, callback_data: port
         else:
             buttons = []
             for pos in positions:
+                s = pos["symbol"]
+                a = pos["amount"]
                 buttons.append([InlineKeyboardButton(
-                    text=f"🗑 {pos['symbol']} ({pos['amount']})",
-                    callback_data=portfolio_cb.new(action="confirm_remove", symbol=pos['symbol"])
+                    text=f"🗑 {s} ({a})",
+                    callback_data=portfolio_cb.new(action="confirm_remove", symbol=s)
                 )])
             buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=portfolio_cb.new(action="menu", symbol=""))])
             await callback.message.edit_text("Что удалить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
