@@ -1875,7 +1875,55 @@ async def cb_subscribe(callback: CallbackQuery):
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
-async def handle_custom_time(message: Message):
+async def handle_text_input(message: Message):
+    """Handle portfolio input OR time subscription."""
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    # Check portfolio state first
+    state = user_portfolio_state.get(user_id)
+    if state:
+        if state["step"] == "amount":
+            try:
+                amount = float(text.replace(",", "."))
+                assert amount > 0
+                state["amount"] = amount
+                state["step"] = "price"
+                await message.answer(f"По какой цене купил {state['symbol']}?\nВведи цену (например 65000)")
+            except:
+                await message.answer("Введи число, например 0.5")
+            return
+        elif state["step"] == "price":
+            try:
+                price = float(text.replace(",", "."))
+                assert price > 0
+                symbol = state["symbol"]
+                amount = state["amount"]
+                await add_portfolio_position(user_id, symbol, amount, price)
+                await message.answer(f"✅ Добавлено: {symbol} | {amount} шт. | ${price:,.0f}")
+                del user_portfolio_state[user_id]
+            except:
+                await message.answer("Введи цену, например 65000")
+            return
+    
+    # Check time input (for subscription)
+    user = await get_user(user_id)
+    if not user:
+        return
+    
+    if ":" in text and len(text) == 5:
+        try:
+            h, m = text.split(":")
+            h, m = int(h), int(m)
+            assert 0 <= h <= 23 and 0 <= m <= 59
+            time_str = f"{h:02d}:{m:02d}"
+            await set_daily_sub(user_id, True, time_str)
+            await message.answer(f"✅ Подписка активана\n📬 Ежедневно в {time_str} UTC")
+            return
+        except:
+            pass
+    
+    # If not portfolio and not time, do nothing
     user_id = message.from_user.id
     user = await get_user(user_id)
     
@@ -2257,37 +2305,6 @@ async def handle_portfolio_callback(callback: CallbackQuery):
         await asyncio.sleep(1)
         await callback.message.delete()
         await cmd_portfolio(callback.message)
-
-
-@dp.message(F.text & ~F.text.startswith("/"))
-async def handle_portfolio_input(message: Message):
-    user_id = message.from_user.id
-    state = user_portfolio_state.get(user_id)
-    
-    if not state:
-        return
-    
-    if state["step"] == "amount":
-        try:
-            amount = float(message.text.replace(",", "."))
-            assert amount > 0
-            state["amount"] = amount
-            state["step"] = "price"
-            await message.answer(f"По какой цене купил {state['symbol']}?\nВведи цену (например 65000)")
-        except:
-            await message.answer("Введи число, например 0.5")
-    
-    elif state["step"] == "price":
-        try:
-            price = float(message.text.replace(",", "."))
-            assert price > 0
-            symbol = state["symbol"]
-            amount = state["amount"]
-            await add_portfolio_position(user_id, symbol, amount, price)
-            await message.answer(f"✅ Добавлено: {symbol} | {amount} шт. | ${price:,.0f}")
-            del user_portfolio_state[user_id]
-        except:
-            await message.answer("Введи цену, например 65000")
 
 
 @dp.message(Command("add"))
