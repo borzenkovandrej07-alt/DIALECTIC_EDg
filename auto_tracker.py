@@ -216,53 +216,82 @@ class ForecastParser:
         """Извлекает прогнозы из текста."""
         forecasts = []
         
-        # Паттерны для разных типов прогнозов
-        patterns = [
-            # BTC/ETH с направлением: "BTC → медвежий" или "BTC 🐻 МЕДВЕЖИЙ"
-            r"([BTCЕ]+TH?)\s*[→🐻🐂🟡]*\s*(МЕДВЕЖИЙ|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT)",
-            # Точная цена: "VIX: 31.05" или "VIX = 31.05"
-            r"(VIX)\s*[:=]\s*(\d+\.?\d*)",
-            # S&P: "S&P 500: 6369"
-            r"(S&P\s*\d*|SPX)\s*[:=]*\s*(\d+\.?\d*)",
-            # Нефть/Золото с ценой
-            r"(Нефть|WTI|Gold|Золото)\s*[:=]*\s*\$?(\d+\.?\d*)",
-            # Fear & Greed
+        lines = report_text.split('\n')
+        
+        # Паттерны для направлений (BULLISH, BEARISH, NEUTRAL)
+        direction_patterns = [
+            # BTC ETH с эмодзи: "BTC 🐻 МЕДВЕЖИЙ" или "ETH → медвежий"
+            r"([BTCЕ]+TH?)\s*[→🐻🐂🟡\s]*\s*(МЕДВЕЖИЙ|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT|NEUTRAL)",
+            # Паттерн с "вердикт"
+            r"Вердикт.*?(быч|медв|нейтр|bull|bear|neutral|cash|long|short)",
+        ]
+        
+        # Паттерны для цен
+        price_patterns = [
+            r"(VIX)\s*[:=]*\s*(\d+\.?\d*)",
+            r"(S&P|SPX)\s*[:=]*\s*(\d+\.?\d*)",
+            r"(Нефть|WTI)\s*[:=]*\s*\$?(\d+\.?\d*)",
+            r"(Gold|Золото|XAU)\s*[:=]*\s*\$?(\d+\.?\d*)",
             r"(Fear\s*&\s*Greed|F&Greed)\s*[:=]*\s*(\d+)",
         ]
         
-        lines = report_text.split('\n')
+        seen = set()  # Избегаем дубликатов
+        
         for line in lines:
             line = line.strip()
-            
-            # Направление (стрелки/эмодзи)
-            direction_match = re.search(
-                r"([BTCЕ]+TH?)\s*[→🐻🐂🟡\s]*(МЕДВЕЖИЙ|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT)",
-                line, re.IGNORECASE
-            )
-            if direction_match:
-                asset = direction_match.group(1).upper()
-                direction = direction_match.group(2).upper()
-                
-                forecasts.append({
-                    "asset": asset,
-                    "type": "direction",
-                    "forecast": direction,
-                    "line": line[:100]
-                })
+            if not line or len(line) < 5:
                 continue
             
-            # Точная цена
-            price_match = re.search(r"(VIX|S&P|SPX|Нефть|WTI|Gold|Золото|Fear.*Greed).*?(\d+\.?\d*)", line, re.IGNORECASE)
-            if price_match:
-                asset = price_match.group(1)
-                price = price_match.group(2)
+            # Ищем направления
+            for pattern in direction_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    asset = match.group(1).upper().replace("ЕТН", "ETH").replace("БТЦ", "BTC")
+                    direction = match.group(2).upper()
+                    
+                    # Нормализуем направление
+                    if "БЫЧ" in direction or "BULL" in direction or "LONG" in direction:
+                        direction = "BULLISH"
+                    elif "МЕДВ" in direction or "BEAR" in direction or "SHORT" in direction:
+                        direction = "BEARISH"
+                    elif "НЕЙТРАЛЬ" in direction or "NEUTRAL" in direction or "CASH" in direction:
+                        direction = "NEUTRAL"
+                    
+                    key = f"{asset}:{direction}"
+                    if key not in seen:
+                        seen.add(key)
+                        forecasts.append({
+                            "asset": asset,
+                            "type": "direction",
+                            "forecast": direction,
+                            "line": line[:100]
+                        })
+                    break
+            
+            # Ищем цены
+            if not any(re.search(p, line, re.IGNORECASE) for p in price_patterns):
+                continue
                 
-                forecasts.append({
-                    "asset": asset,
-                    "type": "price",
-                    "forecast": price,
-                    "line": line[:100]
-                })
+            for pattern in price_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    asset_raw = match.group(1)
+                    price = match.group(2)
+                    
+                    # Нормализуем актив
+                    asset = asset_raw.upper()
+                    asset = asset.replace("SPX", "S&P").replace("WTI", "Нефть").replace("GOLD", "Gold").replace("XAU", "Gold")
+                    
+                    key = f"{asset}:price:{price}"
+                    if key not in seen:
+                        seen.add(key)
+                        forecasts.append({
+                            "asset": asset,
+                            "type": "price",
+                            "forecast": price,
+                            "line": line[:100]
+                        })
+                    break
         
         return forecasts
 
@@ -279,10 +308,26 @@ class ResultChecker:
         ftype = forecast["type"]
         forecast_value = forecast["forecast"]
         
-        # Получаем текущую цену
-        price_data = current_prices.get(asset.upper())
+        # Нормализуем asset для поиска в prices
+        asset_search = asset.upper()
+        asset_search = asset_search.replace("ETH", "ETHUSDT").replace("BTC", "BTCUSDT")
+        
+        # Ищем цену
+        price_data = None
+        for key in [asset_search, asset.upper()]:
+            if key in current_prices:
+                price_data = current_prices[key]
+                break
+        
         if not price_data:
-            return {"result": "Неизвестно", "accuracy": "—", "reason": "Нет цены"}
+            # Пробуем частичное совпадение
+            for key in current_prices:
+                if asset.upper() in key or key in asset.upper():
+                    price_data = current_prices[key]
+                    break
+        
+        if not price_data:
+            return {"result": "Неизвестно", "accuracy": "—", "reason": f"Нет цены для {asset}"}
         
         current_price = price_data.get("price", 0)
         change = price_data.get("change", 0)
@@ -297,6 +342,9 @@ class ResultChecker:
     def _check_direction(self, forecast: str, change: float, price: float) -> dict:
         """Проверка направления."""
         forecast = forecast.upper()
+        
+        # Нейтральный - цена останется примерно такой же (±2%)
+        NEUTRAL_THRESHOLD = 2.0  # 2% - приемлемая разница для нейтрального прогноза
         
         # Бычий / LONG
         if "BULL" in forecast or "БЫЧ" in forecast or "LONG" in forecast:
@@ -316,12 +364,14 @@ class ResultChecker:
             else:
                 return {"result": "⚠️ Смешанный", "accuracy": "50%", "reason": "Боковик"}
         
-        # Neutral / CASH
+        # Neutral / CASH - считаем верно если изменение в пределах ±2%
         elif "NEUTRAL" in forecast or "CASH" in forecast:
-            if abs(change) < 2:
-                return {"result": "✅ Верно", "accuracy": "100%", "reason": "Боковик предсказан"}
+            if abs(change) <= NEUTRAL_THRESHOLD:
+                return {"result": "✅ Верно", "accuracy": "100%", "reason": f"Боковик ±{NEUTRAL_THRESHOLD}% (факт {change:+.2f}%)"}
+            elif abs(change) <= NEUTRAL_THRESHOLD * 2:
+                return {"result": "⚠️ Близко", "accuracy": "80%", "reason": f"Небольшое движение {change:+.2f}%"}
             else:
-                return {"result": "⚠️ Смешанный", "accuracy": "50%", "reason": f"Волатильность {change:+.2f}%"}
+                return {"result": "❌ Неверно", "accuracy": "0%", "reason": f"Сильное движение {change:+.2f}%"}
         
         return {"result": "⚠️ Смешанный", "accuracy": "—"}
     
@@ -596,6 +646,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import sys
-    sys.stdout.reconfigure(encoding='utf-8')
     asyncio.run(main())
