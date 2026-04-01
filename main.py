@@ -574,6 +574,13 @@ async def cmd_start(message: Message):
         message.from_user.first_name or ""
     )
     name = message.from_user.first_name or "трейдер"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Портфель", callback_data="portfolio:menu:")],
+        [InlineKeyboardButton(text="📈 Профиль", callback_data="cmd:profile"), InlineKeyboardButton(text="📋 Дайджест", callback_data="cmd:daily")],
+        [InlineKeyboardButton(text="💰 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📊 Трек-рекорд", callback_data="cmd:trackrecord")],
+    ])
+    
     await message.answer(
         f"👋 Привет, *{name}*!\n\n"
         "🧠 *Dialectic Edge* — честный AI-аналитик рынков\n\n"
@@ -593,8 +600,9 @@ async def cmd_start(message: Message):
         "• /subscribe — авторассылка\n"
         "• /markets — текущие цены\n"
         "• /status — краткий статус (можно закрепить)\n"
-        "• /russia — анализ для российского рынка 🇷🇺\n\n"
+        "• /portfolio — твой портфель\n\n"
         "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
+        reply_markup=kb,
         parse_mode="Markdown"
     )
 
@@ -2282,6 +2290,18 @@ async def handle_portfolio_callback(callback: CallbackQuery):
     elif action == "refresh":
         await callback.message.delete()
         await cmd_portfolio(callback.message)
+    
+    elif action.startswith("cmd:"):
+        cmd = action.replace("cmd:", "")
+        await callback.message.delete()
+        if cmd == "profile":
+            await cmd_profile(callback.message)
+        elif cmd == "daily":
+            await cmd_daily(callback.message)
+        elif cmd == "status":
+            await cmd_status(callback.message)
+        elif cmd == "trackrecord":
+            await cmd_trackrecord(callback.message)
     
     elif action == "remove_select":
         positions = await get_portfolio(user_id)
