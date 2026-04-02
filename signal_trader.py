@@ -363,8 +363,8 @@ def _append_signal_follow_candidates(
         if price <= 0:
             continue
 
-        if direction == "LONG":
-            # BUY — always allowed
+        if direction == "SHORT":
+            # Price falling — BUY the dip
             trade_dir = "BUY"
             tp = AUTOTRADE_NEUTRAL_TP_PCT
             sl = AUTOTRADE_NEUTRAL_SL_PCT
@@ -372,9 +372,9 @@ def _append_signal_follow_candidates(
             target = price * (1 + tp)
             stop = price * (1 - sl)
         else:
-            # SHORT — only if we hold this asset
+            # Price rising — SELL if we hold it
             if symbol not in held_symbols:
-                logger.debug(f"SHORT signal for {symbol} but not held — skipping")
+                logger.debug(f"LONG signal for {symbol} but not held — skipping")
                 continue
             trade_dir = "SELL"
             tp = AUTOTRADE_NEUTRAL_TP_PCT
