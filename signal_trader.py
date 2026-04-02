@@ -48,6 +48,7 @@ RECENT_CONTEXT_LIMIT = AUTOTRADE_RECENT_CONTEXT_LIMIT
 CONTEXT_MAX_AGE_HOURS = AUTOTRADE_CONTEXT_MAX_AGE_HOURS
 ENTRY_TOLERANCE_PCT = AUTOTRADE_ENTRY_TOLERANCE_PCT
 OPEN_SCORE_THRESHOLD = AUTOTRADE_OPEN_SCORE_THRESHOLD
+SIGNAL_FOLLOW_SCORE_THRESHOLD = 12.0  # Lower threshold for signal-follow mode (no digest)
 REVERSAL_SCORE_THRESHOLD = AUTOTRADE_REVERSAL_SCORE_THRESHOLD
 CRYPTO_SIGNAL_SYMBOLS = {"BTC", "ETH", "SOL", "BNB"}
 
@@ -686,12 +687,24 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     current_capital = config.get("capital", 100.0)
     session_manager.update_capital(current_capital)
 
-    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=CONTEXT_MAX_AGE_HOURS)
-    if not contexts:
-        return events
+    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
 
-    consensus = build_digest_consensus(contexts)
     open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+
+    # No digest at all — trade on market signals
+    if not contexts:
+        logger.info("No digest contexts — trading on market signals only")
+        consensus = {
+            "consensus_verdict": "NEUTRAL",
+            "verdict_score": 0,
+            "contexts": [],
+            "candidates": [],
+        }
+    else:
+        consensus = build_digest_consensus(contexts)
+        # If digest has no candidates — fall back to signals
+        if not consensus.get("candidates"):
+            logger.info("Digest has no trade candidates — falling back to market signals")
 
     cv = consensus.get("consensus_verdict", "NEUTRAL")
     use_follow = _signal_follow_active(cv, consensus.get("candidates") or [])
