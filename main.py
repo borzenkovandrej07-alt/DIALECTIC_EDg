@@ -692,25 +692,24 @@ def format_signal_trader_status_message(status: dict) -> str:
 
     decisions = status.get("recent_decisions") or []
     if decisions:
-        msg += "\n🧾 *Последние решения автотрейда:*\n"
-        for row in decisions[:3]:
+        msg += "\n📜 *История действий:*\n"
+        for row in decisions[:5]:
             created = (row.get("created_at", "") or "")[:16].replace("T", " ")
             ctype = row.get("cycle_type", "")
             payload = row.get("payload") or {}
             if ctype == "autotrade_opened":
                 ch = payload.get("chosen") or {}
-                msg += (
-                    f"• {created} открыто: *{ch.get('symbol')}* {ch.get('direction')} "
-                    f"score `{ch.get('total_score')}` sig `{ch.get('signal_direction')}`\n"
-                )
+                sym = ch.get('symbol', '?')
+                dir = ch.get('direction', '?')
+                price = ch.get('entry', 0)
+                action = "🔴 Продал (Short)" if dir == "SELL" else "🟢 Купил (Long)"
+                msg += f"• {created}: {action} {sym} по ${price:,.2f}\n"
+            elif ctype == "autotrade_closed":
+                msg += f"• {created}: Закрыл позицию\n"
             elif ctype == "autotrade_skip_not_ready":
-                b = payload.get("best") or {}
-                msg += (
-                    f"• {created} пропуск: `{b.get('symbol', '—')}` score `{b.get('total_score')}` "
-                    f"({payload.get('reason', 'not_ready')})\n"
-                )
+                pass  # Пропускаем логи пропусков
             else:
-                msg += f"• {created} `{ctype}`\n"
+                msg += f"• {created}: {ctype}\n"
 
     msg += "\n" + "═" * 25 + "\n"
     msg += f"💰 Всего закрытых сделок: {status['total_trades']}\n"
