@@ -506,7 +506,9 @@ def _score_candidate(candidate: dict, current_price: float, signal_bias: dict) -
         signal_score = -2.0
 
     total_score = float(candidate.get("digest_score") or 0.0) + proximity_score + signal_score
-    ready = not blocked_reason and total_score >= OPEN_SCORE_THRESHOLD
+    # Use lower threshold for signal-follow mode
+    threshold = SIGNAL_FOLLOW_SCORE_THRESHOLD if candidate.get("signal_follow_only") else OPEN_SCORE_THRESHOLD
+    ready = not blocked_reason and total_score >= threshold
 
     scored = dict(candidate)
     scored.update({
