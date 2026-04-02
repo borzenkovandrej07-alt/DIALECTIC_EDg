@@ -52,6 +52,8 @@ SIGNAL_FOLLOW_SCORE_THRESHOLD = 12.0  # Lower threshold for signal-follow mode (
 REVERSAL_SCORE_THRESHOLD = AUTOTRADE_REVERSAL_SCORE_THRESHOLD
 CRYPTO_SIGNAL_SYMBOLS = {"BTC", "ETH", "SOL", "BNB"}
 
+_trade_lock = asyncio.Lock()
+
 _signal_cache: dict = {}
 _signal_cache_time: datetime | None = None
 _signal_cache_meta: tuple[str, bool] | None = None
@@ -643,9 +645,14 @@ def _scoring_legend() -> dict:
 
 async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     """Run one paper-trading cycle with session management."""
-    events = []
     if not FEATURE_AUTOTRADE:
-        return events
+        return []
+    async with _trade_lock:
+        return await _check_and_trade_locked(bot, admin_ids)
+
+
+async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
+    """Actual trading logic — always called under lock."""
 
     # Load session state from BACKTEST.md on first run
     if not session_manager._loaded:
