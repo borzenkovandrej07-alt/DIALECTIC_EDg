@@ -349,22 +349,18 @@ def _append_signal_follow_candidates(
         b = signal_bias.get(symbol) or {}
         direction = (b.get("direction") or "NEUTRAL").upper()
         score = float(b.get("score") or 0.0)
-        if direction not in ("LONG", "SHORT") or abs(score) < AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE:
+        # ONLY BUY (LONG) — no shorts for paper trading
+        if direction != "LONG" or abs(score) < AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE:
             continue
         price = float(prices.get(symbol) or 0)
         if price <= 0:
             continue
-        trade_dir = "BUY" if direction == "LONG" else "SELL"
+        trade_dir = "BUY"
         tp = AUTOTRADE_NEUTRAL_TP_PCT
         sl = AUTOTRADE_NEUTRAL_SL_PCT
-        if trade_dir == "BUY":
-            entry = price
-            target = price * (1 + tp)
-            stop = price * (1 - sl)
-        else:
-            entry = price
-            target = price * (1 - tp)
-            stop = price * (1 + sl)
+        entry = price
+        target = price * (1 + tp)
+        stop = price * (1 - sl)
         digest_score = 12.0 + min(abs(score), 35.0) * 0.35
         add.append({
             "symbol": symbol,
