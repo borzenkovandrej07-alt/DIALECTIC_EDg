@@ -37,7 +37,9 @@ from database import (
     get_backtest_stats,
     get_recent_daily_contexts,
     get_recent_trade_decisions,
+    update_backtest_capital,
 )
+from session_manager import session_manager, SESSION_START_CAPITAL
 
 logger = logging.getLogger(__name__)
 
@@ -385,12 +387,22 @@ def _append_signal_follow_candidates(
 
 async def _export_backtest_snapshot():
     try:
-        from github_export import export_backtest_to_github
+        from github_export import _github_get, _github_put, BACKTEST_FILE
+        from datetime import datetime
 
         signals = await get_backtest_signals()
         stats = await get_backtest_stats()
         config = await get_backtest_config()
-        await export_backtest_to_github(signals, stats, config)
+
+        # Use session manager to format BACKTEST.md
+        content = session_manager.format_backtest_md(signals, stats, config)
+
+        _, sha = await _github_get(BACKTEST_FILE)
+        await _github_put(
+            BACKTEST_FILE, content, sha,
+            f"📊 Update backtest {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]"
+        )
+        logger.info("✅ BACKTEST.md updated on GitHub")
     except Exception as e:
         logger.warning(f"Backtest export error: {e}")
 
@@ -558,6 +570,18 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     if not result:
         return None
 
+    # Record in session manager
+    session_manager.record_trade({
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": float(position.get("entry_price") or 0.0),
+        "exit_price": current_price,
+        "pnl": float(result.get("pnl") or 0.0),
+        "pnl_pct": float(result.get("pnl_pct") or 0.0),
+        "reason": reason,
+    })
+    session_manager.update_capital(float(result.get("new_capital") or 0.0))
+
     return {
         "event": "closed",
         "symbol": symbol,
@@ -617,14 +641,50 @@ def _scoring_legend() -> dict:
 
 
 async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
-    """Run one paper-trading cycle."""
+    """Run one paper-trading cycle with session management."""
     events = []
     if not FEATURE_AUTOTRADE:
         return events
 
+    # Load session state from BACKTEST.md on first run
+    if not session_manager._loaded:
+        try:
+            from github_export import _github_get, BACKTEST_FILE
+            backtest_content, _ = await _github_get(BACKTEST_FILE)
+            if backtest_content:
+                session_manager._load_from_backtest(backtest_content)
+        except Exception as e:
+            logger.debug("Failed to load session state from GitHub: %s", e)
+
+    # Check if current session should be closed
+    if session_manager.should_close_session():
+        closed_session = session_manager.close_session()
+        # Reset capital for new session
+        await update_backtest_capital(SESSION_START_CAPITAL)
+        session_manager.update_capital(SESSION_START_CAPITAL)
+        events.append({
+            "event": "session_closed",
+            "session_id": closed_session["session_id"],
+            "pnl": closed_session["pnl"],
+            "lesson": closed_session["lesson"],
+        })
+        logger.info(
+            f"🏁 Session #{closed_session['session_id']} closed. "
+            f"PnL: ${closed_session['pnl']:+.2f}. New session started."
+        )
+        # Export updated sessions to GitHub
+        try:
+            await _export_backtest_snapshot()
+        except Exception:
+            pass
+
     config = await get_backtest_config()
     if not config.get("enabled", 1):
         return events
+
+    # Update session manager with current capital
+    current_capital = config.get("capital", 100.0)
+    session_manager.update_capital(current_capital)
 
     contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=CONTEXT_MAX_AGE_HOURS)
     if not contexts:
@@ -773,7 +833,7 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
         direction=best["direction"],
         entry_price=float(best["current_price"]),
         source="auto_trader",
-        quantity_pct=1.0,
+        quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 1.0),
         notes=notes,
         trade_log=trade_meta,
     )
@@ -880,6 +940,8 @@ async def get_signal_trader_status() -> dict:
 
     recent_decisions = await get_recent_trade_decisions(4)
 
+    adaptive_params = session_manager.get_adaptive_params()
+
     return {
         "enabled": config.get("enabled", 1),
         "capital": float(config.get("capital", 100.0) or 100.0),
@@ -900,4 +962,10 @@ async def get_signal_trader_status() -> dict:
         "recent_decisions": recent_decisions,
         "autotrade_feature_on": FEATURE_AUTOTRADE,
         "binance_signals_enabled": DATA_SOURCE_BINANCE_SIGNALS,
+        "session_id": session_manager.current_session.session_id,
+        "session_start": session_manager.current_session.start_time,
+        "session_pnl": round(session_manager.current_session.total_pnl, 2),
+        "session_trades": len(session_manager.current_session.trades),
+        "past_sessions": len(session_manager.past_sessions),
+        "adaptive_params": adaptive_params,
     }

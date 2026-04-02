@@ -390,6 +390,87 @@ def extract_predictions_from_report(report_text: str) -> list[dict]:
                 "stop_loss": stop, "timeframe": "1w",
             })
 
+    # ── Метод 5: триггер-формат торгового плана ──────────────────────────────
+    # "Триггер LONG: BTC пробой $70,200 (+3%) → LONG 5% портфеля."
+    # "Триггер SHORT: BTC пробой $66,700 (-2%) → SHORT 3% портфеля."
+    trigger_pattern = re.compile(
+        r'Триггер\s+(LONG|SHORT)[:\s]+'
+        r'(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\s+'
+        r'(?:пробой|выше|ниже|уровень)?\s*\$?([\d,\.K]+)'
+        r'(?:\s*\([^\)]*\))?\s*→\s*(?:LONG|SHORT)\s+([\d]+)%',
+        re.IGNORECASE
+    )
+    for m in trigger_pattern.finditer(report_text):
+        direction = m.group(1).upper()
+        asset = m.group(2).upper()
+        trigger_price = _parse_price(m.group(3))
+        pct_size = int(m.group(4)) if m.group(4) else 3
+
+        if not trigger_price or trigger_price <= 0:
+            continue
+
+        # Для триггеров: entry = trigger price, stop/target вычисляем
+        if direction == "LONG":
+            entry = trigger_price
+            target = round(trigger_price * 1.05, 2)  # +5% цель
+            stop = round(trigger_price * 0.97, 2)    # -3% стоп
+        else:
+            entry = trigger_price
+            target = round(trigger_price * 0.95, 2)  # -5% цель
+            stop = round(trigger_price * 1.03, 2)    # +3% стоп
+
+        # Проверяем нет ли уже такого актива
+        existing = [p for p in predictions if p["asset"] == asset]
+        if not existing:
+            predictions.append({
+                "asset": asset, "direction": direction,
+                "entry_price": entry, "target_price": target,
+                "stop_loss": stop, "timeframe": "1w",
+                "is_trigger": True, "trigger_pct_size": pct_size,
+            })
+
+    # ── Метод 6: pipe-формат с указанием входа/стопа/цели (Золото и др.) ─────
+    # "Золото (GC=F) | LONG | Вход: $4,809.40 | Стоп: $4,665 (-3%) | Цель: $5,098 (+6%)"
+    pipe_trade_pattern = re.compile(
+        r'(?:Золото|Gold|Серебро|Silver|Нефть|Oil|Платина|Platinum|Палладий|Palladium|Медь|Copper)?'
+        r'(?:\s*\(([A-Z]{1,4}(?:=F)?)\))?\s*\|\s*(LONG|SHORT)\s*\|\s*'
+        r'(?:Вход|Entry)[:\s]+\$?([\d,\.]+)'
+        r'(?:\s*\([^\)]*\))?\s*\|\s*'
+        r'(?:Стоп|Stop)[:\s]+\$?([\d,\.]+)'
+        r'(?:\s*\([^\)]*\))?\s*\|\s*'
+        r'(?:Цель|Target)[:\s]+\$?([\d,\.]+)',
+        re.IGNORECASE
+    )
+    asset_name_map = {
+        "ЗОЛОТО": "GLD", "GOLD": "GLD", "GC=F": "GLD",
+        "СЕРЕБРО": "SLV", "SILVER": "SLV", "SI=F": "SLV",
+        "НЕФТЬ": "CL=F", "OIL": "CL=F", "CL=F": "CL=F",
+        "ПЛАТИНА": "PL=F", "PLATINUM": "PL=F",
+        "МЕДЬ": "HG=F", "COPPER": "HG=F",
+    }
+    for m in pipe_trade_pattern.finditer(report_text):
+        ticker = (m.group(1) or "").upper()
+        direction = m.group(2).upper()
+        entry = _parse_price(m.group(3))
+        stop = _parse_price(m.group(4))
+        target = _parse_price(m.group(5))
+
+        if not all([entry, stop, target]) or entry <= 0:
+            continue
+
+        asset = asset_name_map.get(ticker, ticker)
+        if asset not in known_assets and ticker not in asset_name_map:
+            # Добавляем как custom asset
+            pass
+
+        existing = [p for p in predictions if p["asset"] == asset]
+        if not existing:
+            predictions.append({
+                "asset": asset, "direction": direction,
+                "entry_price": entry, "target_price": target,
+                "stop_loss": stop, "timeframe": "1w",
+            })
+
     if predictions:
         logger.info(f"📊 Найдено {len(predictions)} прогнозов в отчёте")
     else:
@@ -412,6 +493,80 @@ def _parse_timeframe(raw: str) -> str:
     if any(x in raw for x in ["месяц", "1m", "month"]):
         return "1m"
     return "1w"  # дефолт
+
+
+def _extract_price_levels_from_report(report_text: str) -> dict:
+    """
+    Извлекает ценовые уровни из текста отчёта, когда нет структурированных прогнозов.
+    Ищет паттерны:
+    - "BTC: $68,110.98 | RSI 46.4"
+    - "Триггер LONG: BTC пробой $70,200"
+    - "Вход: $4,809.40 | Стоп: $4,665 | Цель: $5,098"
+    - "Золото (GC=F) | LONG | Вход: $4,809.40"
+    """
+    entries = {}
+    stops = {}
+    targets = {}
+
+    # 1) Текущие уровни: "BTC: $68,110.98 | RSI"
+    current_price_pattern = re.compile(
+        r'\b(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\b'
+        r'[:\s]+\$?([\d,]+\.?\d*)\s*\|',
+        re.IGNORECASE
+    )
+    for m in current_price_pattern.finditer(report_text):
+        asset = m.group(1).upper()
+        price = _parse_price(m.group(2))
+        if price and asset not in entries:
+            entries[asset] = price
+
+    # 2) Триггеры: "Триггер LONG: BTC пробой $70,200"
+    trigger_pattern = re.compile(
+        r'Триггер\s+(LONG|SHORT)[:\s]+'
+        r'(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)\s+'
+        r'(?:пробой|выше|ниже|уровень)?\s*\$?([\d,\.K]+)',
+        re.IGNORECASE
+    )
+    for m in trigger_pattern.finditer(report_text):
+        direction = m.group(1).upper()
+        asset = m.group(2).upper()
+        price = _parse_price(m.group(3))
+        if price:
+            entries[asset] = price
+            if direction == "LONG":
+                targets[asset] = round(price * 1.05, 2)
+                stops[asset] = round(price * 0.97, 2)
+            else:
+                targets[asset] = round(price * 0.95, 2)
+                stops[asset] = round(price * 1.03, 2)
+
+    # 3) Pipe-формат: "Золото | LONG | Вход: $X | Стоп: $Y | Цель: $Z"
+    pipe_pattern = re.compile(
+        r'(?:Вход|Entry)[:\s]+\$?([\d,\.]+)'
+        r'(?:\s*\([^\)]*\))?\s*\|\s*'
+        r'(?:Стоп|Stop)[:\s]+\$?([\d,\.]+)'
+        r'(?:\s*\([^\)]*\))?\s*\|\s*'
+        r'(?:Цель|Target)[:\s]+\$?([\d,\.]+)',
+        re.IGNORECASE
+    )
+    for m in pipe_pattern.finditer(report_text):
+        entry = _parse_price(m.group(1))
+        stop = _parse_price(m.group(2))
+        target = _parse_price(m.group(3))
+        if entry:
+            entries["GLD"] = entry
+        if stop:
+            stops["GLD"] = stop
+        if target:
+            targets["GLD"] = target
+
+    # 4) Выход из CASH: "VIX < 22 И Fear&Greed > 30"
+    cash_exit = re.search(r'Выход\s+из\s+CASH[:\s]+VIX\s*<\s*([\d.]+)', report_text, re.IGNORECASE)
+    if cash_exit:
+        vix_level = float(cash_exit.group(1))
+        entries["VIX"] = vix_level
+
+    return {"entries": entries, "stops": stops, "targets": targets}
 
 
 async def save_predictions_from_report(
@@ -444,28 +599,49 @@ async def save_predictions_from_report(
             verdict = "SELL"
         else:
             verdict = "NEUTRAL"
-    
-    # Save daily context for signal trader
-    if predictions:
-        from database import save_daily_context
-        symbols = [p["asset"] for p in predictions]
-        entries = {p["asset"]: p["entry_price"] for p in predictions if p.get("entry_price")}
-        stop_losses = {p["asset"]: p["stop_loss"] for p in predictions if p.get("stop_loss")}
-        targets = {p["asset"]: p["target_price"] for p in predictions if p.get("target_price")}
-        timeframes = {p["asset"]: p["timeframe"] for p in predictions}
-        
-        await save_daily_context(
-            verdict=verdict,
-            symbols=symbols,
-            entries=entries,
-            stop_losses=stop_losses,
-            targets=targets,
-            timeframes=timeframes,
-            news_summary=source_news[:300],
-            prompt_versions=prompt_versions,
-            model_inputs_snapshot=model_inputs_snapshot,
+
+    # Также проверяем ВЕРДИКТ И ТОРГОВЫЙ ПЛАН / ИТОГОВЫЙ СИНТЕЗ
+    if verdict == "NEUTRAL":
+        vm2 = re.search(
+            r"(?:ВЕРДИКТ|ИТОГОВЫЙ\s+СИНТЕЗ)[^\n]{0,200}(?:БЫЧ|BULL|МЕДВЕЖ|BEAR)",
+            report_text,
+            re.IGNORECASE | re.DOTALL,
         )
-        logger.info(f"Saved daily context: verdict={verdict}, symbols={symbols}")
+        if vm2:
+            block = vm2.group(0).upper()
+            if "БЫЧ" in block or "BULL" in block:
+                verdict = "BUY"
+            elif "МЕДВЕЖ" in block or "BEAR" in block:
+                verdict = "SELL"
+    
+    # Save daily context for signal trader — ВСЕГДА, даже при пустых predictions
+    from database import save_daily_context
+    symbols = [p["asset"] for p in predictions] if predictions else []
+    entries = {p["asset"]: p["entry_price"] for p in predictions if p.get("entry_price")} if predictions else {}
+    stop_losses = {p["asset"]: p["stop_loss"] for p in predictions if p.get("stop_loss")} if predictions else {}
+    targets = {p["asset"]: p["target_price"] for p in predictions if p.get("target_price")} if predictions else {}
+    timeframes = {p["asset"]: p["timeframe"] for p in predictions} if predictions else {}
+    
+    # Если нет явных прогнозов, извлекаем уровни из текста отчёта
+    if not predictions:
+        price_levels = _extract_price_levels_from_report(report_text)
+        entries = price_levels.get("entries", {})
+        stop_losses = price_levels.get("stops", {})
+        targets = price_levels.get("targets", {})
+        symbols = list(set(list(entries.keys()) + list(stop_losses.keys()) + list(targets.keys())))
+    
+    await save_daily_context(
+        verdict=verdict,
+        symbols=symbols,
+        entries=entries,
+        stop_losses=stop_losses,
+        targets=targets,
+        timeframes=timeframes,
+        news_summary=source_news[:300],
+        prompt_versions=prompt_versions,
+        model_inputs_snapshot=model_inputs_snapshot,
+    )
+    logger.info(f"Saved daily context: verdict={verdict}, symbols={symbols}, predictions={len(predictions)}")
     
     for pred in predictions:
         try:

@@ -714,7 +714,30 @@ def format_signal_trader_status_message(status: dict) -> str:
 
     msg += "\n" + "═" * 25 + "\n"
     msg += f"💰 Всего закрытых сделок: {status['total_trades']}\n"
-    msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}"
+    msg += f"📈 Total PnL: ${status['total_pnl']:+,.2f}\n"
+
+    # Session info
+    if status.get("session_id"):
+        msg += "\n" + "═" * 25 + "\n"
+        msg += f"🔄 Сессия #{status['session_id']}\n"
+        if status.get("session_start"):
+            msg += f"Старт: {status['session_start']}\n"
+        msg += f"Сделок в сессии: {status.get('session_trades', 0)}\n"
+        msg += f"PnL сессии: ${status.get('session_pnl', 0):+,.2f}\n"
+        if status.get("past_sessions", 0) > 0:
+            msg += f"Прошлых сессий: {status['past_sessions']}\n"
+
+    # Adaptive params
+    ap = status.get("adaptive_params") or {}
+    if ap:
+        msg += "\n" + "═" * 25 + "\n"
+        msg += "⚙️ Адаптивные параметры:\n"
+        if "open_score_threshold" in ap:
+            msg += f"Порог входа: {ap['open_score_threshold']:.1f}\n"
+        if "neutral_sl_pct" in ap:
+            msg += f"Стоп: {ap['neutral_sl_pct']:.2%}\n"
+        if "quantity_pct" in ap:
+            msg += f"Размер позиции: {ap['quantity_pct']:.1%}\n"
     return msg
 
 
