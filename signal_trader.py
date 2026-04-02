@@ -14,7 +14,11 @@ from datetime import datetime, timedelta
 from config import (
     AUTOTRADE_CONTEXT_MAX_AGE_HOURS,
     AUTOTRADE_ENTRY_TOLERANCE_PCT,
+    AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL,
     AUTOTRADE_INTERVAL_SEC,
+    AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE,
+    AUTOTRADE_NEUTRAL_SL_PCT,
+    AUTOTRADE_NEUTRAL_TP_PCT,
     AUTOTRADE_OPEN_SCORE_THRESHOLD,
     AUTOTRADE_RECENT_CONTEXT_LIMIT,
     AUTOTRADE_REVERSAL_SCORE_THRESHOLD,
@@ -46,6 +50,7 @@ CRYPTO_SIGNAL_SYMBOLS = {"BTC", "ETH", "SOL", "BNB"}
 
 _signal_cache: dict = {}
 _signal_cache_time: datetime | None = None
+_signal_cache_meta: tuple[str, bool] | None = None
 
 
 def _direction_to_int(direction: str) -> int:
@@ -217,8 +222,13 @@ def build_digest_consensus(contexts: list[dict]) -> dict:
     }
 
 
-async def _fetch_crypto_signal_bias(symbols: list[str], consensus_verdict: str) -> dict:
-    global _signal_cache, _signal_cache_time
+async def _fetch_crypto_signal_bias(
+    symbols: list[str],
+    consensus_verdict: str,
+    *,
+    neutral_follow: bool = False,
+) -> dict:
+    global _signal_cache, _signal_cache_time, _signal_cache_meta
 
     crypto_symbols = [symbol for symbol in symbols if symbol in CRYPTO_SIGNAL_SYMBOLS]
     if not crypto_symbols:
@@ -228,21 +238,109 @@ async def _fetch_crypto_signal_bias(symbols: list[str], consensus_verdict: str) 
         return {}
 
     now = datetime.now()
-    if _signal_cache_time and (now - _signal_cache_time).total_seconds() < AUTOTRADE_SIGNAL_BIAS_CACHE_SEC:
+    meta_key = (consensus_verdict or "", neutral_follow)
+    if (
+        _signal_cache_time
+        and (now - _signal_cache_time).total_seconds() < AUTOTRADE_SIGNAL_BIAS_CACHE_SEC
+        and _signal_cache_meta == meta_key
+    ):
         return {symbol: _signal_cache.get(symbol, {}) for symbol in crypto_symbols}
 
     try:
-        from signals import fetch_binance_signals, build_signal_bias_map
+        import os
+
+        from signals import build_signal_bias_map, fetch_binance_signals, fetch_verdict
 
         raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
-        sig_verdict = _consensus_to_signal_verdict(consensus_verdict) if consensus_verdict else None
+        sig_verdict = None
+        if consensus_verdict in ("BUY", "SELL"):
+            sig_verdict = _consensus_to_signal_verdict(consensus_verdict)
+        elif neutral_follow:
+            try:
+                repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+                vr = await fetch_verdict(repo)
+                if vr and vr.get("verdict") in ("BULLISH", "BEARISH"):
+                    sig_verdict = vr
+            except Exception as e:
+                logger.debug("fetch_verdict for neutral_follow: %s", e)
+
         bias = build_signal_bias_map(raw, sig_verdict)
         _signal_cache = bias
         _signal_cache_time = now
+        _signal_cache_meta = meta_key
         return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
     except Exception as e:
         logger.warning(f"Signal bias fetch error: {e}")
         return {}
+
+
+def _signal_follow_active(
+    consensus_verdict: str,
+    candidates: list,
+) -> bool:
+    return (
+        AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL
+        and DATA_SOURCE_BINANCE_SIGNALS
+        and (consensus_verdict == "NEUTRAL" or not candidates)
+    )
+
+
+def _append_signal_follow_candidates(
+    consensus: dict,
+    prices: dict,
+    signal_bias: dict,
+) -> dict:
+    if not _signal_follow_active(
+        consensus.get("consensus_verdict", "NEUTRAL"),
+        consensus.get("candidates") or [],
+    ):
+        return consensus
+
+    existing = {c["symbol"] for c in consensus.get("candidates", [])}
+    add = []
+    for symbol in sorted(CRYPTO_SIGNAL_SYMBOLS):
+        if symbol in existing:
+            continue
+        b = signal_bias.get(symbol) or {}
+        direction = (b.get("direction") or "NEUTRAL").upper()
+        score = float(b.get("score") or 0.0)
+        if direction not in ("LONG", "SHORT") or abs(score) < AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE:
+            continue
+        price = float(prices.get(symbol) or 0)
+        if price <= 0:
+            continue
+        trade_dir = "BUY" if direction == "LONG" else "SELL"
+        tp = AUTOTRADE_NEUTRAL_TP_PCT
+        sl = AUTOTRADE_NEUTRAL_SL_PCT
+        if trade_dir == "BUY":
+            entry = price
+            target = price * (1 + tp)
+            stop = price * (1 - sl)
+        else:
+            entry = price
+            target = price * (1 - tp)
+            stop = price * (1 + sl)
+        digest_score = 12.0 + min(abs(score), 35.0) * 0.35
+        add.append({
+            "symbol": symbol,
+            "direction": trade_dir,
+            "support": 0,
+            "weighted_support": 0,
+            "digest_score": round(digest_score, 2),
+            "entry": round(entry, 6),
+            "target": round(target, 6),
+            "stop": round(stop, 6),
+            "timeframe": "signal_follow",
+            "context_dates": [],
+            "latest_created_at": "",
+            "news_summary": "",
+            "signal_follow_only": True,
+        })
+    out = dict(consensus)
+    out["candidates"] = list(consensus.get("candidates", [])) + add
+    if add:
+        out["signal_follow_augmented"] = len(add)
+    return out
 
 
 async def _export_backtest_snapshot():
@@ -495,11 +593,18 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     consensus = build_digest_consensus(contexts)
     open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
 
+    cv = consensus.get("consensus_verdict", "NEUTRAL")
+    use_follow = _signal_follow_active(cv, consensus.get("candidates") or [])
+
     symbols = {candidate["symbol"] for candidate in consensus.get("candidates", [])}
     symbols.update(position["symbol"] for position in open_positions)
+    if use_follow:
+        symbols |= set(CRYPTO_SIGNAL_SYMBOLS)
+
     prices = await fetch_current_prices(list(symbols))
-    cv = consensus.get("consensus_verdict", "NEUTRAL")
-    signal_bias = await _fetch_crypto_signal_bias(list(symbols), cv)
+    signal_bias = await _fetch_crypto_signal_bias(list(symbols), cv, neutral_follow=use_follow)
+    if use_follow:
+        consensus = _append_signal_follow_candidates(consensus, prices, signal_bias)
 
     for position in open_positions:
         closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
@@ -536,6 +641,7 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
                         "symbol", "direction", "total_score", "signal_direction",
                     )} if len(ranked) > 1 else None),
                     "consensus_verdict": consensus.get("consensus_verdict"),
+                    "signal_follow_active": use_follow,
                     "digest_contexts_used": consensus.get("contexts", []),
                     "signal_bias_excerpt": {
                         sym: {
@@ -579,12 +685,24 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
         "feature_flags": {
             "FEATURE_AUTOTRADE": FEATURE_AUTOTRADE,
             "DATA_SOURCE_BINANCE_SIGNALS": DATA_SOURCE_BINANCE_SIGNALS,
+            "AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL": AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL,
+            "signal_follow_cycle": use_follow,
         },
     }
 
+    if use_follow:
+        decision_audit["signal_follow_mode"] = True
+    if best.get("signal_follow_only"):
+        decision_audit["opened_from_signal_follow"] = True
+
     notes = (
-        f"Digest consensus {consensus.get('consensus_verdict')} | "
-        f"support {best['support']} | signal {best['signal_direction']}"
+        f"Signal-follow (market) | {best['symbol']} {best['direction']} | "
+        f"sig {best['signal_direction']}"
+        if best.get("signal_follow_only")
+        else (
+            f"Digest consensus {consensus.get('consensus_verdict')} | "
+            f"support {best['support']} | signal {best['signal_direction']}"
+        )
     )
     trade_meta = json.dumps({
         "target": best.get("target") or 0.0,
@@ -675,12 +793,22 @@ async def get_signal_trader_status() -> dict:
         "candidates": [],
     }
 
+    cv_status = consensus.get("consensus_verdict", "NEUTRAL")
+    use_follow_status = _signal_follow_active(cv_status, consensus.get("candidates") or [])
+
+    symbols_set = {c["symbol"] for c in consensus.get("candidates", [])[:8]}
+    if use_follow_status:
+        symbols_set |= set(CRYPTO_SIGNAL_SYMBOLS)
+    symbols = sorted(symbols_set)
+    consensus_display = consensus
+
     candidate_rows = []
-    if consensus.get("candidates"):
-        symbols = [candidate["symbol"] for candidate in consensus["candidates"][:5]]
+    if symbols:
         prices = await fetch_current_prices(symbols)
-        signal_bias = await _fetch_crypto_signal_bias(symbols, consensus.get("consensus_verdict", "NEUTRAL"))
-        candidate_rows = rank_trade_candidates(consensus, prices, signal_bias)[:3]
+        signal_bias = await _fetch_crypto_signal_bias(symbols, cv_status, neutral_follow=use_follow_status)
+        consensus_display = _append_signal_follow_candidates(consensus, prices, signal_bias)
+        if consensus_display.get("candidates"):
+            candidate_rows = rank_trade_candidates(consensus_display, prices, signal_bias)[:3]
 
     active_positions = []
     for position in open_positions:
@@ -707,7 +835,10 @@ async def get_signal_trader_status() -> dict:
         "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
         "open_positions": len(open_positions),
         "active_positions": active_positions,
-        "tracked_symbols": [candidate["symbol"] for candidate in consensus.get("candidates", [])[:5]],
+        "tracked_symbols": [candidate["symbol"] for candidate in consensus_display.get("candidates", [])[:8]]
+        if symbols
+        else [],
+        "signal_follow_active": use_follow_status,
         "daily_context_fresh": is_daily_context_fresh(latest_context),
         "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
         "recent_contexts": consensus.get("contexts", []),

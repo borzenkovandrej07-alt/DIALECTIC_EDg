@@ -696,6 +696,8 @@ def format_signal_trader_status_message(status: dict) -> str:
     msg += f"Bias Binance/Bybit: {'✅' if status.get('binance_signals_enabled') else '⏸ DATA_SOURCE…=0'}\n"
     msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
     msg += f"🎯 Консенсус 2-3 дайджестов: *{status.get('consensus_verdict', 'NEUTRAL')}*\n"
+    if status.get("signal_follow_active"):
+        msg += "📡 _Режим:_ NEUTRAL или нет планов из дайджеста — кандидаты по рыночным сигналам (как в /signals) + цены.\n"
 
     pv = status.get("latest_digest_prompt_versions") or {}
     if pv:
@@ -736,8 +738,9 @@ def format_signal_trader_status_message(status: dict) -> str:
         for candidate in top_candidates[:3]:
             signal_dir = candidate.get("signal_direction", "NEUTRAL")
             ready_mark = "✅" if candidate.get("ready") else "⏳"
+            sf = " (signals)" if candidate.get("signal_follow_only") else ""
             msg += (
-                f"• {candidate['symbol']} {candidate['direction']} {ready_mark}\n"
+                f"• {candidate['symbol']} {candidate['direction']} {ready_mark}{sf}\n"
                 f"  вход ${candidate['entry']:,.2f} | цена ${candidate['current_price']:,.2f}\n"
                 f"  score {candidate['total_score']:.1f} | signal {signal_dir}\n"
             )
@@ -1060,6 +1063,10 @@ async def deliver_scheduled_daily(user_id: int) -> None:
         if cached:
             report = cached["report"]
             prices = cached.get("prices") or {}
+            try:
+                await save_predictions_from_report(report, source_news="")
+            except Exception as e:
+                logger.warning("deliver_scheduled_daily: sync daily_context failed: %s", e)
             await send_daily_digest_bundle(user_id, user_id, report, prices)
             return
         report, prices = await analysis_service_run_full_analysis(user_id)
@@ -1091,6 +1098,10 @@ async def cmd_daily(message: Message):
     if cached:
         report = cached["report"]
         prices = cached.get("prices") or {}
+        try:
+            await save_predictions_from_report(report, source_news="")
+        except Exception as e:
+            logger.warning("cmd_daily cache: sync daily_context failed: %s", e)
         await send_daily_digest_bundle(message.chat.id, user_id, report, prices)
         await message.answer(
             f"Кэш от {cached['timestamp']}. Повтор без AI до ~{CACHE_TTL_HOURS} ч. "

@@ -124,5 +124,12 @@ AUTOTRADE_ENTRY_TOLERANCE_PCT = float(os.getenv("AUTOTRADE_ENTRY_TOLERANCE_PCT",
 AUTOTRADE_OPEN_SCORE_THRESHOLD = float(os.getenv("AUTOTRADE_OPEN_SCORE_THRESHOLD", "18"))
 AUTOTRADE_REVERSAL_SCORE_THRESHOLD = float(os.getenv("AUTOTRADE_REVERSAL_SCORE_THRESHOLD", "16"))
 AUTOTRADE_SIGNAL_BIAS_CACHE_SEC = int(os.getenv("AUTOTRADE_SIGNAL_BIAS_CACHE_SEC", "300"))
+# При NEUTRAL (или нет кандидатов из дайджеста) — добавлять кандидатов из /signals bias + рынок
+AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL = os.getenv("AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL", "1").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE = float(os.getenv("AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE", "8"))
+AUTOTRADE_NEUTRAL_TP_PCT = float(os.getenv("AUTOTRADE_NEUTRAL_TP_PCT", "0.04"))
+AUTOTRADE_NEUTRAL_SL_PCT = float(os.getenv("AUTOTRADE_NEUTRAL_SL_PCT", "0.02"))
 # Ограничить размер JSON-снимка контекста модели в БД (символов)
 DIGEST_SNAPSHOT_MAX_CHARS = int(os.getenv("DIGEST_SNAPSHOT_MAX_CHARS", "12000"))

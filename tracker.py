@@ -167,6 +167,21 @@ def _parse_price(raw: str) -> float | None:
         return None
 
 
+def _trading_plan_excerpt(report_text: str) -> str:
+    """Берём блок «Торговый план» — там чаще всего явные вход/стоп/цель."""
+    if not report_text:
+        return ""
+    m = re.search(
+        r"(?:^|\n)(?:📌\s*)?(?:ТОРГОВЫЙ\s+ПЛАН|Торговый\s+план|ПЛАН\s+СДЕЛОК|"
+        r"План\s+сделок|TRADING\s+PLAN|Итоговый\s+торговый\s+план)\s*:?[^\n]*\n([\s\S]{0,22000})",
+        report_text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        return (m.group(0) or "")[:24000]
+    return ""
+
+
 def extract_predictions_from_report(report_text: str) -> list[dict]:
     """
     Парсит отчёт Synth и извлекает структурированные прогнозы.
@@ -185,6 +200,10 @@ def extract_predictions_from_report(report_text: str) -> list[dict]:
     """
     predictions = []
     known_assets = set(ASSET_MAP.keys())
+
+    tp = _trading_plan_excerpt(report_text)
+    if tp:
+        report_text = tp + "\n\n" + report_text
 
     # ── Метод 1: структурированный блок "• Актив: ... • Направление: ..." ──────
     # Ищем блоки торгового плана целиком
@@ -274,6 +293,40 @@ def extract_predictions_from_report(report_text: str) -> list[dict]:
                 "target_price": target,
                 "stop_loss":    stop,
                 "timeframe":    tf,
+            })
+
+    # ── Метод 2b: тот же pipe, но порядок Вход → Цель → Стоп ─────────────────
+    if not predictions:
+        pipe_pattern2 = re.compile(
+            r'(?:•|-+>)\s*'
+            r'(BTC|ETH|SOL|BNB|SPY|QQQ|NVDA|AAPL|TSLA|GLD)'
+            r'\s*\|\s*(LONG|SHORT)'
+            r'.*?(?:Вход|вход|Entry)[:\s]+\$?([\d,\.K]+)'
+            r'.*?(?:Цел[ьи]|цел[ьи]|Target)[:\s]+\$?([\d,\.K]+)'
+            r'.*?(?:Стоп|стоп|Stop)[:\s]+\$?([\d,\.K]+)',
+            re.IGNORECASE
+        )
+        for m in pipe_pattern2.finditer(report_text):
+            asset = m.group(1).upper()
+            direction = m.group(2).upper()
+            entry = _parse_price(m.group(3))
+            target = _parse_price(m.group(4))
+            stop = _parse_price(m.group(5))
+            if not all([entry, target, stop]):
+                continue
+            if direction == "LONG" and not (stop < entry < target):
+                continue
+            if direction == "SHORT" and not (target < entry < stop):
+                continue
+            tf_m = re.search(r'Горизонт[:\s]+([^|\n]{1,20})', m.group(0), re.IGNORECASE)
+            tf = _parse_timeframe(tf_m.group(1) if tf_m else "1w")
+            predictions.append({
+                "asset": asset,
+                "direction": direction,
+                "entry_price": entry,
+                "target_price": target,
+                "stop_loss": stop,
+                "timeframe": tf,
             })
 
     # ── Метод 3: стрелочный формат "-> SHORT: Вход $X | Стоп $Y | Цель $Z" ──
@@ -370,21 +423,21 @@ async def save_predictions_from_report(
     model_inputs_snapshot: dict | None = None,
 ):
     """Извлекает и сохраняет все прогнозы из отчёта."""
-    vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
-    if vm:
-        verdict_line = re.sub(r"[*_`]", "", vm.group(1)).strip()
-        if verdict_line:
-            logger.info("Вердикт судьи из отчёта: %s", verdict_line[:120])
-
     predictions = extract_predictions_from_report(report_text)
 
     saved = 0
 
-    # Extract verdict from report
+    # Вердикт: markdown / emoji; первая строка блока
     verdict = "NEUTRAL"
-    vm = re.search(r"ВЕРДИКТ\s+СУДЬИ:\s*(.+)", report_text, re.IGNORECASE)
+    vm = re.search(
+        r"ВЕРДИКТ\s*СУДЬИ\s*[:：]\s*(.+?)(?:\n{2,}|$)",
+        report_text,
+        re.IGNORECASE | re.DOTALL,
+    )
     if vm:
-        verdict_line = re.sub(r"[*_`]", "", vm.group(1)).strip().upper()
+        first_line = (vm.group(1) or "").split("\n")[0]
+        verdict_line = re.sub(r"[*_`🟡🟢🔴🏆\[\]]", "", first_line).strip().upper()
+        logger.info("Вердикт судьи из отчёта: %s", verdict_line[:120])
         if "БЫЧ" in verdict_line or "BULL" in verdict_line:
             verdict = "BUY"
         elif "МЕДВЕЖ" in verdict_line or "BEAR" in verdict_line:
