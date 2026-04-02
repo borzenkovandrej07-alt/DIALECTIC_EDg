@@ -632,10 +632,60 @@ async def handle_debate_page(callback: CallbackQuery):
 
 
 # ─── TEST COMMAND ─────────────────────────────────────────────────────────────
-@dp.message(F.text.startswith("/tt"))
-async def cmd_test_bot(message: Message):
-    """Test command."""
-    await message.answer("TT WORKS!")
+@dp.message(Command("signals"))
+async def cmd_signals(message: Message):
+    """Combined view: current prices + signals in one response."""
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+    prices_dict = {}
+    live_prices = ""
+    try:
+        result = await get_full_realtime_context()
+        if isinstance(result, tuple) and len(result) == 2:
+            prices_dict, live_prices = result
+        elif isinstance(result, dict):
+            prices_dict = result
+    except Exception as e:
+        logger.warning("signals: failed to fetch market data: %s", e)
+        prices_dict = {}
+        live_prices = ""
+    report = ""
+    try:
+        cached = storage.get_cached_report()
+        if cached and isinstance(cached.get("report"), str):
+            report = cached["report"]
+    except Exception as e:
+        logger.debug("signals: could not get cached report: %s", e)
+        report = ""
+    verdict = extract_verdict_from_report(report) if report else None
+    pct, stars = extract_signal_pct_and_stars(report) if report else (0, "")
+    lines = []
+    if live_prices:
+        lines.append("🔎 Текущие цены (live):")
+        lines.append(live_prices)
+    if isinstance(prices_dict, dict) and prices_dict:
+        lines.append("")
+        lines.append("Криптовалюты и активы:")
+        for symbol, value in prices_dict.items():
+            val = None
+            if isinstance(value, dict):
+                val = value.get("price") or value.get("value") or value.get("price_usd")
+            else:
+                val = value
+            lines.append(f"- {symbol}: {val}")
+    lines.append("")
+    lines.append("🧭 Текущие сигналы и вердикт:")
+    if report:
+        if verdict:
+            lines.append(f"Вердикт: {verdict}")
+        lines.append(f"Уверенность: {pct}% [{stars}]")
+        snippet = report[:1500]
+        if snippet:
+            lines.append("")
+            lines.append(snippet)
+    else:
+        lines.append("Нет доступного сигнала (нет кэша отчета).")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
 
 
 def format_signal_trader_status_message(status: dict) -> str:
