@@ -189,8 +189,8 @@ async def init_db():
 async def upsert_user(user_id: int, username: str = "", first_name: str = ""):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            INSERT INTO users (user_id, username, first_name, last_active)
-            VALUES (?, ?, ?, datetime('now'))
+            INSERT INTO users (user_id, username, first_name, last_active, signals_sub)
+            VALUES (?, ?, ?, datetime('now'), 1)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = excluded.username,
                 first_name = excluded.first_name,

@@ -9,6 +9,7 @@ Paper auto trader:
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 
 from config import (
@@ -222,11 +223,38 @@ def build_digest_consensus(contexts: list[dict]) -> dict:
     }
 
 
+def _markets_bundle_audit(bundle: dict) -> dict:
+    v = bundle.get("verdict") or {}
+    sigs = bundle.get("signals") or []
+    return {
+        "github_digest_verdict": v.get("verdict"),
+        "signals": [
+            {
+                "symbol": s.get("symbol"),
+                "direction": s.get("direction"),
+                "confidence": s.get("confidence"),
+            }
+            for s in sigs[:10]
+        ],
+    }
+
+
+def _bias_raw_from_bundle(markets_bundle: dict, crypto_symbols: list[str]) -> dict:
+    full = markets_bundle.get("binance_data") or {}
+    out = {}
+    for sym in crypto_symbols:
+        key = f"{sym}USDT"
+        if key in full:
+            out[key] = full[key]
+    return out
+
+
 async def _fetch_crypto_signal_bias(
     symbols: list[str],
     consensus_verdict: str,
     *,
     neutral_follow: bool = False,
+    markets_bundle: dict | None = None,
 ) -> dict:
     global _signal_cache, _signal_cache_time, _signal_cache_meta
 
@@ -239,35 +267,47 @@ async def _fetch_crypto_signal_bias(
 
     now = datetime.now()
     meta_key = (consensus_verdict or "", neutral_follow)
-    if (
-        _signal_cache_time
-        and (now - _signal_cache_time).total_seconds() < AUTOTRADE_SIGNAL_BIAS_CACHE_SEC
-        and _signal_cache_meta == meta_key
-    ):
-        return {symbol: _signal_cache.get(symbol, {}) for symbol in crypto_symbols}
+
+    if markets_bundle is None:
+        if (
+            _signal_cache_time
+            and (now - _signal_cache_time).total_seconds() < AUTOTRADE_SIGNAL_BIAS_CACHE_SEC
+            and _signal_cache_meta == meta_key
+        ):
+            return {symbol: _signal_cache.get(symbol, {}) for symbol in crypto_symbols}
 
     try:
-        import os
-
         from signals import build_signal_bias_map, fetch_binance_signals, fetch_verdict
 
-        raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
+        if markets_bundle is not None:
+            raw = _bias_raw_from_bundle(markets_bundle, crypto_symbols)
+            if not raw:
+                raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
+        else:
+            raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
+
         sig_verdict = None
         if consensus_verdict in ("BUY", "SELL"):
             sig_verdict = _consensus_to_signal_verdict(consensus_verdict)
         elif neutral_follow:
-            try:
-                repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
-                vr = await fetch_verdict(repo)
-                if vr and vr.get("verdict") in ("BULLISH", "BEARISH"):
-                    sig_verdict = vr
-            except Exception as e:
-                logger.debug("fetch_verdict for neutral_follow: %s", e)
+            vr = None
+            if markets_bundle is not None:
+                vr = markets_bundle.get("verdict")
+            if vr is None or not vr.get("verdict"):
+                try:
+                    repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+                    vr = await fetch_verdict(repo)
+                except Exception as e:
+                    logger.debug("fetch_verdict for neutral_follow: %s", e)
+                    vr = None
+            if vr and vr.get("verdict") in ("BULLISH", "BEARISH"):
+                sig_verdict = vr
 
         bias = build_signal_bias_map(raw, sig_verdict)
-        _signal_cache = bias
-        _signal_cache_time = now
-        _signal_cache_meta = meta_key
+        if markets_bundle is None:
+            _signal_cache = bias
+            _signal_cache_time = now
+            _signal_cache_meta = meta_key
         return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
     except Exception as e:
         logger.warning(f"Signal bias fetch error: {e}")
@@ -601,8 +641,18 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
     if use_follow:
         symbols |= set(CRYPTO_SIGNAL_SYMBOLS)
 
+    from signals import fetch_markets_bundle
+
+    gh_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+    markets_bundle = await fetch_markets_bundle(gh_repo)
+
     prices = await fetch_current_prices(list(symbols))
-    signal_bias = await _fetch_crypto_signal_bias(list(symbols), cv, neutral_follow=use_follow)
+    signal_bias = await _fetch_crypto_signal_bias(
+        list(symbols),
+        cv,
+        neutral_follow=use_follow,
+        markets_bundle=markets_bundle,
+    )
     if use_follow:
         consensus = _append_signal_follow_candidates(consensus, prices, signal_bias)
 
@@ -652,6 +702,7 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
                         for sym in sorted(set(signal_bias.keys()) | {best.get("symbol")})
                     },
                     "scoring_legend": _scoring_legend(),
+                    "markets_panel_snapshot": _markets_bundle_audit(markets_bundle),
                 },
             )
         if events:
@@ -688,6 +739,7 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
             "AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL": AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL,
             "signal_follow_cycle": use_follow,
         },
+        "markets_panel_snapshot": _markets_bundle_audit(markets_bundle),
     }
 
     if use_follow:

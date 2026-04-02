@@ -631,63 +631,6 @@ async def handle_debate_page(callback: CallbackQuery):
     await handle_debate_navigation_callback(callback, callback.from_user.id, round_idx)
 
 
-# ─── TEST COMMAND ─────────────────────────────────────────────────────────────
-@dp.message(Command("signals"))
-async def cmd_signals(message: Message):
-    """Combined view: current prices + signals in one response."""
-    user_id = message.from_user.id
-    await upsert_user(user_id, message.from_user.username or "")
-    prices_dict = {}
-    live_prices = ""
-    try:
-        result = await get_full_realtime_context()
-        if isinstance(result, tuple) and len(result) == 2:
-            prices_dict, live_prices = result
-        elif isinstance(result, dict):
-            prices_dict = result
-    except Exception as e:
-        logger.warning("signals: failed to fetch market data: %s", e)
-        prices_dict = {}
-        live_prices = ""
-    report = ""
-    try:
-        cached = storage.get_cached_report()
-        if cached and isinstance(cached.get("report"), str):
-            report = cached["report"]
-    except Exception as e:
-        logger.debug("signals: could not get cached report: %s", e)
-        report = ""
-    verdict = extract_verdict_from_report(report) if report else None
-    pct, stars = extract_signal_pct_and_stars(report) if report else (0, "")
-    lines = []
-    if live_prices:
-        lines.append("🔎 Текущие цены (live):")
-        lines.append(live_prices)
-    if isinstance(prices_dict, dict) and prices_dict:
-        lines.append("")
-        lines.append("Криптовалюты и активы:")
-        for symbol, value in prices_dict.items():
-            val = None
-            if isinstance(value, dict):
-                val = value.get("price") or value.get("value") or value.get("price_usd")
-            else:
-                val = value
-            lines.append(f"- {symbol}: {val}")
-    lines.append("")
-    lines.append("🧭 Текущие сигналы и вердикт:")
-    if report:
-        if verdict:
-            lines.append(f"Вердикт: {verdict}")
-        lines.append(f"Уверенность: {pct}% [{stars}]")
-        snippet = report[:1500]
-        if snippet:
-            lines.append("")
-            lines.append(snippet)
-    else:
-        lines.append("Нет доступного сигнала (нет кэша отчета).")
-    await message.answer("\n".join(lines), parse_mode="Markdown")
-
-
 def format_signal_trader_status_message(status: dict) -> str:
     msg = "📡 *СИГНАЛ ТРЕЙДЕР*\n"
     msg += "═" * 25 + "\n"
@@ -697,7 +640,7 @@ def format_signal_trader_status_message(status: dict) -> str:
     msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
     msg += f"🎯 Консенсус 2-3 дайджестов: *{status.get('consensus_verdict', 'NEUTRAL')}*\n"
     if status.get("signal_follow_active"):
-        msg += "📡 _Режим:_ NEUTRAL или нет планов из дайджеста — кандидаты по рыночным сигналам (как в /signals) + цены.\n"
+        msg += "📡 _Режим:_ NEUTRAL или нет планов из дайджеста — кандидаты по рыночным сигналам (как в `/markets`) + цены.\n"
 
     pv = status.get("latest_digest_prompt_versions") or {}
     if pv:
@@ -823,7 +766,7 @@ async def cmd_start(message: Message):
         "• /trackrecordrussia — Россия Edge 🇷🇺\n"
         "• /weeklyreport — отчёт за неделю\n"
         "• /subscribe — авторассылка\n"
-        "• /markets — текущие цены\n"
+        "• /markets — рынки + сигналы (копитрейдинг), подписка на пуши\n"
         "• /status — краткий статус (можно закрепить)\n"
         "• /portfolio — твой портфель\n\n"
         "⚠️ _Не финансовый совет. Будущее неизвестно никому._",
@@ -1481,28 +1424,63 @@ async def handle_russia_choice(callback: CallbackQuery):
             await callback.message.answer(f"❌ *Ошибка:* `{str(e)[:200]}`", parse_mode="Markdown")
 
 
-# ─── /markets ─────────────────────────────────────────────────────────────────
+# ─── /markets (живой контекст + сигналы Binance/Bybit, как в signals.py) ─────
+
+
+def _markets_signal_keyboard(is_enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔕 Выключить сигналы" if is_enabled else "🔔 Включить сигналы",
+            callback_data="markets:disable" if is_enabled else "markets:enable",
+        )],
+        [InlineKeyboardButton(text="📡 Обновить", callback_data="markets:check")],
+        [InlineKeyboardButton(text="📊 Бэктест", callback_data="markets:backtest")],
+    ])
+
 
 @dp.message(Command("markets"))
 async def cmd_markets(message: Message):
-    await upsert_user(message.from_user.id)
-    wait_msg = await message.answer("⏳ Загружаю живые данные...")
+    user_id = message.from_user.id
+    await upsert_user(user_id, message.from_user.username or "")
+    wait_msg = await message.answer("⏳ Загружаю рынки и сигналы...")
+    github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
     try:
-        _, live_prices = await get_full_realtime_context()
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
-        safe_prices = clean_markdown(live_prices)
+        from signals import build_markets_panel_message
+
+        full_text, _bundle = await build_markets_panel_message(github_repo)
+        safe = clean_markdown(full_text)
+        is_enabled = await get_user_signals_status(user_id)
+        status_text = (
+            "\n\n✅ *Сигналы включены* — при сильном сигнале пришлю отдельным сообщением"
+            if is_enabled
+            else (
+                "\n\n━━━━━━━━━━━━━━━━━━━━━\n"
+                "Нажми «Включить сигналы» — бот будет присылать при перекосе трейдеров "
+                "или совпадении с вердиктом из DIGEST_CACHE"
+            )
+        )
         await bot.edit_message_text(
-            f"📊 *РЫНКИ — {now}*\n\n{safe_prices}",
+            safe + status_text,
             chat_id=message.chat.id,
             message_id=wait_msg.message_id,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=_markets_signal_keyboard(is_enabled),
         )
     except Exception as e:
         await bot.edit_message_text(
             f"❌ Ошибка: {e}",
             chat_id=message.chat.id,
-            message_id=wait_msg.message_id
+            message_id=wait_msg.message_id,
         )
+
+
+@dp.message(Command("signals"))
+async def cmd_signals_deprecated(message: Message):
+    await message.answer(
+        "📌 Команда `/signals` больше не используется. Всё в `/markets`: "
+        "живой контекст, сигналы и кнопки подписки.",
+        parse_mode="Markdown",
+    )
 
 
 @dp.message(Command("status"))
@@ -1579,151 +1557,82 @@ async def cmd_status(message: Message):
         )
 
 
-@dp.message(Command("signals"))
-async def cmd_signals(message: Message):
-    from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
-    import os
-    
-    user_id = message.from_user.id
-    await upsert_user(user_id)
-    wait_msg = await message.answer("⏳ Загружаю сигналы...")
-    
-    try:
-        github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
-        
-        binance_data = await fetch_binance_signals()
-        verdict = await fetch_verdict(github_repo)
-        signals = analyze_signals(binance_data, verdict)
-        msg = build_signals_message(signals, binance_data, verdict)
-        
-        is_enabled = await get_user_signals_status(user_id)
-        
-        if is_enabled:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
-                [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
-                [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
-            ])
-            status_text = "\n\n✅ *Сигналы включены* — буду присылать когда появится сигнал"
-        else:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
-                [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
-                [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
-            ])
-            status_text = "\n\n━━━━━━━━━━━━━━━━━━━━━\nНажми 'Включить сигналы' — бот будет сам присылать когда:\n• 80%+ трейдеров в одну сторону\n• или 60%+ совпадение с вердиктом"
-        
-        await bot.edit_message_text(
-            msg + status_text,
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        await bot.edit_message_text(
-            f"❌ Ошибка: {e}",
-            chat_id=message.chat.id,
-            message_id=wait_msg.message_id
-        )
-
-
-@dp.callback_query(F.data.startswith("signals:"))
-async def cb_signals(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith(("markets:", "signals:")))
+async def cb_markets_signals(callback: CallbackQuery):
     user_id = callback.from_user.id
-    action = callback.data.split(":")[1] if ":" in callback.data else ""
-    
+    data = callback.data or ""
+    if data.startswith("markets:"):
+        action = data.split(":")[1] if ":" in data else ""
+    elif data.startswith("signals:"):
+        action = data.split(":")[1] if ":" in data else ""
+    else:
+        action = ""
+
     if action == "enable":
         await set_signals_sub(user_id, True)
-        await callback.answer("✅ Сигналы включены! Буду присылать когда появится сигнал.", show_alert=True)
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="signals:disable")],
-            [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
-            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
-        ])
-        
-        await callback.message.edit_text(
-            callback.message.text + "\n\n✅ *Сигналы включены!*",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    
+        await callback.answer("✅ Сигналы включены.", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=_markets_signal_keyboard(True))
+
     elif action == "disable":
         await set_signals_sub(user_id, False)
         await callback.answer("🔕 Сигналы выключены.", show_alert=True)
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="signals:enable")],
-            [InlineKeyboardButton(text="📡 Проверить сейчас", callback_data="signals:check")],
-            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
-        ])
-        
-        await callback.message.edit_text(
-            callback.message.text.replace("✅ *Сигналы включены!*", ""),
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    
+        await callback.message.edit_reply_markup(reply_markup=_markets_signal_keyboard(False))
+
     elif action == "check":
-        await callback.answer("📡 Проверяю...")
-        
-        import os
+        await callback.answer("📡 Обновляю...")
         github_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
-        from signals import fetch_binance_signals, fetch_verdict, analyze_signals, build_signals_message
-        
-        binance_data = await fetch_binance_signals()
-        verdict = await fetch_verdict(github_repo)
-        signals = analyze_signals(binance_data, verdict)
-        msg = build_signals_message(signals, binance_data, verdict)
-        
-        is_enabled = await get_user_signals_status(user_id)
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔕 Выключить сигналы" if is_enabled else "🔔 Включить сигналы", 
-                                 callback_data="signals:disable" if is_enabled else "signals:enable")],
-            [InlineKeyboardButton(text="📡 Обновить", callback_data="signals:check")],
-            [InlineKeyboardButton(text="📊 Бэктест", callback_data="signals:backtest")],
-        ])
-        
-        status_text = "\n\n✅ *Сигналы включены*" if is_enabled else ""
-        
-        await callback.message.edit_text(
-            msg + status_text,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    
+        try:
+            from signals import build_markets_panel_message
+
+            full_text, _bundle = await build_markets_panel_message(github_repo)
+            safe = clean_markdown(full_text)
+            is_enabled = await get_user_signals_status(user_id)
+            status_text = (
+                "\n\n✅ *Сигналы включены* — при сильном сигнале пришлю отдельным сообщением"
+                if is_enabled
+                else (
+                    "\n\n━━━━━━━━━━━━━━━━━━━━━\n"
+                    "Нажми «Включить сигналы» — бот будет присылать при перекосе трейдеров "
+                    "или совпадении с вердиктом из DIGEST_CACHE"
+                )
+            )
+            await callback.message.edit_text(
+                safe + status_text,
+                parse_mode="Markdown",
+                reply_markup=_markets_signal_keyboard(is_enabled),
+            )
+        except Exception as e:
+            await callback.answer(f"Ошибка: {e}", show_alert=True)
+
     elif action == "backtest":
         signals_data = await get_backtest_signals()
         stats = await get_backtest_stats()
-        
+
         total = stats.get("total", 0) or 0
         wins = stats.get("wins", 0) or 0
-        losses = stats.get("losses", 0) or 0
         total_pnl = stats.get("total_pnl", 0) or 0
         avg_pnl = stats.get("avg_pnl_pct", 0) or 0
         win_rate = (wins / total * 100) if total > 0 else 0
-        
-        msg = f"📊 *БЭКТЕСТ РЕЗУЛЬТАТЫ*\n\n"
+
+        msg = "📊 *БЭКТЕСТ РЕЗУЛЬТАТЫ*\n\n"
         msg += f"Всего сделок: {total}\n"
         msg += f"Win Rate: {win_rate:.1f}%\n"
         msg += f"Total PnL: ${total_pnl:+,.2f}\n"
         msg += f"Avg PnL: {avg_pnl:+.2f}%\n\n"
         msg += "Последние сделки:\n"
-        
+
         for s in signals_data[:5]:
             symbol = s["symbol"]
             direction = s["direction"]
             pnl = s.get("pnl", 0) or 0
             emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
             msg += f"{symbol} {direction} {emoji} ${pnl:+,.0f}\n"
-        
-        await callback.message.edit_text(msg, parse_mode="Markdown")
+
+        is_enabled = await get_user_signals_status(user_id)
         await callback.message.edit_text(
-            msg + status_text,
+            msg,
             parse_mode="Markdown",
-            reply_markup=keyboard
+            reply_markup=_markets_signal_keyboard(is_enabled),
         )
     else:
         await callback.answer()
@@ -2312,7 +2221,7 @@ async def cmd_help(message: Message):
         "• `/daily` — дайджест (из кэша до суток без токенов)\n"
         "• `/daily force` — принудительно новый AI-прогон\n"
         "• `/analyze [текст]` — анализ новости\n"
-        "• `/markets` — живые цены\n"
+        "• `/markets` — живой контекст + сигналы, кнопки подписки\n"
         "• `/trackrecord` — история точности (всё)\n"
         "• `/trackrecordglobal` — Global\n"
         "• `/trackrecordrussia` — Россия Edge 🇷🇺\n"
@@ -2409,9 +2318,8 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="trackrecordglobal", description="🌍 Global прогнозы"),
         BotCommand(command="trackrecordrussia", description="🇷🇺 Россия Edge"),
         BotCommand(command="trackrecord", description="📊 Вся статистика"),
-        BotCommand(command="markets", description="Текущие цены"),
+        BotCommand(command="markets", description="Рынки + сигналы, подписка"),
         BotCommand(command="status", description="Краткий статус"),
-        BotCommand(command="signals", description="📡 Сигналы копитрейдинг"),
         BotCommand(command="tt", description="🧪 Тест"),
         BotCommand(command="signalstatus", description="📊 Статус трейдера"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),

@@ -28,6 +28,9 @@ BYBIT_URL = "https://api.bybit.com"
 
 DIGEST_CACHE_URL = "https://raw.githubusercontent.com/{repo}/main/DIGEST_CACHE.md"
 
+# Единый набор фьючерсов для UI /markets и автотрейдера (BTC/ETH/SOL/BNB)
+DEFAULT_FUTURES_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+
 # Пороги для сигналов
 PRICE_CHANGE_THRESHOLD = 2.0
 FUNDING_THRESHOLD = 0.0001
@@ -101,8 +104,10 @@ async def fetch_bybit_long_short_ratio(symbols: list[str] = ["BTCUSDT", "ETHUSDT
     return results
 
 
-async def fetch_binance_signals(symbols: list[str] = ["BTCUSDT", "ETHUSDT"]) -> dict:
+async def fetch_binance_signals(symbols: list[str] | None = None) -> dict:
     """Получает данные: Bybit (если есть ключи) + Binance (fallback)."""
+    if symbols is None:
+        symbols = list(DEFAULT_FUTURES_SYMBOLS)
     results = {}
     
     # Сначала пробуем Bybit (позиции трейдеров)
@@ -395,6 +400,46 @@ def build_signals_message(signals: list, binance_data: dict, verdict: Optional[d
     return "\n".join(lines)
 
 
+async def fetch_markets_bundle(github_repo: str | None = None) -> dict:
+    """Один набор данных: Binance/Bybit + вердикт из DIGEST_CACHE + текст сигналов.
+
+    Используется в /markets, рассылке подписчикам и автотрейдере (тот же контур, что у UI).
+    """
+    repo = github_repo or os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
+    binance_data = await fetch_binance_signals()
+    verdict = await fetch_verdict(repo)
+    sigs = analyze_signals(binance_data, verdict)
+    msg = build_signals_message(sigs, binance_data, verdict)
+    return {
+        "binance_data": binance_data,
+        "verdict": verdict,
+        "signals": sigs,
+        "signals_message": msg,
+        "github_repo": repo,
+    }
+
+
+async def build_markets_panel_message(github_repo: str | None = None) -> tuple[str, dict]:
+    """Полный текст для команды /markets: живой контекст + сигналы."""
+    from web_search import get_full_realtime_context
+
+    bundle = await fetch_markets_bundle(github_repo)
+    _, live_formatted = await get_full_realtime_context()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    header = f"📊 *РЫНКИ И СИГНАЛЫ* — {now}\n\n"
+    body = (
+        "*Живой контекст*\n"
+        f"{live_formatted}\n\n"
+        "──────────────\n\n"
+        f"{bundle['signals_message']}"
+    )
+    full = header + body
+    max_len = 3900
+    if len(full) > max_len:
+        full = full[: max_len - 24] + "\n\n_…часть текста скрыта_"
+    return full, bundle
+
+
 class SignalsSystem:
     def __init__(self, bot, github_repo: str):
         self.bot = bot
@@ -406,19 +451,14 @@ class SignalsSystem:
         if not subscribers:
             return 0
         
-        # Получаем данные
-        binance_data = await fetch_binance_signals()
-        verdict = await fetch_verdict(self.github_repo)
-        
+        bundle = await fetch_markets_bundle(self.github_repo)
+        binance_data = bundle["binance_data"]
+
         if not binance_data:
             logger.warning("No Binance data received")
             return 0
-        
-        # Анализируем
-        signals = analyze_signals(binance_data, verdict)
-        
-        # Формируем сообщение
-        message = build_signals_message(signals, binance_data, verdict)
+
+        message = bundle["signals_message"]
         
         # Отправляем
         sent = 0
