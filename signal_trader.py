@@ -334,12 +334,20 @@ def _append_signal_follow_candidates(
     consensus: dict,
     prices: dict,
     signal_bias: dict,
+    *,
+    open_positions: list[dict] | None = None,
 ) -> dict:
     if not _signal_follow_active(
         consensus.get("consensus_verdict", "NEUTRAL"),
         consensus.get("candidates") or [],
     ):
         return consensus
+
+    # Build set of assets we currently hold (open BUY positions)
+    held_symbols = set()
+    for pos in (open_positions or []):
+        if (pos.get("direction") or "").upper() == "BUY":
+            held_symbols.add(pos["symbol"])
 
     existing = {c["symbol"] for c in consensus.get("candidates", [])}
     add = []
@@ -349,18 +357,32 @@ def _append_signal_follow_candidates(
         b = signal_bias.get(symbol) or {}
         direction = (b.get("direction") or "NEUTRAL").upper()
         score = float(b.get("score") or 0.0)
-        # ONLY BUY (LONG) — no shorts for paper trading
-        if direction != "LONG" or abs(score) < AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE:
+        if direction not in ("LONG", "SHORT") or abs(score) < AUTOTRADE_NEUTRAL_MIN_BIAS_SCORE:
             continue
         price = float(prices.get(symbol) or 0)
         if price <= 0:
             continue
-        trade_dir = "BUY"
-        tp = AUTOTRADE_NEUTRAL_TP_PCT
-        sl = AUTOTRADE_NEUTRAL_SL_PCT
-        entry = price
-        target = price * (1 + tp)
-        stop = price * (1 - sl)
+
+        if direction == "LONG":
+            # BUY — always allowed
+            trade_dir = "BUY"
+            tp = AUTOTRADE_NEUTRAL_TP_PCT
+            sl = AUTOTRADE_NEUTRAL_SL_PCT
+            entry = price
+            target = price * (1 + tp)
+            stop = price * (1 - sl)
+        else:
+            # SHORT — only if we hold this asset
+            if symbol not in held_symbols:
+                logger.debug(f"SHORT signal for {symbol} but not held — skipping")
+                continue
+            trade_dir = "SELL"
+            tp = AUTOTRADE_NEUTRAL_TP_PCT
+            sl = AUTOTRADE_NEUTRAL_SL_PCT
+            entry = price
+            target = price * (1 - tp)
+            stop = price * (1 + sl)
+
         digest_score = 12.0 + min(abs(score), 35.0) * 0.35
         add.append({
             "symbol": symbol,
@@ -730,7 +752,7 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         markets_bundle=markets_bundle,
     )
     if use_follow:
-        consensus = _append_signal_follow_candidates(consensus, prices, signal_bias)
+        consensus = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
 
     for position in open_positions:
         closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
@@ -934,7 +956,7 @@ async def get_signal_trader_status() -> dict:
     if symbols:
         prices = await fetch_current_prices(symbols)
         signal_bias = await _fetch_crypto_signal_bias(symbols, cv_status, neutral_follow=use_follow_status)
-        consensus_display = _append_signal_follow_candidates(consensus, prices, signal_bias)
+        consensus_display = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
         if consensus_display.get("candidates"):
             candidate_rows = rank_trade_candidates(consensus_display, prices, signal_bias)[:3]
 
