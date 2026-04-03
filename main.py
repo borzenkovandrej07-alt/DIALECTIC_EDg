@@ -638,6 +638,17 @@ def format_signal_trader_status_message(status: dict) -> str:
     msg += f"Автоторг (фича): {'✅' if status.get('autotrade_feature_on') else '⏸ env FEATURE_AUTOTRADE=0'}\n"
     msg += f"Bias Binance/Bybit: {'✅' if status.get('binance_signals_enabled') else '⏸ DATA_SOURCE…=0'}\n"
     msg += f"💵 Баланс: ${status['capital']:,.2f}\n"
+
+    # Show capital in positions
+    active_positions = status.get("active_positions", []) or []
+    capital_in_positions = 0.0
+    for pos in active_positions:
+        entry = pos.get("entry_price", 0) or 0
+        qty = pos.get("quantity", 0) or 0
+        capital_in_positions += entry * qty
+    if capital_in_positions > 0:
+        free = status['capital'] - capital_in_positions
+        msg += f"📦 В позициях: ${capital_in_positions:,.2f} | Свободно: ${free:,.2f}\n"
     msg += f"🎯 Консенсус 2-3 дайджестов: *{status.get('consensus_verdict', 'NEUTRAL')}*\n"
     if status.get("signal_follow_active"):
         msg += "📡 _Режим:_ NEUTRAL или нет планов из дайджеста — кандидаты по рыночным сигналам (как в `/markets`) + цены.\n"
@@ -666,7 +677,9 @@ def format_signal_trader_status_message(status: dict) -> str:
     if active_positions:
         msg += "\n📍 *Открытая позиция:*\n"
         for pos in active_positions[:1]:
-            msg += f"• {pos['symbol']} {pos['direction']} @ ${pos['entry_price']:,.2f}\n"
+            qty = pos.get("quantity", 0)
+            qty_str = f" ({qty:.6f} шт)" if qty > 0 else ""
+            msg += f"• {pos['symbol']} {pos['direction']} @ ${pos['entry_price']:,.2f}{qty_str}\n"
             if pos.get("target"):
                 msg += f"  тейк ${pos['target']:,.2f}"
                 if pos.get("stop"):

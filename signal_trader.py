@@ -969,6 +969,7 @@ async def get_signal_trader_status() -> dict:
             "symbol": position["symbol"],
             "direction": position["direction"],
             "entry_price": float(position.get("entry_price") or 0.0),
+            "quantity": float(position.get("quantity") or 0.0),
             "target": float(meta.get("target") or 0.0),
             "stop": float(meta.get("stop") or 0.0),
             "support": int(meta.get("support") or 0),
