@@ -765,7 +765,7 @@ async def get_backtest_signals() -> list[dict]:
             SELECT * FROM backtest_signals ORDER BY created_at DESC
         """) as cursor:
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            return [dict(row._asdict()) for row in rows]
 
 
 async def get_backtest_stats() -> dict:
@@ -977,7 +977,7 @@ async def get_recent_trade_decisions(limit: int = 5) -> list[dict]:
             rows = await cursor.fetchall()
             out = []
             for row in rows:
-                item = dict(row)
+                item = dict(row._asdict())
                 try:
                     item["payload"] = json.loads(item.get("payload") or "{}")
                 except Exception:
