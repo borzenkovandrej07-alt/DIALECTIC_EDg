@@ -976,6 +976,43 @@ async def get_signal_trader_status() -> dict:
         except Exception as e:
             logger.debug("Failed to load session state from GitHub: %s")
 
+    # Also load open positions from GitHub if local DB is empty
+    try:
+        from github_export import _github_get, BACKTEST_FILE
+        backtest_content, _ = await _github_get(BACKTEST_FILE)
+        if backtest_content:
+            import re
+            open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
+            if open_section:
+                lines = open_section.group(1).strip().split('\n')
+                for line in lines:
+                    if line.strip().startswith('- **'):
+                        match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)', line)
+                        if match:
+                            symbol, direction, entry = match.groups()
+                            entry = float(entry.replace(',', ''))
+                            
+                            target_match = re.search(r'тейк\s*\$?([\d,\.]+)', line)
+                            stop_match = re.search(r'стоп\s*\$?([\d,\.]+)', line)
+                            target = float(target_match.group(1).replace(',', '')) if target_match else 0.0
+                            stop = float(stop_match.group(1).replace(',', '')) if stop_match else 0.0
+                            
+                            import json
+                            trade_log = json.dumps({"target": target, "stop": stop}, ensure_ascii=False)
+                            
+                            signals.append({
+                                "id": 0,
+                                "symbol": symbol,
+                                "direction": direction,
+                                "entry_price": entry,
+                                "quantity": 0.0,
+                                "status": "open",
+                                "trade_log": trade_log,
+                            })
+                            logger.info(f"Loaded open position from GitHub: {symbol} {direction} @ ${entry} target=${target} stop=${stop}")
+    except Exception as e:
+        logger.debug(f"Failed to load positions from GitHub: {e}")
+
     config = await get_backtest_config()
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
