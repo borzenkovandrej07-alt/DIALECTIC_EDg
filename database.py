@@ -680,11 +680,7 @@ async def add_backtest_signal(
         """, (symbol, direction, entry_price, source, notes[:500], quantity, trade_log[:4000]))
 
         # Update capital
-        await db.execute("UPDATE backtest_config SET capital = ? WHERE id = 1", (new_capital,))
-
-        await db.execute("""
-            UPDATE backtest_config SET last_updated = datetime('now') WHERE id = 1
-        """)
+        await db.execute("UPDATE backtest_config SET capital = ?, last_updated = datetime('now') WHERE id = 1", (new_capital,))
         await db.commit()
 
     return {

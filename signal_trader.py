@@ -747,12 +747,15 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     markets_bundle = await fetch_markets_bundle(gh_repo)
 
     prices = await fetch_current_prices(list(symbols))
+    logger.info(f"check_and_trade: prices fetched: {prices}")
+
     signal_bias = await _fetch_crypto_signal_bias(
         list(symbols),
         cv,
         neutral_follow=use_follow,
         markets_bundle=markets_bundle,
     )
+    logger.info(f"check_and_trade: signal_bias: {signal_bias}")
     if use_follow:
         consensus = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
 
@@ -775,7 +778,9 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         return events
 
     best = ranked[0]
+    logger.info(f"check_and_trade: best candidate: {best.get('symbol')} {best.get('direction')} ready={best.get('ready')} total_score={best.get('total_score')}")
     if not best.get("ready"):
+        logger.info(f"check_and_trade: best candidate NOT ready, reason: {best.get('blocked_reason')}, score: {best.get('total_score')}, threshold: {SIGNAL_FOLLOW_SCORE_THRESHOLD if best.get('signal_follow_only') else OPEN_SCORE_THRESHOLD}")
         if LOG_AUTOTRADE_SKIPS:
             await append_trade_decision_log(
                 "autotrade_skip_not_ready",
