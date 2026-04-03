@@ -720,7 +720,7 @@ async def close_backtest_signal(signal_id: int, exit_price: float, reason: str =
 
         async with db.execute("SELECT capital FROM backtest_config WHERE id = 1") as cursor:
             config_row = await cursor.fetchone()
-            capital = float((config_row["capital"] if config_row else 100.0) or 100.0)
+            capital = float(config_row["capital"] if config_row and config_row["capital"] is not None else 100.0)
 
         if signal["status"] == "closed":
             return {
@@ -816,8 +816,8 @@ async def get_backtest_config() -> dict:
             if not row:
                 return {"capital": 100.0, "enabled": 1}
             d = _row_to_dict(row)
-            d["capital"] = d.get("capital") or 100.0
-            d["enabled"] = d.get("enabled") or 1
+            d["capital"] = d.get("capital") if d.get("capital") is not None else 100.0
+            d["enabled"] = d.get("enabled") if d.get("enabled") is not None else 1
             return d
 
 
