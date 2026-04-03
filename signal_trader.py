@@ -627,22 +627,6 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
             reason = "Stop loss hit"
 
     if not reason:
-        signal = signal_bias.get(symbol, {})
-        signal_score = float(signal.get("score") or 0.0)
-        signal_direction = signal.get("direction", "NEUTRAL")
-        if direction == "BUY" and signal_direction == "SHORT" and abs(signal_score) >= REVERSAL_SCORE_THRESHOLD:
-            reason = "Signal reversal"
-        elif direction == "SELL" and signal_direction == "LONG" and abs(signal_score) >= REVERSAL_SCORE_THRESHOLD:
-            reason = "Signal reversal"
-
-    if not reason:
-        consensus_verdict = consensus.get("consensus_verdict", "NEUTRAL")
-        if direction == "BUY" and consensus_verdict == "SELL":
-            reason = "Digest consensus flipped bearish"
-        elif direction == "SELL" and consensus_verdict == "BUY":
-            reason = "Digest consensus flipped bullish"
-
-    if not reason:
         return None
 
     result = await close_backtest_signal(position["id"], current_price, reason=reason)
@@ -744,7 +728,6 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     # Check if current session should be closed
     if session_manager.should_close_session():
         closed_session = session_manager.close_session()
-        # Reset capital for new session
         await update_backtest_capital(SESSION_START_CAPITAL)
         session_manager.update_capital(SESSION_START_CAPITAL)
         events.append({
@@ -753,11 +736,7 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             "pnl": closed_session["pnl"],
             "lesson": closed_session["lesson"],
         })
-        logger.info(
-            f"🏁 Session #{closed_session['session_id']} closed. "
-            f"PnL: ${closed_session['pnl']:+.2f}. New session started."
-        )
-        # Export updated sessions to GitHub
+        logger.info(f"Session #{closed_session['session_id']} closed. PnL: ${closed_session['pnl']:+.2f}")
         try:
             await _export_backtest_snapshot()
         except Exception:
@@ -767,17 +746,15 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     if not config.get("enabled", 1):
         return events
 
-    # Update session manager with current capital
     current_capital = config.get("capital", 100.0)
     session_manager.update_capital(current_capital)
 
-    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
-
+    # Step 1: Get current open positions
     open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
 
-    # No digest at all — trade on market signals
+    # Step 2: Build consensus and signals
+    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
     if not contexts:
-        logger.info("No digest contexts — trading on market signals only")
         consensus = {
             "consensus_verdict": "NEUTRAL",
             "verdict_score": 0,
@@ -786,9 +763,13 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         }
     else:
         consensus = build_digest_consensus(contexts)
-        # If digest has no candidates — fall back to signals
         if not consensus.get("candidates"):
-            logger.info("Digest has no trade candidates — falling back to market signals")
+            consensus = {
+                "consensus_verdict": "NEUTRAL",
+                "verdict_score": 0,
+                "contexts": [],
+                "candidates": [],
+            }
 
     cv = consensus.get("consensus_verdict", "NEUTRAL")
     use_follow = _signal_follow_active(cv, consensus.get("candidates") or [])
@@ -799,121 +780,85 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         symbols |= set(CRYPTO_SIGNAL_SYMBOLS)
 
     from signals import fetch_markets_bundle
-
     gh_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
     markets_bundle = await fetch_markets_bundle(gh_repo)
 
     prices = await fetch_current_prices(list(symbols))
-    logger.info(f"check_and_trade: prices fetched: {prices}")
-
     signal_bias = await _fetch_crypto_signal_bias(
-        list(symbols),
-        cv,
-        neutral_follow=use_follow,
-        markets_bundle=markets_bundle,
+        list(symbols), cv, neutral_follow=use_follow, markets_bundle=markets_bundle,
     )
-    logger.info(f"check_and_trade: signal_bias: {signal_bias}")
     if use_follow:
         consensus = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
 
-    # Track newly opened positions to avoid closing them in the same cycle
-    newly_opened_ids = set()
-
+    # Step 3: Close positions that hit target/stop (NOT based on signal reversal)
     for position in open_positions:
-        # Skip newly opened positions — give them at least 1 cycle to breathe
-        if position.get("id") in newly_opened_ids:
-            continue
         closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
         if closed_event:
             events.append(closed_event)
             await _notify_admins(bot, admin_ids, closed_event)
 
-    remaining_open = [row for row in await get_backtest_signals() if row.get("status") == "open"]
-    if len(remaining_open) >= 5:
-        logger.info(f"check_and_trade: {len(remaining_open)} open positions (max 5), skipping new trades")
+    # Refresh open positions after closes
+    open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+    if len(open_positions) >= 5:
         if events:
             await _export_backtest_snapshot()
         return events
 
+    # Step 4: Open new positions (up to 5 total)
     ranked = rank_trade_candidates(consensus, prices, signal_bias)
-    if not ranked:
-        if events:
-            await _export_backtest_snapshot()
-        return events
+    held_symbols = {p["symbol"] for p in open_positions}
 
-    # Try to open positions for top candidates (up to 5 total)
     for candidate in ranked:
-        # Re-check open positions count
-        current_open = [row for row in await get_backtest_signals() if row.get("status") == "open"]
-        if len(current_open) >= 5:
-            logger.info(f"check_and_trade: reached 5 open positions limit")
+        if len(open_positions) >= 5:
             break
-
         if not candidate.get("ready"):
             continue
-
-        # Skip if we already hold this symbol (including newly opened)
-        held_symbols = {p["symbol"] for p in current_open}
         if candidate["symbol"] in held_symbols:
             continue
 
-        best = candidate
-        logger.info(f"check_and_trade: attempting to open {best.get('symbol')} {best.get('direction')} score={best.get('total_score')}")
-
-        support = best.get("support") or 0
-        notes = (
-            f"Signal-follow (market) | {best['symbol']} {best['direction']} | "
-            f"sig {best['signal_direction']}"
-            if best.get("signal_follow_only")
-            else (
-                f"Digest consensus {consensus.get('consensus_verdict')} | "
-                f"support {support} | signal {best['signal_direction']}"
-            )
-        )
+        support = candidate.get("support") or 0
+        notes = f"Signal-follow | {candidate['symbol']} {candidate['direction']}"
         trade_meta = json.dumps({
-            "target": best.get("target") or 0.0,
-            "stop": best.get("stop") or 0.0,
-            "entry_plan": best.get("entry") or 0.0,
+            "target": candidate.get("target") or 0.0,
+            "stop": candidate.get("stop") or 0.0,
+            "entry_plan": candidate.get("entry") or 0.0,
             "support": support,
-            "context_dates": best.get("context_dates") or [],
-            "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
-            "signal_direction": best.get("signal_direction", "NEUTRAL"),
-            "signal_reasons": best.get("signal_reasons", []),
+            "consensus_verdict": cv,
+            "signal_direction": candidate.get("signal_direction", "NEUTRAL"),
         }, ensure_ascii=False)
 
         try:
             result = await add_backtest_signal(
-                symbol=best["symbol"],
-                direction=best["direction"],
-                entry_price=float(best["current_price"]),
+                symbol=candidate["symbol"],
+                direction=candidate["direction"],
+                entry_price=float(candidate["current_price"]),
                 source="auto_trader",
                 quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 0.15),
                 notes=notes,
                 trade_log=trade_meta,
             )
-
             if result.get("status") == "opened":
-                sid = result.get("signal_id")
-                newly_opened_ids.add(sid)
                 events.append({
                     "event": "opened",
-                    "symbol": best["symbol"],
-                    "direction": best["direction"],
-                    "entry_price": float(best["current_price"]),
-                    "target": float(best.get("target") or 0.0),
-                    "stop": float(best.get("stop") or 0.0),
+                    "symbol": candidate["symbol"],
+                    "direction": candidate["direction"],
+                    "entry_price": float(candidate["current_price"]),
+                    "target": float(candidate.get("target") or 0.0),
+                    "stop": float(candidate.get("stop") or 0.0),
                     "support": support,
-                    "score": float(best.get("total_score") or 0.0),
-                    "signal_id": sid,
+                    "score": float(candidate.get("total_score") or 0.0),
                 })
                 await _notify_admins(bot, admin_ids, events[-1])
-                logger.info(f"Opened {best['symbol']} {best['direction']} at {best['current_price']}")
-            elif result.get("status") in ("max_positions", "symbol_exists"):
-                logger.info(f"Skipping {best['symbol']}: {result.get('message')}")
-                break
+                held_symbols.add(candidate["symbol"])
+                open_positions.append(result)
+                logger.info(f"Opened {candidate['symbol']} {candidate['direction']} at {candidate['current_price']}")
         except Exception as e:
-            logger.error(f"Failed to open position for {best['symbol']}: {e}")
+            logger.error(f"Failed to open {candidate['symbol']}: {e}")
             continue
+
+    if events:
+        await _export_backtest_snapshot()
+    return events
 
     if events:
         await _export_backtest_snapshot()
