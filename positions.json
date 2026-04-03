@@ -1,0 +1,21 @@
+{
+  "capital": 72.25,
+  "positions": [
+    {
+      "symbol": "BNB",
+      "direction": "BUY",
+      "entry_price": 584.43,
+      "quantity": 0.025666,
+      "target": 607.81,
+      "stop": 572.74
+    },
+    {
+      "symbol": "ETH",
+      "direction": "BUY",
+      "entry_price": 2048.14,
+      "quantity": 0.006225,
+      "target": 2130.07,
+      "stop": 2007.18
+    }
+  ]
+}
