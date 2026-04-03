@@ -315,20 +315,63 @@ async def _fetch_crypto_signal_bias(
             _signal_cache_meta = meta_key
         return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
     except Exception as e:
-        logger.warning(f"Signal bias fetch error: {e}")
-        # Fallback: create basic bias from price changes if Binance fails
+        logger.warning(f"Binance signal bias fetch error: {e}")
+        # Fallback: try multiple sources
         bias = {}
-        for symbol in crypto_symbols:
-            price = prices.get(symbol) or 0
-            if price > 0:
-                bias[symbol] = {
-                    "symbol": symbol,
-                    "score": -15.0,  # Default SHORT signal (price falling = buy opportunity)
-                    "direction": "SHORT",
-                    "strength": 15.0,
-                    "reasons": ["Binance fallback — price falling"],
-                    "last_price": price,
-                }
+        try:
+            from signals import fetch_binance_signals
+            raw = await fetch_binance_signals([f"{symbol}USDT" for symbol in crypto_symbols])
+            if raw:
+                from signals import build_signal_bias_map
+                bias = build_signal_bias_map(raw)
+        except Exception as e2:
+            logger.warning(f"Bybit/Spot fallback also failed: {e2}")
+
+        # Final fallback: CoinGecko prices
+        if not bias:
+            try:
+                import aiohttp
+                ids = []
+                for s in crypto_symbols:
+                    cg_id = {"BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin", "SOL": "solana"}.get(s)
+                    if cg_id:
+                        ids.append(cg_id)
+                if ids:
+                    url = f"https://api.coingecko.com/api/v3/simple/price"
+                    params = {"ids": ",".join(ids), "vs_currencies": "usd", "include_24hr_change": "true"}
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            data = await resp.json()
+                            for s in crypto_symbols:
+                                cg_id = {"BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin", "SOL": "solana"}.get(s)
+                                if cg_id and cg_id in data:
+                                    change = data[cg_id].get("usd_24h_change", 0)
+                                    price = data[cg_id].get("usd", 0)
+                                    bias[s] = {
+                                        "symbol": s,
+                                        "score": -abs(change) if change < 0 else abs(change),
+                                        "direction": "SHORT" if change < 0 else "LONG",
+                                        "strength": abs(change),
+                                        "reasons": [f"CoinGecko 24h {change:+.2f}%"],
+                                        "last_price": price,
+                                    }
+            except Exception as e3:
+                logger.warning(f"CoinGecko fallback also failed: {e3}")
+
+        # Last resort: assume SHORT (price falling = buy opportunity)
+        if not bias:
+            for symbol in crypto_symbols:
+                price = prices.get(symbol) or 0
+                if price > 0:
+                    bias[symbol] = {
+                        "symbol": symbol,
+                        "score": -15.0,
+                        "direction": "SHORT",
+                        "strength": 15.0,
+                        "reasons": ["Fallback — price falling"],
+                        "last_price": price,
+                    }
+
         return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
 
 

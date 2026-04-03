@@ -25,7 +25,16 @@ logger = logging.getLogger(__name__)
 # API URLs
 BINANCE_FUTURES_URL = "https://fapi.binance.com"
 BINANCE_SPOT_URL = "https://api.binance.com"
+BYBIT_URL = "https://api.bybit.com"
 COINGECKO_URL = "https://api.coingecko.com/api/v3"
+
+# CoinGecko ID для криптовалют
+COINGECKO_IDS = {
+    "BTCUSDT": "bitcoin",
+    "ETHUSDT": "ethereum",
+    "BNBUSDT": "binancecoin",
+    "SOLUSDT": "solana",
+}
 BYBIT_URL = "https://api.bybit.com"
 
 DIGEST_CACHE_URL = "https://raw.githubusercontent.com/{repo}/main/DIGEST_CACHE.md"
