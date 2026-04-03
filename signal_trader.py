@@ -980,7 +980,34 @@ async def get_signal_trader_status() -> dict:
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
     open_positions = [row for row in signals if row.get("status") == "open"]
-    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=CONTEXT_MAX_AGE_HOURS)
+    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
+
+    if not contexts:
+        try:
+            from github_export import _github_get, DIGEST_CACHE_FILE
+            digest_content, _ = await _github_get(DIGEST_CACHE_FILE)
+            if digest_content:
+                import re
+                pattern = r'## 📊 (\d{2}\.\d{2}\.\d{4})'
+                matches = list(re.finditer(pattern, digest_content))
+                for match in matches:
+                    date_str = match.group(1)
+                    verdict = "NEUTRAL"
+                    snippet_start = digest_content.find(f"## 📊 {date_str}")
+                    if snippet_start != -1:
+                        snippet = digest_content[snippet_start:snippet_start+800].upper()
+                        if "БЫЧ" in snippet or "BUY" in snippet or "LONG" in snippet:
+                            verdict = "BUY"
+                        elif "МЕДВ" in snippet or "SELL" in snippet or "SHORT" in snippet:
+                            verdict = "SELL"
+                    contexts.append({
+                        "created_at": date_str,
+                        "verdict": verdict,
+                        "symbols": [],
+                    })
+                logger.info(f"Loaded {len(contexts)} contexts from GitHub DIGEST_CACHE.md")
+        except Exception as e:
+            logger.debug(f"Failed to load from GitHub: {e}")
     latest_context = contexts[0] if contexts else None
     consensus = build_digest_consensus(contexts) if contexts else {
         "consensus_verdict": "NEUTRAL",
