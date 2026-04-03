@@ -645,7 +645,7 @@ async def add_backtest_signal(
         async with db.execute("SELECT capital FROM backtest_config WHERE id = 1") as cursor:
             config_row = await cursor.fetchone()
             if config_row:
-                capital = float(config_row.get("capital", 100.0) or 100.0)
+                capital = float(config_row["capital"] if config_row["capital"] is not None else 100.0)
             else:
                 await db.execute("INSERT INTO backtest_config (capital, enabled) VALUES (100.0, 1)")
                 capital = 100.0
