@@ -846,16 +846,30 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
                     "signal_direction": candidate.get("signal_direction", "NEUTRAL"),
                     "capital": float(result.get("capital_after", 0.0)),
                 })
-                try:
-                    await _notify_admins(bot, admin_ids, events[-1])
-                except Exception:
-                    pass
                 held_symbols.add(candidate["symbol"])
                 open_positions.append(result)
                 logger.info(f"Opened {candidate['symbol']} {candidate['direction']} at {candidate['current_price']}")
         except Exception as e:
             logger.error(f"Failed to open {candidate['symbol']}: {e}")
             continue
+
+    # Send one summary notification if any positions were opened
+    opened_events = [e for e in events if e.get("event") == "opened"]
+    if opened_events and bot and admin_ids:
+        lines = ["🎯 *НОВЫЕ ПОЗИЦИИ*\n"]
+        for ev in opened_events:
+            lines.append(f"{'🟢' if ev['direction'] == 'BUY' else '🔴'} *{ev['symbol']}* {ev['direction']}")
+            lines.append(f"  Вход: ${ev['entry_price']:,.2f}")
+            lines.append(f"  Тейк: ${ev['target']:,.2f} | Стоп: ${ev['stop']:,.2f}")
+            lines.append(f"  Score: {ev['score']:.1f} | Сигнал: {ev.get('signal_direction', 'NEUTRAL')}")
+            lines.append("")
+        lines.append(f"💵 Баланс: ${opened_events[-1]['capital']:,.2f}")
+        msg = "\n".join(lines)
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(admin_id, msg, parse_mode="Markdown")
+            except Exception:
+                pass
 
     return events
 
