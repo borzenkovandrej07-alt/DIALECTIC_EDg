@@ -118,7 +118,7 @@ class PriceFetcher:
         return None
     
     async def _fetch_historical_from_yahoo(self, symbol: str, date: str) -> Optional[dict]:
-        """Скачать историческую цену с Yahoo."""
+        """Скачать историческую цену с Yahoo или CoinGecko."""
         yahoo_map = {
             "VIX": "^VIX",
             "S&P": "^GSPC", "SPX": "^GSPC",
@@ -127,13 +127,31 @@ class PriceFetcher:
             "WTI": "CL=F", "CL": "CL=F", "OIL": "CL=F",
             "НЕФТ": "CL=F", "НЕФТЬ": "CL=F",
         }
+        coingecko_map = {
+            "BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin", "SOL": "solana",
+        }
         
         ticker = yahoo_map.get(symbol)
-        if not ticker:
-            return None
+        cg_id = coingecko_map.get(symbol)
         
         try:
             date_obj = datetime.strptime(date, "%d.%m.%Y")
+            
+            # CoinGecko для крипты
+            if cg_id:
+                async with aiohttp.ClientSession() as session:
+                    ts = int(date_obj.timestamp())
+                    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/history?date={date_obj.strftime('%d-%m-%Y')}"
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            price = data.get("market_data", {}).get("current_price", {}).get("usd")
+                            if price:
+                                return {"price": price, "change": 0}
+            
+            # Yahoo для остального
+            if not ticker:
+                return None
             
             async with aiohttp.ClientSession() as session:
                 for offset in [0, 1, -1]:
@@ -168,7 +186,7 @@ class PriceFetcher:
         if symbol in self.cache:
             return self.cache[symbol]
         
-        binance_map = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
+        binance_map = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "BNB": "BNBUSDT", "SOL": "SOLUSDT"}
         yahoo_map = {
             "VIX": "^VIX", "S&P": "^GSPC", "SPX": "^GSPC",
             "NDX": "^NDX", "GOLD": "GC=F", "XAU": "GC=F",
@@ -251,11 +269,17 @@ class DigestParser:
             (r'(?:Нефть|WTI)\s*[:=]*\s*\$?(\d+\.?\d*)', "Нефть"),
             (r'(?:Gold|Золото|XAU)\s*[:=]*\s*\$?(\d+\.?\d*)', "Gold"),
             (r'Fear\s*&\s*Greed\s*[:=]*\s*(\d+)', "Fear&Greed"),
+            (r'BTC\s*[:$=]\s*([\d,]+\.?\d*)', "BTC"),
+            (r'ETH\s*[:$=]\s*([\d,]+\.?\d*)', "ETH"),
+            (r'BNB\s*[:$=]\s*([\d,]+\.?\d*)', "BNB"),
+            (r'SOL\s*[:$=]\s*([\d,]+\.?\d*)', "SOL"),
         ]
         
         direction_patterns = [
             (r'BTC\s*[🐻🐂🟡→]*\s*(МЕДВЕЖ[ИЙ]|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT)', "BTC"),
             (r'ETH\s*[🐻🐂🟡→]*\s*(МЕДВЕЖ[ИЙ]|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT)', "ETH"),
+            (r'BNB\s*[🐻🐂🟡→]*\s*(МЕДВЕЖ[ИЙ]|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT)', "BNB"),
+            (r'SOL\s*[🐻🐂🟡→]*\s*(МЕДВЕЖ[ИЙ]|BEARISH|BULLISH|быч[ий]|медвеж[ий]|NEUTRAL|CASH|LONG|SHORT)', "SOL"),
         ]
         
         seen = set()
