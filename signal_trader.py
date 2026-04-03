@@ -645,6 +645,12 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     })
     session_manager.update_capital(float(result.get("new_capital") or 0.0))
 
+    # ФИХ: сразу пишем в BACKTEST.md после каждого закрытия
+    try:
+        await _export_backtest_snapshot()
+    except Exception as _e:
+        logger.warning("export after close error: %s", _e)
+
     return {
         "event": "closed",
         "symbol": symbol,
@@ -703,7 +709,13 @@ async def _close_on_signal_reversal(position: dict, prices: dict, signal_bias: d
         "reason": reason,
     })
     session_manager.update_capital(float(result.get("new_capital") or 0.0))
-    
+
+    # ФИХ: сразу пишем в BACKTEST.md после закрытия по сигналу разворота
+    try:
+        await _export_backtest_snapshot()
+    except Exception as _e:
+        logger.warning("export after reversal close error: %s", _e)
+
     return {
         "event": "closed",
         "symbol": symbol,
@@ -963,165 +975,89 @@ async def run_signal_trader(bot, admin_ids: list[int]):
 
 async def get_signal_trader_status() -> dict:
     """Return a richer status payload for /signalstatus."""
-    # Load fresh state from GitHub BACKTEST.md
-    if not session_manager._loaded:
-        try:
-            from github_export import _github_get, BACKTEST_FILE
-            backtest_content, _ = await _github_get(BACKTEST_FILE)
-            if backtest_content:
-                session_manager._load_from_backtest(backtest_content)
-                # Also sync to local DB
-                from database import update_backtest_capital
-                await update_backtest_capital(session_manager.current_session.capital)
-        except Exception as e:
-            logger.debug("Failed to load session state from GitHub: %s")
-
-    # Also load open positions from GitHub if local DB is empty
-    try:
-        from github_export import _github_get, BACKTEST_FILE
-        backtest_content, _ = await _github_get(BACKTEST_FILE)
-        if backtest_content:
-            import re
-            
-            # Parse capital
-            capital_match = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
-            github_capital = 100.0
-            if capital_match:
-                github_capital = float(capital_match.group(1).replace(',', ''))
-                logger.info(f"GitHub capital: ${github_capital}")
-            
-            # Use GitHub capital as default, override local config
-            if github_capital > 0:
-                config["capital"] = github_capital
-            
-            # Parse open positions - format: - **BNB** BUY @ $584.95 (qty: 0.0256) — 2026-04-03
-            open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
-            if open_section:
-                lines = open_section.group(1).strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line.startswith('- **'):
-                        continue
-                    # **BNB** BUY @ $584.95 (qty: 0.0256) — 2026-04-03
-                    match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                    if match:
-                        symbol, direction, entry, qty = match.groups()
-                        entry = float(entry.replace(',', ''))
-                        qty = float(qty)
-                        
-                        # Try to find target/stop - not always present in BACKTEST.md
-                        # Use sensible defaults if not found
-                        target = entry * 1.04
-                        stop = entry * 0.98
-                        
-                        trade_log = json.dumps({
-                            "target": target, 
-                            "stop": stop,
-                            "entry_plan": entry,
-                        }, ensure_ascii=False)
-                        
-                        signals.append({
-                            "id": 0,
-                            "symbol": symbol,
-                            "direction": direction,
-                            "entry_price": entry,
-                            "quantity": qty,
-                            "status": "open",
-                            "trade_log": trade_log,
-                        })
-                        logger.info(f"Loaded open position from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
-    except Exception as e:
-        logger.debug(f"Failed to load positions from GitHub: {e}")
-
+    # ФИХ: сначала грузим из БД, потом перезаписываем с GitHub
     config = await get_backtest_config()
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
-    
-    # Load positions from GitHub BACKTEST.md
+
+    # Загружаем состояние из GitHub BACKTEST.md (надёжнее SQLite на Railway)
     try:
         from github_export import _github_get, BACKTEST_FILE
         backtest_content, _ = await _github_get(BACKTEST_FILE)
-        logger.info(f"BACKTEST.md length: {len(backtest_content) if backtest_content else 0}")
         if backtest_content:
             import re
-            
-            # Parse capital
+
+            # Капитал
             cap_m = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
             if cap_m:
                 config["capital"] = float(cap_m.group(1).replace(',', ''))
-                logger.info(f"Capital from GitHub: ${config['capital']}")
-            
-            # Find open positions section
+
+            # Открытые позиции из BACKTEST.md (source of truth после редеплоя)
             idx = backtest_content.find('Открытые позиции')
-            logger.info(f"Index of 'Открытые позиции': {idx}")
             if idx != -1:
                 section = backtest_content[idx:]
-                next_header = section.find('\n## ', 10)
-                if next_header != -1:
-                    section = section[:next_header]
-                
-                logger.info(f"Section content: {repr(section[:500])}")
-                
-                signals = [] # Reset signals to use GitHub data
+                next_h = section.find('\n## ', 10)
+                section = section[:next_h] if next_h != -1 else section
+
+                gh_signals = []
                 for line in section.split('\n'):
                     if '**' in line and 'qty' in line:
-                         m = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\s*\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                         logger.info(f"Line: {repr(line)}, Match: {m}")
-                         if m:
-                             sym, dir, entry, qty = m.groups()
-                             entry = float(entry.replace(',', ''))
-                             qty = float(qty)
-                             signals.append({
-                                 "id": 0,
-                                 "symbol": sym,
-                                 "direction": dir,
-                                 "entry_price": entry,
-                                 "quantity": qty,
-                                  "status": "open",
-                                  "trade_log": json.dumps({"target": entry*1.04, "stop": entry*0.98}),
-                              })
-                             logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
-                logger.info(f"Total from GitHub: {len(signals)}")
-    except Exception as e:
-        logger.warning(f"GitHub load error: {e}", exc_info=True)
-    
-    open_positions = [row for row in signals if row.get("status") == "open"]
-    
-    open_positions = [row for row in signals if row.get("status") == "open"]
-    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
+                        m = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\s*\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                        if m:
+                            sym, direction, entry_s, qty_s = m.groups()
+                            entry = float(entry_s.replace(',', ''))
+                            qty = float(qty_s)
+                            # ФИХ: правильные target/stop из строки (если записаны) иначе defaults
+                            tp_m = re.search(r'tp:\s*\$([\d,\.]+)', line)
+                            sl_m = re.search(r'sl:\s*\$([\d,\.]+)', line)
+                            target = float(tp_m.group(1).replace(',','')) if tp_m else entry * 1.04
+                            stop   = float(sl_m.group(1).replace(',','')) if sl_m else entry * 0.98
+                            gh_signals.append({
+                                "id": 0,
+                                "symbol": sym,
+                                "direction": direction,
+                                "entry_price": entry,
+                                "quantity": qty,
+                                "status": "open",
+                                "trade_log": json.dumps({"target": target, "stop": stop, "entry_plan": entry}),
+                                "created_at": "",
+                                "notes": "",
+                            })
+                if gh_signals:
+                    signals = gh_signals  # используем GitHub как источник
+                    logger.info(f"Loaded {len(gh_signals)} open positions from GitHub")
 
+            # Подгружаем session_manager
+            if not session_manager._loaded:
+                session_manager._load_from_backtest(backtest_content)
+    except Exception as e:
+        logger.warning(f"GitHub status load error: {e}")
+
+    open_positions = [row for row in signals if row.get("status") == "open"]
+
+    # Контексты дайджеста
+    contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
     if not contexts:
         try:
             from github_export import _github_get, DIGEST_CACHE_FILE
             digest_content, _ = await _github_get(DIGEST_CACHE_FILE)
             if digest_content:
                 import re
-                pattern = r'## 📊 (\d{2}\.\d{2}\.\d{4})'
-                matches = list(re.finditer(pattern, digest_content))
-                for match in matches:
+                for match in re.finditer(r'## 📊 (\d{2}\.\d{2}\.\d{4})', digest_content):
                     date_str = match.group(1)
+                    snippet = digest_content[match.start():match.start()+800].upper()
                     verdict = "NEUTRAL"
-                    snippet_start = digest_content.find(f"## 📊 {date_str}")
-                    if snippet_start != -1:
-                        snippet = digest_content[snippet_start:snippet_start+800].upper()
-                        if "БЫЧ" in snippet or "BUY" in snippet or "LONG" in snippet:
-                            verdict = "BUY"
-                        elif "МЕДВ" in snippet or "SELL" in snippet or "SHORT" in snippet:
-                            verdict = "SELL"
-                    contexts.append({
-                        "created_at": date_str,
-                        "verdict": verdict,
-                        "symbols": [],
-                    })
-                logger.info(f"Loaded {len(contexts)} contexts from GitHub DIGEST_CACHE.md")
+                    if any(w in snippet for w in ["БЫЧ", "BUY", "LONG", "BULLISH"]):
+                        verdict = "BUY"
+                    elif any(w in snippet for w in ["МЕДВ", "SELL", "SHORT", "BEARISH"]):
+                        verdict = "SELL"
+                    contexts.append({"created_at": date_str, "verdict": verdict, "symbols": []})
         except Exception as e:
-            logger.debug(f"Failed to load from GitHub: {e}")
+            logger.debug(f"Digest context GitHub load: {e}")
+
     latest_context = contexts[0] if contexts else None
     consensus = build_digest_consensus(contexts) if contexts else {
-        "consensus_verdict": "NEUTRAL",
-        "verdict_score": 0,
-        "contexts": [],
-        "candidates": [],
+        "consensus_verdict": "NEUTRAL", "verdict_score": 0, "contexts": [], "candidates": [],
     }
 
     cv_status = consensus.get("consensus_verdict", "NEUTRAL")
@@ -1130,43 +1066,44 @@ async def get_signal_trader_status() -> dict:
     symbols_set = {c["symbol"] for c in consensus.get("candidates", [])[:8]}
     if use_follow_status:
         symbols_set |= set(CRYPTO_SIGNAL_SYMBOLS)
+    symbols_set.update(p["symbol"] for p in open_positions)
     symbols = sorted(symbols_set)
-    consensus_display = consensus
 
     candidate_rows = []
+    prices = {}
+    signal_bias = {}
     if symbols:
         prices = await fetch_current_prices(symbols)
         signal_bias = await _fetch_crypto_signal_bias(symbols, cv_status, neutral_follow=use_follow_status)
         consensus_display = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
         if consensus_display.get("candidates"):
             candidate_rows = rank_trade_candidates(consensus_display, prices, signal_bias)[:3]
-
+    
     active_positions = []
     for position in open_positions:
         meta = _parse_trade_meta(position)
+        current_price = float(prices.get(position["symbol"]) or 0.0)
+        entry_price = float(position.get("entry_price") or 0.0)
+        pnl_pct = 0.0
+        if current_price > 0 and entry_price > 0:
+            direction = (position.get("direction") or "").upper()
+            if direction == "BUY":
+                pnl_pct = (current_price - entry_price) / entry_price * 100
+            elif direction == "SELL":
+                pnl_pct = (entry_price - current_price) / entry_price * 100
         active_positions.append({
             "symbol": position["symbol"],
             "direction": position["direction"],
-            "entry_price": float(position.get("entry_price") or 0.0),
+            "entry_price": entry_price,
+            "current_price": current_price,
             "quantity": float(position.get("quantity") or 0.0),
             "target": float(meta.get("target") or 0.0),
             "stop": float(meta.get("stop") or 0.0),
+            "pnl_pct": round(pnl_pct, 2),
             "support": int(meta.get("support") or 0),
         })
 
-    # Debug: log all signals to find open position issue
-    all_signals = await get_backtest_signals()
-    open_check = [s for s in all_signals if s.get("status") == "open"]
-    logger.info(f"DEBUG: all_signals={len(all_signals)}, open_check={len(open_check)}")
-    for s in open_check:
-        logger.info(f"DEBUG open: {s.get('symbol')} {s.get('direction')} qty={s.get('quantity')} status={s.get('status')}")
-
-    digest_pv = (latest_context or {}).get("prompt_versions") or {}
-    snap_time = (latest_context or {}).get("model_inputs_snapshot") or {}
-    snap_ts = snap_time.get("generated_at_utc") if isinstance(snap_time, dict) else None
-
     recent_decisions = await get_recent_trade_decisions(4)
-
     adaptive_params = session_manager.get_adaptive_params()
 
     return {
@@ -1176,16 +1113,12 @@ async def get_signal_trader_status() -> dict:
         "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
         "open_positions": len(open_positions),
         "active_positions": active_positions,
-        "tracked_symbols": [candidate["symbol"] for candidate in consensus_display.get("candidates", [])[:8]]
-        if symbols
-        else [],
+        "tracked_symbols": symbols,
         "signal_follow_active": use_follow_status,
         "daily_context_fresh": is_daily_context_fresh(latest_context),
-        "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
+        "consensus_verdict": cv_status,
         "recent_contexts": consensus.get("contexts", []),
         "top_candidates": candidate_rows,
-        "latest_digest_prompt_versions": digest_pv,
-        "latest_digest_snapshot_utc": snap_ts,
         "recent_decisions": recent_decisions,
         "autotrade_feature_on": FEATURE_AUTOTRADE,
         "binance_signals_enabled": DATA_SOURCE_BINANCE_SIGNALS,
