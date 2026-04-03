@@ -624,13 +624,25 @@ async def add_backtest_signal(
     direction = direction.upper()
     symbol = symbol.upper()
     quantity_pct = min(max(quantity_pct, 0.01), 1.0)
-    capital = float(config.get("capital", 100.0) or 100.0)
-    quantity = (capital * quantity_pct) / entry_price if entry_price > 0 else 0.0
-    position_cost = quantity * entry_price
+    quantity = 0.0
+    position_cost = 0.0
+    capital = 100.0
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
+        # Get current config FIRST
+        async with db.execute("SELECT capital FROM backtest_config WHERE id = 1") as cursor:
+            config_row = await cursor.fetchone()
+            if config_row:
+                capital = float(config_row.get("capital", 100.0) or 100.0)
+            else:
+                await db.execute("INSERT INTO backtest_config (capital, enabled) VALUES (100.0, 1)")
+                capital = 100.0
+
+        logger.info(f"add_backtest_signal: capital from config={capital}")
+
+        # Check for existing open position
         async with db.execute("""
             SELECT * FROM backtest_signals
             WHERE symbol = ? AND direction = ? AND status = 'open'
@@ -650,8 +662,15 @@ async def add_backtest_signal(
                 "capital_after": capital,
             }
 
+        # Calculate quantity and cost
+        quantity = (capital * quantity_pct) / entry_price if entry_price > 0 else 0.0
+        position_cost = quantity * entry_price
+
+        logger.info(f"add_backtest_signal: qty={quantity}, cost={position_cost}")
+
         # Deduct position cost from capital
         new_capital = capital - position_cost
+        logger.info(f"add_backtest_signal: new_capital after deduct={new_capital}")
 
         cursor = await db.execute("""
             INSERT INTO backtest_signals (
