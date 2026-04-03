@@ -843,8 +843,13 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
                     "stop": float(candidate.get("stop") or 0.0),
                     "support": support,
                     "score": float(candidate.get("total_score") or 0.0),
+                    "signal_direction": candidate.get("signal_direction", "NEUTRAL"),
+                    "capital": float(result.get("capital_after", 0.0)),
                 })
-                await _notify_admins(bot, admin_ids, events[-1])
+                try:
+                    await _notify_admins(bot, admin_ids, events[-1])
+                except Exception:
+                    pass
                 held_symbols.add(candidate["symbol"])
                 open_positions.append(result)
                 logger.info(f"Opened {candidate['symbol']} {candidate['direction']} at {candidate['current_price']}")
@@ -852,7 +857,6 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             logger.error(f"Failed to open {candidate['symbol']}: {e}")
             continue
 
-    return events
     return events
 
 
