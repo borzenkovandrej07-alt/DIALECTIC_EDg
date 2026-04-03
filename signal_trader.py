@@ -1042,6 +1042,7 @@ async def get_signal_trader_status() -> dict:
     try:
         from github_export import _github_get, BACKTEST_FILE
         backtest_content, _ = await _github_get(BACKTEST_FILE)
+        logger.info(f"BACKTEST.md length: {len(backtest_content) if backtest_content else 0}")
         if backtest_content:
             import re
             
@@ -1049,21 +1050,24 @@ async def get_signal_trader_status() -> dict:
             cap_m = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
             if cap_m:
                 config["capital"] = float(cap_m.group(1).replace(',', ''))
+                logger.info(f"Capital from GitHub: ${config['capital']}")
             
             # Find open positions section
             idx = backtest_content.find('Открытые позиции')
+            logger.info(f"Index of 'Открытые позиции': {idx}")
             if idx != -1:
                 section = backtest_content[idx:]
                 next_header = section.find('\n## ', 10)
                 if next_header != -1:
                     section = section[:next_header]
                 
+                logger.info(f"Section content: {repr(section[:500])}")
+                
                 signals = [] # Reset signals to use GitHub data
                 for line in section.split('\n'):
-                    # Match lines like: - **BNB** BUY @ $584.95 (qty: 0.0256)
-                    # Regex fix: allow space between @ and $
                     if '**' in line and 'qty' in line:
                          m = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\s*\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                         logger.info(f"Line: {repr(line)}, Match: {m}")
                          if m:
                              sym, dir, entry, qty = m.groups()
                              entry = float(entry.replace(',', ''))
@@ -1080,7 +1084,7 @@ async def get_signal_trader_status() -> dict:
                              logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
                 logger.info(f"Total from GitHub: {len(signals)}")
     except Exception as e:
-        logger.warning(f"GitHub load error: {e}")
+        logger.warning(f"GitHub load error: {e}", exc_info=True)
     
     open_positions = [row for row in signals if row.get("status") == "open"]
     
