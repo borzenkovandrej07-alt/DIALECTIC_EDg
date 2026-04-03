@@ -737,10 +737,6 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             "lesson": closed_session["lesson"],
         })
         logger.info(f"Session #{closed_session['session_id']} closed. PnL: ${closed_session['pnl']:+.2f}")
-        try:
-            await _export_backtest_snapshot()
-        except Exception:
-            pass
 
     config = await get_backtest_config()
     if not config.get("enabled", 1):
@@ -856,12 +852,7 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             logger.error(f"Failed to open {candidate['symbol']}: {e}")
             continue
 
-    if events:
-        await _export_backtest_snapshot()
     return events
-
-    if events:
-        await _export_backtest_snapshot()
     return events
 
 
