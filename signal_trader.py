@@ -1038,69 +1038,35 @@ async def get_signal_trader_status() -> dict:
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
     
-    # ALWAYS sync positions from GitHub BACKTEST.md
+    # Try to load positions from GitHub positions.json
     try:
-        from github_export import _github_get, BACKTEST_FILE
-        backtest_content, _ = await _github_get(BACKTEST_FILE)
-        if backtest_content:
-            import re
-            
-            # Parse capital
-            capital_match = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
-            if capital_match:
-                github_capital = float(capital_match.group(1).replace(',', ''))
-                logger.info(f"GitHub capital: ${github_capital}")
-                config["capital"] = github_capital
-            
-            # Parse open positions - use simple string split instead of regex
-            if '## 🔵 Открытые позиции' in backtest_content:
-                parts = backtest_content.split('## 🔵 Открытые позиции')
-                if len(parts) > 1:
-                    section = parts[1].strip()
-                    # Cut off at next section
-                    next_section = section.find('\n## ')
-                    if next_section != -1:
-                        section = section[:next_section]
-                    
-                    lines = section.strip().split('\n')
-                    signals = []  # Reset - use GitHub as source of truth
-                    for line in lines:
-                        line = line.strip()
-                        if not line.startswith('- **'):
-                            continue
-                        match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                        if match:
-                            symbol, direction, entry, qty = match.groups()
-                            entry = float(entry.replace(',', ''))
-                            qty = float(qty)
-                            
-                            target = entry * 1.04
-                            stop = entry * 0.98
-                            
-                            import json
-                            trade_log = json.dumps({
-                                "target": target, 
-                                "stop": stop,
-                                "entry_plan": entry,
-                            }, ensure_ascii=False)
-                            
-                            signals.append({
-                                "id": 0,
-                                "symbol": symbol,
-                                "direction": direction,
-                                "entry_price": entry,
-                                "quantity": qty,
-                                "status": "open",
-                                "trade_log": trade_log,
-                            })
-                            logger.info(f"Loaded from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
-                    logger.info(f"Total positions loaded from GitHub: {len(signals)}")
-                else:
-                    logger.info("No open positions section found after split")
-            else:
-                logger.info("🔵 emoji section not found in BACKTEST.md")
+        from github_export import _github_get
+        positions_content, _ = await _github_get("positions.json")
+        if positions_content:
+            import json
+            positions_data = json.loads(positions_content)
+            capital = positions_data.get("capital", 100.0)
+            config["capital"] = capital
+            positions = positions_data.get("positions", [])
+            signals = []
+            for p in positions:
+                signals.append({
+                    "id": 0,
+                    "symbol": p["symbol"],
+                    "direction": p["direction"],
+                    "entry_price": float(p["entry_price"]),
+                    "quantity": float(p["quantity"]),
+                    "status": "open",
+                    "trade_log": json.dumps({
+                        "target": float(p.get("target", 0)),
+                        "stop": float(p.get("stop", 0)),
+                        "entry_plan": float(p["entry_price"]),
+                    }, ensure_ascii=False),
+                })
+                logger.info(f"Loaded from positions.json: {p['symbol']} {p['direction']} @ ${p['entry_price']}")
+            logger.info(f"Total positions from positions.json: {len(signals)}")
     except Exception as e:
-        logger.warning(f"Failed to load from GitHub: {e}")
+        logger.warning(f"Failed to load positions.json: {e}")
     
     open_positions = [row for row in signals if row.get("status") == "open"]
     
