@@ -633,7 +633,7 @@ async def add_backtest_signal(
 
     direction = direction.upper()
     symbol = symbol.upper()
-    quantity_pct = min(max(quantity_pct, 0.01), 1.0)
+    quantity_pct = min(max(quantity_pct, 0.01), 0.15)  # Max 15% per position
     quantity = 0.0
     position_cost = 0.0
     capital = 0.0  # Will be read from DB
@@ -652,18 +652,34 @@ async def add_backtest_signal(
 
         logger.info(f"add_backtest_signal: capital from config={capital}")
 
-        # Check for ANY existing open position (not just same symbol)
+        # Count open positions (max 5 for diversification)
+        async with db.execute("""
+            SELECT COUNT(*) as cnt FROM backtest_signals WHERE status = 'open'
+        """) as cursor:
+            count_row = await cursor.fetchone()
+            open_count = count_row["cnt"] if count_row else 0
+
+        if open_count >= 5:
+            logger.info(f"add_backtest_signal: already {open_count} open positions (max 5), skipping")
+            return {
+                "status": "max_positions",
+                "message": f"Already have {open_count} open positions (max 5)",
+                "capital_before": capital,
+                "capital_after": capital,
+            }
+
+        # Check for existing open position in same symbol
         async with db.execute("""
             SELECT * FROM backtest_signals
-            WHERE status = 'open'
+            WHERE symbol = ? AND status = 'open'
             ORDER BY created_at DESC LIMIT 1
-        """) as cursor:
+        """, (symbol,)) as cursor:
             existing_open = await cursor.fetchone()
 
         if existing_open:
-            logger.info(f"add_backtest_signal: already have open position {existing_open['symbol']}, skipping new position")
+            logger.info(f"add_backtest_signal: already have open position in {symbol}, skipping")
             return {
-                "status": "position_exists",
+                "status": "symbol_exists",
                 "symbol": existing_open["symbol"],
                 "direction": existing_open["direction"],
                 "entry_price": existing_open["entry_price"],

@@ -766,7 +766,8 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             await _notify_admins(bot, admin_ids, closed_event)
 
     remaining_open = [row for row in await get_backtest_signals() if row.get("status") == "open"]
-    if remaining_open:
+    if len(remaining_open) >= 5:
+        logger.info(f"check_and_trade: {len(remaining_open)} open positions (max 5), skipping new trades")
         if events:
             await _export_backtest_snapshot()
         return events
