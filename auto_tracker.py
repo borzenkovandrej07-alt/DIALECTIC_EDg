@@ -247,7 +247,7 @@ class DigestParser:
     @staticmethod
     def extract_all_digests(text: str) -> list[dict]:
         digests = []
-        pattern = r'## 📊 (\d{2}\.\d{2}\.\d{4})'
+        pattern = r'## 📊 (\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)'
         matches = list(re.finditer(pattern, text))
         
         for i, match in enumerate(matches):
@@ -265,6 +265,17 @@ class DigestParser:
         date = digest["date"]
         
         lines = content.split('\n')
+        
+        verdict_direction = None
+        for marker in ["**ВЕРДИКТ:**", "ВЕРДИКТ:"]:
+            idx = content.find(marker)
+            if idx != -1:
+                snippet = content[idx:idx+400].upper()
+                if "БЫЧ" in snippet or "BUY" in snippet or "LONG" in snippet or "🐂" in snippet or "🟢" in snippet:
+                    verdict_direction = "BULLISH"
+                elif "МЕДВ" in snippet or "SELL" in snippet or "SHORT" in snippet or "🐻" in snippet or "🔴" in snippet:
+                    verdict_direction = "BEARISH"
+                break
         
         price_patterns = [
             (r'VIX\s*[:=]*\s*(\d+\.?\d*)', "VIX"),
@@ -310,8 +321,17 @@ class DigestParser:
                             "asset": asset, "forecast": direction, "forecast_type": "direction"
                         })
                     break
-            
-            for pattern, asset in price_patterns:
+        
+        if verdict_direction:
+            key = f"VERDICT:{verdict_direction}:{date}"
+            if key not in seen:
+                seen.add(key)
+                forecasts.append({
+                    "date": date, "type": "Daily Digest",
+                    "asset": "VERDICT", "forecast": verdict_direction, "forecast_type": "direction"
+                })
+        
+        for pattern, asset in price_patterns:
                 match = re.search(pattern, line, re.IGNORECASE)
                 if match:
                     price = match.group(1)

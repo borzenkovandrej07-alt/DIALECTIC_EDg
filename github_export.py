@@ -223,29 +223,40 @@ def _extract_verdict(report: str) -> str:
     """Вытаскивает вердикт и ключевые цифры из отчёта для сравнения."""
     lines = []
 
-    # Вердикт
-    for m in ["🏆 ВЕРДИКТ СУДЬИ", "ВЕРДИКТ СУДЬИ"]:
+    verdict_markers = [
+        "⚖️ *ВЕРДИКТ И ТОРГОВЫЙ ПЛАН*",
+        "⚖️ ВЕРДИКТ И ТОРГОВЫЙ ПЛАН",
+        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
+        "🏆 ВЕРДИКТ СУДЬИ",
+        "ВЕРДИКТ СУДЬИ",
+    ]
+    for m in verdict_markers:
         idx = report.find(m)
         if idx != -1:
-            chunk = report[idx:idx+300].split("\n")[:4]
-            lines.append("**Вердикт:** " + " | ".join(l.strip() for l in chunk if l.strip()))
+            chunk = report[idx:idx+500].split("\n")[:8]
+            lines.append("**ВЕРДИКТ:**")
+            for l in chunk:
+                stripped = l.strip()
+                if stripped:
+                    lines.append(stripped)
             break
 
-    # Ключевые цены из данных
     prices_found = []
     for pattern, label in [
-        (r"BTC.*?\$([\d,]+)", "BTC"),
-        (r"S&P 500.*?([\d,]+)", "SPX"),
-        (r"Нефть.*?\$([\d.]+)", "Oil"),
-        (r"Золото.*?\$([\d,]+)", "Gold"),
+        (r"BTC.*?\$?([\d,]+)", "BTC"),
+        (r"ETH.*?\$?([\d,]+)", "ETH"),
+        (r"S&P\s*500.*?([\d,]+)", "SPX"),
+        (r"Нефть.*?\$?([\d.]+)", "Oil"),
+        (r"Золото.*?\$?([\d,]+)", "Gold"),
+        (r"Fear.*?Greed.*?(\d+)", "F&G"),
     ]:
-        m = re.search(pattern, report[:2000])
+        m = re.search(pattern, report[:3000])
         if m:
             prices_found.append(f"{label}={m.group(1)}")
     if prices_found:
         lines.append("**Цены:** " + ", ".join(prices_found))
 
-    # Простыми словами (для понятного сравнения)
     for marker in ["🗣 ПРОСТЫМИ СЛОВАМИ", "ПРОСТЫМИ СЛОВАМИ"]:
         idx = report.find(marker)
         if idx != -1:
@@ -261,8 +272,11 @@ def _extract_trading_plan(report: str) -> str:
     """Извлекает торговый план из отчёта для кэширования."""
     lines = []
 
-    # Ищем блок торгового плана
     plan_markers = [
+        "⚖️ *ВЕРДИКТ И ТОРГОВЫЙ ПЛАН*",
+        "⚖️ ВЕРДИКТ И ТОРГОВЫЙ ПЛАН",
+        "⚖️ *ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ*",
+        "⚖️ ИТОГОВЫЙ СИНТЕЗ И РЕКОМЕНДАЦИИ",
         "ТОРГОВЫЙ ПЛАН",
         "Торговый план",
         "TRADING PLAN",
@@ -279,53 +293,48 @@ def _extract_trading_plan(report: str) -> str:
     if plan_start is None:
         return ""
 
-    # Берём до 3000 символов после начала плана
-    plan_section = report[plan_start:plan_start + 3000]
-    # Обрезаем по следующему разделителю
-    for sep in ["\n---\n", "\n___\n", "\n═══"]:
+    plan_section = report[plan_start:plan_start + 4000]
+    for sep in ["\n---\n", "\n___\n", "\n═══", "\n🤝 ", "\n📊 "]:
         sep_idx = plan_section.find(sep)
         if sep_idx > 200:
             plan_section = plan_section[:sep_idx]
             break
 
-    # Извлекаем конкретные уровни
     levels = []
     for line in plan_section.split("\n"):
         line = line.strip()
-        if not line or len(line) < 10:
+        if not line or len(line) < 8:
             continue
-        # Триггеры
-        if "Триггер" in line:
-            levels.append(line)
-        # Вход/Стоп/Цель
-        if any(k in line for k in ["Вход:", "Стоп:", "Цель:", "Entry:", "Stop:", "Target:"]):
-            levels.append(line)
-        # Ключевые уровни
-        if any(k in line for k in ["пробой", "уровень", "VIX", "RSI"]):
-            levels.append(line)
+        if any(k in line for k in ["Триггер", "Trigger", "Вход", "Entry", "Выйти", "Выход", "Цель", "Target", "Стоп", "Stop", "шорт", "лонг", "BUY", "SELL", "LONG", "SHORT"]):
+            if len(line) < 150:
+                levels.append(line)
+            else:
+                levels.append(line[:150])
+        if any(k in line for k in ["пробой", "уровень", "VIX", "RSI", "MACD"]):
+            if len(line) < 150:
+                levels.append(line)
 
     if levels:
-        return "\n".join(levels[:20])
+        return "\n".join(levels[:25])
 
-    return plan_section[:1500]
+    return plan_section[:2000]
 
 
-async def push_digest_cache(report: str, date_str: str) -> bool:
+async def push_digest_cache(report: str, date_str: str, full_debates: str = "") -> bool:
     """
     Сохраняет дайджест в DIGEST_CACHE.md.
     Хранит последние 14 дайджестов.
     Каждый дайджест содержит:
-    - дата и вердикт
-    - ключевые цены на момент анализа
-    - вывод простыми словами
-    - ТОРГОВЫЙ ПЛАН с точками входа/выхода/триггерами
+    - дата и полный VERDICT (как есть сейчас)
+    - ТОРГОВЫЙ ПЛАН (все точки входа/выхода)
+    - Полный отчёт (всё что приходит пользователю в тг)
+    - Все раунды дебатов (полностью)
     """
     if not GITHUB_TOKEN:
         return False
 
     current_content, sha = await _github_get(DIGEST_CACHE_FILE)
 
-    # Компактная запись нового дайджеста
     verdict_block = _extract_verdict(report)
     trading_plan = _extract_trading_plan(report)
 
@@ -336,20 +345,25 @@ async def push_digest_cache(report: str, date_str: str) -> bool:
 
     if trading_plan:
         new_entry_parts.append(
-            f"\n\n**Торговый план:**\n```\n{trading_plan}\n```"
+            f"\n\n**Торговый план:**\n{trading_plan}"
         )
 
     new_entry_parts.append(
-        f"\n\n<details><summary>Полный отчёт (сокращён)</summary>\n\n"
-        f"```\n{report[:2000]}\n...(сокращено)\n```\n\n</details>"
+        f"\n\n<details><summary>📋 Полный отчёт (всё что видит пользователь)</summary>\n\n"
+        f"{report}\n\n</details>"
     )
+
+    if full_debates:
+        new_entry_parts.append(
+            f"\n\n<details><summary>🗣 Все раунды дебатов</summary>\n\n"
+            f"{full_debates}\n\n</details>"
+        )
 
     new_entry = "".join(new_entry_parts)
 
-    # Разбиваем на записи, ограничиваем 14 штуками
     entries = re.split(r"\n## 📊 ", current_content) if current_content else []
     entries = [e.strip() for e in entries if e.strip() and not e.startswith("#")]
-    entries = entries[:13]  # последние 13 + новый = 14
+    entries = entries[:13]
     entries.insert(0, new_entry)
 
     header = (

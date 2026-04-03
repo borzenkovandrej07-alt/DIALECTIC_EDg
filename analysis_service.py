@@ -216,7 +216,15 @@ async def run_full_analysis(
         _storage.cache_report(report, prices_dict, owner_user_id=user_id)
         try:
             date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-            asyncio.create_task(push_digest_cache(report, date_str))
+            from main import parse_report_parts
+            parts = parse_report_parts(report)
+            full_debates = ""
+            if parts.get("rounds"):
+                blocks = []
+                for i, r in enumerate(parts["rounds"], 1):
+                    blocks.append(f"{'='*12} Раунд {i} {'='*12}\n\n{r}")
+                full_debates = "\n\n".join(blocks)
+            asyncio.create_task(push_digest_cache(report, date_str, full_debates))
         except Exception as exc:
             logger.warning("digest cache push failed: %s", exc)
 
