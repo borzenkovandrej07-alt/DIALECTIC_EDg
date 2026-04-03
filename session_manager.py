@@ -476,7 +476,18 @@ class SessionManager:
                 direction = s.get("direction", "") or ""
                 entry = s.get("entry_price") or 0
                 qty = s.get("quantity") or 0
-                lines.append(f"- **{symbol}** {direction} @ ${entry:,.2f} (qty: {qty:.4f}) — {date}")
+                # ФИХ: пишем target и stop чтобы после редеплоя их можно было восстановить
+                meta_raw = s.get("trade_log") or "{}"
+                try:
+                    import json as _json
+                    meta = _json.loads(meta_raw)
+                except Exception:
+                    meta = {}
+                target = float(meta.get("target") or 0)
+                stop   = float(meta.get("stop") or 0)
+                tp_str = f" tp:${target:,.2f}" if target > 0 else ""
+                sl_str = f" sl:${stop:,.2f}" if stop > 0 else ""
+                lines.append(f"- **{symbol}** {direction} @ ${entry:,.2f} (qty: {qty:.4f}){tp_str}{sl_str} — {date}")
 
         return "\n".join(lines)
 
