@@ -816,7 +816,13 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     if use_follow:
         consensus = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
 
+    # Track newly opened positions to avoid closing them in the same cycle
+    newly_opened_ids = set()
+
     for position in open_positions:
+        # Skip newly opened positions — give them at least 1 cycle to breathe
+        if position.get("id") in newly_opened_ids:
+            continue
         closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
         if closed_event:
             events.append(closed_event)
@@ -846,7 +852,7 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         if not candidate.get("ready"):
             continue
 
-        # Skip if we already hold this symbol
+        # Skip if we already hold this symbol (including newly opened)
         held_symbols = {p["symbol"] for p in current_open}
         if candidate["symbol"] in held_symbols:
             continue
@@ -887,6 +893,8 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             )
 
             if result.get("status") == "opened":
+                sid = result.get("signal_id")
+                newly_opened_ids.add(sid)
                 events.append({
                     "event": "opened",
                     "symbol": best["symbol"],
@@ -896,6 +904,7 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
                     "stop": float(best.get("stop") or 0.0),
                     "support": support,
                     "score": float(best.get("total_score") or 0.0),
+                    "signal_id": sid,
                 })
                 await _notify_admins(bot, admin_ids, events[-1])
                 logger.info(f"Opened {best['symbol']} {best['direction']} at {best['current_price']}")
