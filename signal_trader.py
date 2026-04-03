@@ -1052,44 +1052,53 @@ async def get_signal_trader_status() -> dict:
                 logger.info(f"GitHub capital: ${github_capital}")
                 config["capital"] = github_capital
             
-            # Parse open positions
-            open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
-            if open_section:
-                lines = open_section.group(1).strip().split('\n')
-                signals = []  # Reset - use GitHub as source of truth
-                for line in lines:
-                    line = line.strip()
-                    if not line.startswith('- **'):
-                        continue
-                    match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                    if match:
-                        symbol, direction, entry, qty = match.groups()
-                        entry = float(entry.replace(',', ''))
-                        qty = float(qty)
-                        
-                        target = entry * 1.04
-                        stop = entry * 0.98
-                        
-                        import json
-                        trade_log = json.dumps({
-                            "target": target, 
-                            "stop": stop,
-                            "entry_plan": entry,
-                        }, ensure_ascii=False)
-                        
-                        signals.append({
-                            "id": 0,
-                            "symbol": symbol,
-                            "direction": direction,
-                            "entry_price": entry,
-                            "quantity": qty,
-                            "status": "open",
-                            "trade_log": trade_log,
-                        })
-                        logger.info(f"Loaded from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
-                logger.info(f"Total positions loaded from GitHub: {len(signals)}")
+            # Parse open positions - use simple string split instead of regex
+            if '## 🔵 Открытые позиции' in backtest_content:
+                parts = backtest_content.split('## 🔵 Открытые позиции')
+                if len(parts) > 1:
+                    section = parts[1].strip()
+                    # Cut off at next section
+                    next_section = section.find('\n## ')
+                    if next_section != -1:
+                        section = section[:next_section]
+                    
+                    lines = section.strip().split('\n')
+                    signals = []  # Reset - use GitHub as source of truth
+                    for line in lines:
+                        line = line.strip()
+                        if not line.startswith('- **'):
+                            continue
+                        match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                        if match:
+                            symbol, direction, entry, qty = match.groups()
+                            entry = float(entry.replace(',', ''))
+                            qty = float(qty)
+                            
+                            target = entry * 1.04
+                            stop = entry * 0.98
+                            
+                            import json
+                            trade_log = json.dumps({
+                                "target": target, 
+                                "stop": stop,
+                                "entry_plan": entry,
+                            }, ensure_ascii=False)
+                            
+                            signals.append({
+                                "id": 0,
+                                "symbol": symbol,
+                                "direction": direction,
+                                "entry_price": entry,
+                                "quantity": qty,
+                                "status": "open",
+                                "trade_log": trade_log,
+                            })
+                            logger.info(f"Loaded from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
+                    logger.info(f"Total positions loaded from GitHub: {len(signals)}")
+                else:
+                    logger.info("No open positions section found after split")
             else:
-                logger.info("No open positions section found in BACKTEST.md")
+                logger.info("🔵 emoji section not found in BACKTEST.md")
     except Exception as e:
         logger.warning(f"Failed to load from GitHub: {e}")
     
