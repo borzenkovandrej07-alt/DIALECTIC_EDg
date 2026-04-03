@@ -1050,38 +1050,37 @@ async def get_signal_trader_status() -> dict:
             if cap_m:
                 config["capital"] = float(cap_m.group(1).replace(',', ''))
             
-            # Find open positions section
-            idx = backtest_content.find('## 🔵 Открытые позиции')
-            if idx == -1:
-                idx = backtest_content.find('## Открытые позиции')
+            # Find open positions section (search for text to be safe)
+            idx = backtest_content.find('Открытые позиции')
             if idx != -1:
                 section = backtest_content[idx:]
-                next_idx = section.find('\n## ', 10)
-                if next_idx != -1:
-                    section = section[:next_idx]
+                # Cut off at next header
+                next_header = section.find('\n## ', 10)
+                if next_header != -1:
+                    section = section[:next_header]
                 
-                signals = []
+                signals = [] # Reset signals to use GitHub data
                 for line in section.split('\n'):
-                    line = line.strip()
-                    if not line.startswith('- '):
-                        continue
-                    # **BNB** BUY @ $584.95 (qty: 0.0256)
-                    m = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                    if m:
-                        sym, dir, entry, qty = m.groups()
-                        entry = float(entry.replace(',', ''))
-                        qty = float(qty)
-                        signals.append({
-                            "id": 0,
-                            "symbol": sym,
-                            "direction": dir,
-                            "entry_price": entry,
-                            "quantity": qty,
-                            "status": "open",
-                            "trade_log": json.dumps({"target": entry*1.04, "stop": entry*0.98}),
-                        })
-                        logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
+                    # Match lines like: - **BNB** BUY @ $584.95 (qty: 0.0256)
+                    if '**' in line and '@' in line and 'qty' in line:
+                         m = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                         if m:
+                             sym, dir, entry, qty = m.groups()
+                             entry = float(entry.replace(',', ''))
+                             qty = float(qty)
+                             signals.append({
+                                 "id": 0,
+                                 "symbol": sym,
+                                 "direction": dir,
+                                 "entry_price": entry,
+                                 "quantity": qty,
+                                 "status": "open",
+                                 "trade_log": json.dumps({"target": entry*1.04, "stop": entry*0.98}),
+                             })
+                             logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
                 logger.info(f"Total from GitHub: {len(signals)}")
+            else:
+                logger.warning("Section 'Открытые позиции' not found in BACKTEST.md")
     except Exception as e:
         logger.warning(f"GitHub load error: {e}")
     
