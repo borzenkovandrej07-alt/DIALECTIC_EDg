@@ -658,6 +658,65 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     }
 
 
+async def _close_on_signal_reversal(position: dict, prices: dict, signal_bias: dict) -> dict | None:
+    """
+    Close position if market signal reversed against our direction.
+    E.g., we bought (BUY), but now signal shows SHORT (price falling) — close and cut loss.
+    """
+    symbol = position["symbol"]
+    if symbol not in CRYPTO_SIGNAL_SYMBOLS:
+        return None
+    
+    current_price = float(prices.get(symbol) or 0.0)
+    if current_price <= 0:
+        return None
+    
+    meta = _parse_trade_meta(position)
+    direction = (position.get("direction") or "").upper()
+    signal_direction = (signal_bias.get(symbol, {}).get("direction") or "NEUTRAL").upper()
+    
+    reversal_threshold = REVERSAL_SCORE_THRESHOLD
+    signal = signal_bias.get(symbol, {})
+    signal_score = abs(float(signal.get("score") or 0.0))
+    
+    reason = ""
+    
+    if direction == "BUY" and signal_direction == "SHORT" and signal_score >= reversal_threshold:
+        reason = f"Signal reversal: {signal_direction} (score={signal_score:.1f})"
+    elif direction == "SELL" and signal_direction == "LONG" and signal_score >= reversal_threshold:
+        reason = f"Signal reversal: {signal_direction} (score={signal_score:.1f})"
+    
+    if not reason:
+        return None
+    
+    result = await close_backtest_signal(position["id"], current_price, reason=reason)
+    if not result:
+        return None
+    
+    session_manager.record_trade({
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": float(position.get("entry_price") or 0.0),
+        "exit_price": current_price,
+        "pnl": float(result.get("pnl") or 0.0),
+        "pnl_pct": float(result.get("pnl_pct") or 0.0),
+        "reason": reason,
+    })
+    session_manager.update_capital(float(result.get("new_capital") or 0.0))
+    
+    return {
+        "event": "closed",
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": float(position.get("entry_price") or 0.0),
+        "exit_price": current_price,
+        "reason": reason,
+        "pnl": float(result.get("pnl") or 0.0),
+        "pnl_pct": float(result.get("pnl_pct") or 0.0),
+        "capital": float(result.get("new_capital") or 0.0),
+    }
+
+
 async def _notify_admins(bot, admin_ids: list[int], event: dict):
     if not bot or not admin_ids:
         return
@@ -786,12 +845,18 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     if use_follow:
         consensus = _append_signal_follow_candidates(consensus, prices, signal_bias, open_positions=open_positions)
 
-    # Step 3: Close positions that hit target/stop (NOT based on signal reversal)
+    # Step 3: Close positions that hit target/stop OR signal reversal
     for position in open_positions:
         closed_event = await _close_position_if_needed(position, prices, signal_bias, consensus)
         if closed_event:
             events.append(closed_event)
             await _notify_admins(bot, admin_ids, closed_event)
+            continue
+        
+        signal_reversal_event = await _close_on_signal_reversal(position, prices, signal_bias)
+        if signal_reversal_event:
+            events.append(signal_reversal_event)
+            await _notify_admins(bot, admin_ids, signal_reversal_event)
 
     # Refresh open positions after closes
     open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
