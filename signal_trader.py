@@ -613,16 +613,17 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     direction = (position.get("direction") or "").upper()
     target = float(meta.get("target") or 0.0)
     stop = float(meta.get("stop") or 0.0)
+    entry_price = float(position.get("entry_price") or 0.0)
     reason = ""
 
     if direction == "BUY":
         if target and current_price >= target:
-            reason = "Target hit"
+            reason = "Target hit — фиксация прибыли"
         elif stop and current_price <= stop:
             reason = "Stop loss hit"
     elif direction == "SELL":
         if target and current_price <= target:
-            reason = "Target hit"
+            reason = "Target hit — фиксация прибыли"
         elif stop and current_price >= stop:
             reason = "Stop loss hit"
 
@@ -633,11 +634,10 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     if not result:
         return None
 
-    # Record in session manager
     session_manager.record_trade({
         "symbol": symbol,
         "direction": direction,
-        "entry_price": float(position.get("entry_price") or 0.0),
+        "entry_price": entry_price,
         "exit_price": current_price,
         "pnl": float(result.get("pnl") or 0.0),
         "pnl_pct": float(result.get("pnl_pct") or 0.0),
@@ -649,7 +649,7 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
         "event": "closed",
         "symbol": symbol,
         "direction": direction,
-        "entry_price": float(position.get("entry_price") or 0.0),
+        "entry_price": entry_price,
         "exit_price": current_price,
         "reason": reason,
         "pnl": float(result.get("pnl") or 0.0),
@@ -731,6 +731,17 @@ async def _notify_admins(bot, admin_ids: list[int], event: dict):
             f"Сигнал: `{event['signal_direction']}`\n"
             f"Тейк: `${event['target']:,.2f}` | Стоп: `${event['stop']:,.2f}`\n"
             f"Баланс: `${event['capital']:,.2f}`"
+        )
+    elif event["event"] == "partial_closed":
+        emoji = "🟢" if event.get("pnl", 0) >= 0 else "🔴"
+        msg = (
+            f"🎯 *ЧАСТИЧНАЯ ФИКСАЦИЯ*\n"
+            f"{emoji} *{event['symbol']}* {event['direction']}\n"
+            f"Вход: `${event['entry_price']:,.2f}` | Выход: `${event['exit_price']:,.2f}`\n"
+            f"Закрыто: {event.get('quantity_closed', 0):.6f} шт | Осталось: {event.get('quantity_remaining', 0):.6f} шт\n"
+            f"PnL: `{event.get('pnl', 0):+,.2f}` ({event.get('pnl_pct', 0):+.2f}%)\n"
+            f"Причина: {event['reason']}\n"
+            f"Баланс: `${event.get('capital', 0):,.2f}`"
         )
     else:
         emoji = "🟢" if event["pnl"] >= 0 else "🔴"
