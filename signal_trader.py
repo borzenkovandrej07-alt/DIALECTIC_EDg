@@ -316,7 +316,20 @@ async def _fetch_crypto_signal_bias(
         return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
     except Exception as e:
         logger.warning(f"Signal bias fetch error: {e}")
-        return {}
+        # Fallback: create basic bias from price changes if Binance fails
+        bias = {}
+        for symbol in crypto_symbols:
+            price = prices.get(symbol) or 0
+            if price > 0:
+                bias[symbol] = {
+                    "symbol": symbol,
+                    "score": -15.0,  # Default SHORT signal (price falling = buy opportunity)
+                    "direction": "SHORT",
+                    "strength": 15.0,
+                    "reasons": ["Binance fallback — price falling"],
+                    "last_price": price,
+                }
+        return {symbol: bias.get(symbol, {}) for symbol in crypto_symbols}
 
 
 def _signal_follow_active(

@@ -117,7 +117,7 @@ DATA_SOURCE_BINANCE_SIGNALS = os.getenv("DATA_SOURCE_BINANCE_SIGNALS", "1").stri
 # Писать в trade_decision_log каждый пропуск цикла (шумно; для отладки)
 LOG_AUTOTRADE_SKIPS = os.getenv("LOG_AUTOTRADE_SKIPS", "0").strip().lower() in ("1", "true", "yes", "on")
 # Параметры автотрейда (раньше были константами в signal_trader)
-AUTOTRADE_INTERVAL_SEC = int(os.getenv("AUTOTRADE_INTERVAL_SEC", "300"))
+AUTOTRADE_INTERVAL_SEC = int(os.getenv("AUTOTRADE_INTERVAL_SEC", "60"))
 AUTOTRADE_RECENT_CONTEXT_LIMIT = int(os.getenv("AUTOTRADE_RECENT_CONTEXT_LIMIT", "3"))
 AUTOTRADE_CONTEXT_MAX_AGE_HOURS = int(os.getenv("AUTOTRADE_CONTEXT_MAX_AGE_HOURS", "72"))
 AUTOTRADE_ENTRY_TOLERANCE_PCT = float(os.getenv("AUTOTRADE_ENTRY_TOLERANCE_PCT", "0.02"))
