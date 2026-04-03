@@ -778,150 +778,73 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             await _export_backtest_snapshot()
         return events
 
-    best = ranked[0]
-    logger.info(f"check_and_trade: best candidate: {best.get('symbol')} {best.get('direction')} ready={best.get('ready')} total_score={best.get('total_score')}")
-    if not best.get("ready"):
-        logger.info(f"check_and_trade: best candidate NOT ready, reason: {best.get('blocked_reason')}, score: {best.get('total_score')}, threshold: {SIGNAL_FOLLOW_SCORE_THRESHOLD if best.get('signal_follow_only') else OPEN_SCORE_THRESHOLD}")
-        if LOG_AUTOTRADE_SKIPS:
-            await append_trade_decision_log(
-                "autotrade_skip_not_ready",
-                {
-                    "reason": best.get("blocked_reason") or "below_open_threshold",
-                    "threshold": OPEN_SCORE_THRESHOLD,
-                    "best": {k: best.get(k) for k in (
-                        "symbol", "direction", "total_score", "digest_score",
-                        "proximity_score", "signal_score_component", "signal_direction",
-                        "blocked_reason", "ready",
-                    )},
-                    "runner_up": ({k: ranked[1].get(k) for k in (
-                        "symbol", "direction", "total_score", "signal_direction",
-                    )} if len(ranked) > 1 else None),
-                    "consensus_verdict": consensus.get("consensus_verdict"),
-                    "signal_follow_active": use_follow,
-                    "digest_contexts_used": consensus.get("contexts", []),
-                    "signal_bias_excerpt": {
-                        sym: {
-                            "direction": signal_bias.get(sym, {}).get("direction"),
-                            "score": signal_bias.get(sym, {}).get("score"),
-                            "reasons": (signal_bias.get(sym, {}).get("reasons") or [])[:4],
-                        }
-                        for sym in sorted(set(signal_bias.keys()) | {best.get("symbol")})
-                    },
-                    "scoring_legend": _scoring_legend(),
-                    "markets_panel_snapshot": _markets_bundle_audit(markets_bundle),
-                },
+    # Try to open positions for top candidates (up to 5 total)
+    for candidate in ranked:
+        # Re-check open positions count
+        current_open = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+        if len(current_open) >= 5:
+            logger.info(f"check_and_trade: reached 5 open positions limit")
+            break
+
+        if not candidate.get("ready"):
+            continue
+
+        # Skip if we already hold this symbol
+        held_symbols = {p["symbol"] for p in current_open}
+        if candidate["symbol"] in held_symbols:
+            continue
+
+        best = candidate
+        logger.info(f"check_and_trade: attempting to open {best.get('symbol')} {best.get('direction')} score={best.get('total_score')}")
+
+        notes = (
+            f"Signal-follow (market) | {best['symbol']} {best['direction']} | "
+            f"sig {best['signal_direction']}"
+            if best.get("signal_follow_only")
+            else (
+                f"Digest consensus {consensus.get('consensus_verdict')} | "
+                f"support {best['support']} | signal {best['signal_direction']}"
             )
-        if events:
-            await _export_backtest_snapshot()
-        return events
-
-    decision_audit = {
-        "action": "open_simulated",
-        "why": "Highest-ranked candidate met proximity + total_score threshold",
-        "chosen": {k: best.get(k) for k in (
-            "symbol", "direction", "entry", "target", "stop", "support",
-            "digest_score", "proximity_score", "signal_score_component", "total_score",
-            "signal_direction", "signal_reasons", "current_price", "context_dates",
-        )},
-        "runner_up": ({k: ranked[1].get(k) for k in (
-            "symbol", "direction", "total_score", "signal_direction", "digest_score",
-        )} if len(ranked) > 1 else None),
-        "digest_contexts_used": consensus.get("contexts", []),
-        "consensus_verdict": consensus.get("consensus_verdict"),
-        "verdict_score": consensus.get("verdict_score"),
-        "signal_bias": {
-            sym: {
-                "direction": signal_bias.get(sym, {}).get("direction"),
-                "score": signal_bias.get(sym, {}).get("score"),
-                "strength": signal_bias.get(sym, {}).get("strength"),
-                "reasons": (signal_bias.get(sym, {}).get("reasons") or [])[:6],
-            }
-            for sym in sorted(signal_bias.keys())
-        },
-        "scoring_legend": _scoring_legend(),
-        "feature_flags": {
-            "FEATURE_AUTOTRADE": FEATURE_AUTOTRADE,
-            "DATA_SOURCE_BINANCE_SIGNALS": DATA_SOURCE_BINANCE_SIGNALS,
-            "AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL": AUTOTRADE_FOLLOW_SIGNALS_WHEN_NEUTRAL,
-            "signal_follow_cycle": use_follow,
-        },
-        "markets_panel_snapshot": _markets_bundle_audit(markets_bundle),
-    }
-
-    if use_follow:
-        decision_audit["signal_follow_mode"] = True
-    if best.get("signal_follow_only"):
-        decision_audit["opened_from_signal_follow"] = True
-
-    notes = (
-        f"Signal-follow (market) | {best['symbol']} {best['direction']} | "
-        f"sig {best['signal_direction']}"
-        if best.get("signal_follow_only")
-        else (
-            f"Digest consensus {consensus.get('consensus_verdict')} | "
-            f"support {best['support']} | signal {best['signal_direction']}"
         )
-    )
-    trade_meta = json.dumps({
-        "target": best.get("target") or 0.0,
-        "stop": best.get("stop") or 0.0,
-        "entry_plan": best.get("entry") or 0.0,
-        "support": best.get("support") or 0,
-        "context_dates": best.get("context_dates") or [],
-        "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
-        "signal_direction": best.get("signal_direction", "NEUTRAL"),
-        "signal_reasons": best.get("signal_reasons", []),
-        "decision_audit": decision_audit,
-    }, ensure_ascii=False)
+        trade_meta = json.dumps({
+            "target": best.get("target") or 0.0,
+            "stop": best.get("stop") or 0.0,
+            "entry_plan": best.get("entry") or 0.0,
+            "support": best.get("support") or 0,
+            "context_dates": best.get("context_dates") or [],
+            "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
+            "signal_direction": best.get("signal_direction", "NEUTRAL"),
+            "signal_reasons": best.get("signal_reasons", []),
+        }, ensure_ascii=False)
 
-    result = await add_backtest_signal(
-        symbol=best["symbol"],
-        direction=best["direction"],
-        entry_price=float(best["current_price"]),
-        source="auto_trader",
-        quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 1.0),
-        notes=notes,
-        trade_log=trade_meta,
-    )
-
-    if result.get("status") != "opened":
-        await append_trade_decision_log(
-            "autotrade_open_failed",
-            {"decision_audit": decision_audit, "result": result},
-            signal_id=None,
+        result = await add_backtest_signal(
+            symbol=best["symbol"],
+            direction=best["direction"],
+            entry_price=float(best["current_price"]),
+            source="auto_trader",
+            quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 0.15),
+            notes=notes,
+            trade_log=trade_meta,
         )
-        return events
 
-    sid = result.get("signal_id")
-    await append_trade_decision_log(
-        "autotrade_opened",
-        decision_audit,
-        signal_id=sid,
-    )
-    logger.info(
-        "autotrade_opened %s %s score=%s audit=%s",
-        best["symbol"],
-        best["direction"],
-        best.get("total_score"),
-        json.dumps(decision_audit, ensure_ascii=False)[:2000],
-    )
+        if result.get("status") == "opened":
+            events.append({
+                "event": "opened",
+                "symbol": best["symbol"],
+                "direction": best["direction"],
+                "entry_price": float(best["current_price"]),
+                "target": float(best.get("target") or 0.0),
+                "stop": float(best.get("stop") or 0.0),
+                "score": float(best.get("total_score") or 0.0),
+            })
+            await _notify_admins(bot, admin_ids, events[-1])
+            logger.info(f"Opened {best['symbol']} {best['direction']} at {best['current_price']}")
+        elif result.get("status") in ("max_positions", "symbol_exists"):
+            logger.info(f"Skipping {best['symbol']}: {result.get('message')}")
+            break
 
-    opened_event = {
-        "event": "opened",
-        "symbol": best["symbol"],
-        "direction": best["direction"],
-        "entry_price": float(best["current_price"]),
-        "target": float(best.get("target") or 0.0),
-        "stop": float(best.get("stop") or 0.0),
-        "support": int(best.get("support") or 0),
-        "score": float(best.get("total_score") or 0.0),
-        "signal_direction": best.get("signal_direction", "NEUTRAL"),
-        "capital": float(result.get("capital_after") or 0.0),
-    }
-    events.append(opened_event)
-    await _notify_admins(bot, admin_ids, opened_event)
-    await _export_backtest_snapshot()
-    logger.info("Opened paper trade %s %s at %.2f", best["symbol"], best["direction"], best["current_price"])
+    if events:
+        await _export_backtest_snapshot()
     return events
 
 

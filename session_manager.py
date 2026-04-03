@@ -29,7 +29,7 @@ DEFAULT_PARAMS = {
     "open_score_threshold": AUTOTRADE_OPEN_SCORE_THRESHOLD,
     "neutral_sl_pct": AUTOTRADE_NEUTRAL_SL_PCT,
     "neutral_tp_pct": AUTOTRADE_NEUTRAL_TP_PCT,
-    "quantity_pct": 1.0,
+    "quantity_pct": 0.15,
     "max_trades_per_session": 50,
 }
 
