@@ -1077,9 +1077,9 @@ async def get_signal_trader_status() -> dict:
                                  "direction": dir,
                                  "entry_price": entry,
                                  "quantity": qty,
-                                 "status": "open",
-                                 trade_log = json.dumps({"target": entry*1.04, "stop": entry*0.98})
-                             })
+                                  "status": "open",
+                                  "trade_log": json.dumps({"target": entry*1.04, "stop": entry*0.98}),
+                              })
                              logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
                 logger.info(f"Total from GitHub: {len(signals)}")
     except Exception as e:
