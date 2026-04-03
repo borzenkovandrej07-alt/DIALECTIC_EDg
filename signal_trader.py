@@ -1056,14 +1056,18 @@ async def get_signal_trader_status() -> dict:
             
             # Parse open positions - load ALL from GitHub to be safe
             open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
+            logger.info(f"Open section found: {open_section is not None}")
             if open_section:
                 lines = open_section.group(1).strip().split('\n')
+                logger.info(f"Lines count: {len(lines)}")
                 signals = []  # Reset and load fresh from GitHub
                 for line in lines:
                     line = line.strip()
+                    logger.info(f"Processing line: {line}")
                     if not line.startswith('- **'):
                         continue
                     match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                    logger.info(f"Match result: {match}")
                     if match:
                         symbol, direction, entry, qty = match.groups()
                         entry = float(entry.replace(',', ''))
