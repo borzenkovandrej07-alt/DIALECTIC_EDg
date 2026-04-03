@@ -673,6 +673,7 @@ async def check_and_trade(bot, admin_ids: list[int]) -> list[dict]:
 
 async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     """Actual trading logic — always called under lock."""
+    events = []
 
     # Load session state from BACKTEST.md on first run
     if not session_manager._loaded:
