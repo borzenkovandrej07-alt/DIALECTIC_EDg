@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 # API URLs
 BINANCE_FUTURES_URL = "https://fapi.binance.com"
+BINANCE_SPOT_URL = "https://api.binance.com"
+COINGECKO_URL = "https://api.coingecko.com/api/v3"
 BYBIT_URL = "https://api.bybit.com"
 
 DIGEST_CACHE_URL = "https://raw.githubusercontent.com/{repo}/main/DIGEST_CACHE.md"
@@ -113,21 +115,23 @@ async def fetch_binance_signals(symbols: list[str] | None = None) -> dict:
     # Сначала пробуем Bybit (позиции трейдеров)
     bybit_data = await fetch_bybit_long_short_ratio(symbols)
     
+    # Пробуем Binance Futures, если не получится — Spot API
     async with aiohttp.ClientSession() as session:
         for symbol in symbols:
             try:
-                # Всегда получаем данные Binance как baseline
+                # Пробуем Futures API
                 ticker_url = f"{BINANCE_FUTURES_URL}/fapi/v1/ticker/24hr"
                 async with session.get(ticker_url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         ticker = await resp.json()
                         price_change = float(ticker.get("priceChangePercent", 0))
-                        
                         results[symbol] = {
                             "price_change": round(price_change, 2),
                             "volume": float(ticker.get("quoteVolume", 0)),
                             "last_price": float(ticker.get("lastPrice", 0)),
                         }
+                    else:
+                        raise ValueError(f"Futures API returned {resp.status}")
                 
                 # Funding rate
                 funding_url = f"{BINANCE_FUTURES_URL}/fapi/v1/fundingRate"
@@ -138,17 +142,34 @@ async def fetch_binance_signals(symbols: list[str] | None = None) -> dict:
                             funding = float(data[0].get("fundingRate", 0))
                             results[symbol]["funding_rate"] = funding
                             results[symbol]["funding_direction"] = "LONG" if funding > 0 else "SHORT"
-                
-                # Если есть Bybit данные - мержим
-                if symbol in bybit_data:
-                    results[symbol]["long"] = bybit_data[symbol]["long"]
-                    results[symbol]["short"] = bybit_data[symbol]["short"]
-                    results[symbol]["dominant"] = bybit_data[symbol]["dominant"]
-                    results[symbol]["has_traders_data"] = True
-                    logger.info(f"Using Bybit data for {symbol}")
-                        
-            except Exception as e:
-                logger.warning(f"Binance API error for {symbol}: {e}")
+                            
+            except Exception:
+                # Fallback: пробуем Spot API
+                try:
+                    spot_url = f"{BINANCE_SPOT_URL}/api/v3/ticker/24hr"
+                    async with session.get(spot_url, params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            ticker = await resp.json()
+                            price_change = float(ticker.get("priceChangePercent", 0))
+                            results[symbol] = {
+                                "price_change": round(price_change, 2),
+                                "volume": float(ticker.get("quoteVolume", 0)),
+                                "last_price": float(ticker.get("lastPrice", 0)),
+                                "funding_rate": 0,
+                                "funding_direction": "NEUTRAL",
+                            }
+                        else:
+                            raise ValueError(f"Spot API returned {resp.status}")
+                except Exception as e:
+                    logger.warning(f"Binance fallback error for {symbol}: {e}")
+                    continue
+            
+            # Если есть Bybit данные - мержим
+            if symbol in bybit_data:
+                results[symbol]["long"] = bybit_data[symbol]["long"]
+                results[symbol]["short"] = bybit_data[symbol]["short"]
+                results[symbol]["dominant"] = bybit_data[symbol]["dominant"]
+                results[symbol]["has_traders_data"] = True
     
     return results
 
