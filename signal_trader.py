@@ -975,6 +975,13 @@ async def get_signal_trader_status() -> dict:
             "support": int(meta.get("support") or 0),
         })
 
+    # Debug: log all signals to find open position issue
+    all_signals = await get_backtest_signals()
+    open_check = [s for s in all_signals if s.get("status") == "open"]
+    logger.info(f"DEBUG: all_signals={len(all_signals)}, open_check={len(open_check)}")
+    for s in open_check:
+        logger.info(f"DEBUG open: {s.get('symbol')} {s.get('direction')} qty={s.get('quantity')} status={s.get('status')}")
+
     digest_pv = (latest_context or {}).get("prompt_versions") or {}
     snap_time = (latest_context or {}).get("model_inputs_snapshot") or {}
     snap_ts = snap_time.get("generated_at_utc") if isinstance(snap_time, dict) else None
