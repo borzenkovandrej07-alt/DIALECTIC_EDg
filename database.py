@@ -206,7 +206,17 @@ async def get_user(user_id: int) -> Optional[dict]:
             "SELECT * FROM users WHERE user_id = ?", (user_id,)
         ) as cursor:
             row = await cursor.fetchone()
-            return dict(row._asdict()) if row else None
+            return _row_to_dict(row)
+
+
+def _row_to_dict(row):
+    """Convert sqlite3.Row to dict - works with both old and new aiosqlite versions."""
+    if row is None:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        return {k: row[k] for k in row.keys()}
 
 
 async def increment_requests(user_id: int):
@@ -520,7 +530,7 @@ async def get_feedback_stats() -> dict:
             FROM feedback
         """) as cursor:
             row = await cursor.fetchone()
-            return dict(row._asdict())
+            return _row_to_dict(row)
 
 
 # ─── Отчёты ───────────────────────────────────────────────────────────────────
@@ -589,7 +599,7 @@ async def get_portfolio(user_id: int) -> list[dict]:
             ORDER BY added_at DESC
         """, (user_id,)) as cursor:
             rows = await cursor.fetchall()
-            return [dict(row._asdict()) for row in rows]
+            return [_row_to_dict(row) for row in rows]
 
 
 async def remove_portfolio_position(user_id: int, symbol: str) -> bool:
@@ -765,7 +775,7 @@ async def get_backtest_signals() -> list[dict]:
             SELECT * FROM backtest_signals ORDER BY created_at DESC
         """) as cursor:
             rows = await cursor.fetchall()
-            return [dict(row.dict(row._asdict())) for row in rows]
+            return [_row_to_dict(row) for row in rows]
 
 
 async def get_backtest_stats() -> dict:
@@ -785,7 +795,7 @@ async def get_backtest_stats() -> dict:
             row = await cursor.fetchone()
             if not row:
                 return {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "avg_pnl_pct": 0.0}
-            d = dict(row._asdict())
+            d = _row_to_dict(row)
             return {
                 "total": d.get("total") or 0,
                 "wins": d.get("wins") or 0,
@@ -805,7 +815,7 @@ async def get_backtest_config() -> dict:
             row = await cursor.fetchone()
             if not row:
                 return {"capital": 100.0, "enabled": 1}
-            d = dict(row._asdict())
+            d = _row_to_dict(row)
             d["capital"] = d.get("capital") or 100.0
             d["enabled"] = d.get("enabled") or 1
             return d
@@ -839,7 +849,7 @@ def _decode_daily_context_row(row) -> dict | None:
     if not row:
         return None
 
-    data = dict(row._asdict())
+    data = _row_to_dict(row)
     data["symbols"] = json.loads(data.get("symbols", "[]") or "[]")
     data["entries"] = json.loads(data.get("entries", "{}") or "{}")
     data["stop_losses"] = json.loads(data.get("stop_losses", "{}") or "{}")
@@ -977,7 +987,7 @@ async def get_recent_trade_decisions(limit: int = 5) -> list[dict]:
             rows = await cursor.fetchall()
             out = []
             for row in rows:
-                item = dict(row.dict(row._asdict()))
+                item = _row_to_dict(row)
                 try:
                     item["payload"] = json.loads(item.get("payload") or "{}")
                 except Exception:
@@ -999,7 +1009,7 @@ async def get_recent_predictions(days: int = 5, limit: int = 10) -> list[dict]:
             LIMIT ?
         """, (limit,)) as cursor:
             rows = await cursor.fetchall()
-            return [dict(row._asdict()) for row in rows]
+            return [_row_to_dict(row) for row in rows]
 
 
 async def get_predictions_summary(days: int = 5) -> str:
