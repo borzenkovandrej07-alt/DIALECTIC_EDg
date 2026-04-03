@@ -1038,35 +1038,52 @@ async def get_signal_trader_status() -> dict:
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
     
-    # Try to load positions from GitHub positions.json
+    # Load positions from GitHub BACKTEST.md
     try:
-        from github_export import _github_get
-        positions_content, _ = await _github_get("positions.json")
-        if positions_content:
-            import json
-            positions_data = json.loads(positions_content)
-            capital = positions_data.get("capital", 100.0)
-            config["capital"] = capital
-            positions = positions_data.get("positions", [])
-            signals = []
-            for p in positions:
-                signals.append({
-                    "id": 0,
-                    "symbol": p["symbol"],
-                    "direction": p["direction"],
-                    "entry_price": float(p["entry_price"]),
-                    "quantity": float(p["quantity"]),
-                    "status": "open",
-                    "trade_log": json.dumps({
-                        "target": float(p.get("target", 0)),
-                        "stop": float(p.get("stop", 0)),
-                        "entry_plan": float(p["entry_price"]),
-                    }, ensure_ascii=False),
-                })
-                logger.info(f"Loaded from positions.json: {p['symbol']} {p['direction']} @ ${p['entry_price']}")
-            logger.info(f"Total positions from positions.json: {len(signals)}")
+        from github_export import _github_get, BACKTEST_FILE
+        backtest_content, _ = await _github_get(BACKTEST_FILE)
+        if backtest_content:
+            import re
+            
+            # Parse capital
+            cap_m = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
+            if cap_m:
+                config["capital"] = float(cap_m.group(1).replace(',', ''))
+            
+            # Find open positions section
+            idx = backtest_content.find('## 🔵 Открытые позиции')
+            if idx == -1:
+                idx = backtest_content.find('## Открытые позиции')
+            if idx != -1:
+                section = backtest_content[idx:]
+                next_idx = section.find('\n## ', 10)
+                if next_idx != -1:
+                    section = section[:next_idx]
+                
+                signals = []
+                for line in section.split('\n'):
+                    line = line.strip()
+                    if not line.startswith('- '):
+                        continue
+                    # **BNB** BUY @ $584.95 (qty: 0.0256)
+                    m = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                    if m:
+                        sym, dir, entry, qty = m.groups()
+                        entry = float(entry.replace(',', ''))
+                        qty = float(qty)
+                        signals.append({
+                            "id": 0,
+                            "symbol": sym,
+                            "direction": dir,
+                            "entry_price": entry,
+                            "quantity": qty,
+                            "status": "open",
+                            "trade_log": json.dumps({"target": entry*1.04, "stop": entry*0.98}),
+                        })
+                        logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
+                logger.info(f"Total from GitHub: {len(signals)}")
     except Exception as e:
-        logger.warning(f"Failed to load positions.json: {e}")
+        logger.warning(f"GitHub load error: {e}")
     
     open_positions = [row for row in signals if row.get("status") == "open"]
     
