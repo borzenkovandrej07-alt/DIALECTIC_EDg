@@ -1011,10 +1011,9 @@ async def get_signal_trader_status() -> dict:
                         
                         # Try to find target/stop - not always present in BACKTEST.md
                         # Use sensible defaults if not found
-                        target = entry * 1.04  # 4% take profit default
-                        stop = entry * 0.98   # 2% stop loss default
+                        target = entry * 1.04
+                        stop = entry * 0.98
                         
-                        import json
                         trade_log = json.dumps({
                             "target": target, 
                             "stop": stop,
@@ -1079,7 +1078,7 @@ async def get_signal_trader_status() -> dict:
                                  "entry_price": entry,
                                  "quantity": qty,
                                  "status": "open",
-                                 "trade_log": json.dumps({"target": entry*1.04, "stop": entry*0.98}),
+                                 trade_log = json.dumps({"target": entry*1.04, "stop": entry*0.98})
                              })
                              logger.info(f"Loaded: {sym} {dir} @ ${entry} qty={qty}")
                 logger.info(f"Total from GitHub: {len(signals)}")
