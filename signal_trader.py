@@ -1038,58 +1038,61 @@ async def get_signal_trader_status() -> dict:
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
     
-    # If local DB has no signals, load from GitHub BACKTEST.md
-    if not signals:
-        try:
-            from github_export import _github_get, BACKTEST_FILE
-            backtest_content, _ = await _github_get(BACKTEST_FILE)
-            if backtest_content:
-                import re
-                
-                # Parse capital
-                capital_match = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
-                if capital_match:
-                    github_capital = float(capital_match.group(1).replace(',', ''))
-                    logger.info(f"GitHub capital: ${github_capital}")
-                    if github_capital > 0:
-                        config["capital"] = github_capital
-                
-                # Parse open positions
-                open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
-                if open_section:
-                    lines = open_section.group(1).strip().split('\n')
-                    for line in lines:
-                        line = line.strip()
-                        if not line.startswith('- **'):
-                            continue
-                        match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                        if match:
-                            symbol, direction, entry, qty = match.groups()
-                            entry = float(entry.replace(',', ''))
-                            qty = float(qty)
-                            
-                            target = entry * 1.04
-                            stop = entry * 0.98
-                            
-                            import json
-                            trade_log = json.dumps({
-                                "target": target, 
-                                "stop": stop,
-                                "entry_plan": entry,
-                            }, ensure_ascii=False)
-                            
-                            signals.append({
-                                "id": 0,
-                                "symbol": symbol,
-                                "direction": direction,
-                                "entry_price": entry,
-                                "quantity": qty,
-                                "status": "open",
-                                "trade_log": trade_log,
-                            })
-                            logger.info(f"Loaded open position from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
-        except Exception as e:
-            logger.debug(f"Failed to load positions from GitHub: {e}")
+    # If local DB has no signals OR capital is different from GitHub, sync with GitHub
+    github_capital = None
+    try:
+        from github_export import _github_get, BACKTEST_FILE
+        backtest_content, _ = await _github_get(BACKTEST_FILE)
+        if backtest_content:
+            import re
+            
+            # Parse capital
+            capital_match = re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', backtest_content)
+            if capital_match:
+                github_capital = float(capital_match.group(1).replace(',', ''))
+                logger.info(f"GitHub capital: ${github_capital}")
+                # Override local config capital with GitHub value
+                config["capital"] = github_capital
+            
+            # Parse open positions - load ALL from GitHub to be safe
+            open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
+            if open_section:
+                lines = open_section.group(1).strip().split('\n')
+                signals = []  # Reset and load fresh from GitHub
+                for line in lines:
+                    line = line.strip()
+                    if not line.startswith('- **'):
+                        continue
+                    match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
+                    if match:
+                        symbol, direction, entry, qty = match.groups()
+                        entry = float(entry.replace(',', ''))
+                        qty = float(qty)
+                        
+                        target = entry * 1.04
+                        stop = entry * 0.98
+                        
+                        import json
+                        trade_log = json.dumps({
+                            "target": target, 
+                            "stop": stop,
+                            "entry_plan": entry,
+                        }, ensure_ascii=False)
+                        
+                        signals.append({
+                            "id": 0,
+                            "symbol": symbol,
+                            "direction": direction,
+                            "entry_price": entry,
+                            "quantity": qty,
+                            "status": "open",
+                            "trade_log": trade_log,
+                        })
+                        logger.info(f"Loaded open position from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
+    except Exception as e:
+        logger.debug(f"Failed to load from GitHub: {e}")
+    
+    open_positions = [row for row in signals if row.get("status") == "open"]
     
     open_positions = [row for row in signals if row.get("status") == "open"]
     contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
