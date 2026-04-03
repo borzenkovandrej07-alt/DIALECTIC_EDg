@@ -675,8 +675,8 @@ def format_signal_trader_status_message(status: dict) -> str:
 
     active_positions = status.get("active_positions", []) or []
     if active_positions:
-        msg += "\n📍 *Открытая позиция:*\n"
-        for pos in active_positions[:1]:
+        msg += f"\n📍 *Открытые позиции ({len(active_positions)}):*\n"
+        for pos in active_positions:
             qty = pos.get("quantity", 0)
             qty_str = f" ({qty:.6f} шт)" if qty > 0 else ""
             msg += f"• {pos['symbol']} {pos['direction']} @ ${pos['entry_price']:,.2f}{qty_str}\n"
