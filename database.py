@@ -626,6 +626,7 @@ async def add_backtest_signal(
     quantity_pct = min(max(quantity_pct, 0.01), 1.0)
     capital = float(config.get("capital", 100.0) or 100.0)
     quantity = (capital * quantity_pct) / entry_price if entry_price > 0 else 0.0
+    position_cost = quantity * entry_price
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -649,12 +650,18 @@ async def add_backtest_signal(
                 "capital_after": capital,
             }
 
+        # Deduct position cost from capital
+        new_capital = capital - position_cost
+
         cursor = await db.execute("""
             INSERT INTO backtest_signals (
                 symbol, direction, entry_price, status, signal_source, notes, quantity, trade_log
             )
             VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
         """, (symbol, direction, entry_price, source, notes[:500], quantity, trade_log[:4000]))
+
+        # Update capital
+        await db.execute("UPDATE backtest_config SET capital = ? WHERE id = 1", (new_capital,))
 
         await db.execute("""
             UPDATE backtest_config SET last_updated = datetime('now') WHERE id = 1
@@ -669,7 +676,7 @@ async def add_backtest_signal(
         "entry_price": entry_price,
         "quantity": quantity,
         "capital_before": capital,
-        "capital_after": capital,
+        "capital_after": new_capital,
     }
 
 
