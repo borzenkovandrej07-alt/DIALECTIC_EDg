@@ -626,7 +626,7 @@ async def add_backtest_signal(
     quantity_pct = min(max(quantity_pct, 0.01), 1.0)
     quantity = 0.0
     position_cost = 0.0
-    capital = 100.0
+    capital = 0.0  # Will be read from DB
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -642,20 +642,20 @@ async def add_backtest_signal(
 
         logger.info(f"add_backtest_signal: capital from config={capital}")
 
-        # Check for existing open position
+        # Check for ANY existing open position (not just same symbol)
         async with db.execute("""
             SELECT * FROM backtest_signals
-            WHERE symbol = ? AND direction = ? AND status = 'open'
+            WHERE status = 'open'
             ORDER BY created_at DESC LIMIT 1
-        """, (symbol, direction)) as cursor:
+        """) as cursor:
             existing_open = await cursor.fetchone()
 
         if existing_open:
+            logger.info(f"add_backtest_signal: already have open position {existing_open['symbol']}, skipping new position")
             return {
-                "status": "duplicate_open",
-                "signal_id": existing_open["id"],
-                "symbol": symbol,
-                "direction": direction,
+                "status": "position_exists",
+                "symbol": existing_open["symbol"],
+                "direction": existing_open["direction"],
                 "entry_price": existing_open["entry_price"],
                 "quantity": existing_open["quantity"] or 0.0,
                 "capital_before": capital,
