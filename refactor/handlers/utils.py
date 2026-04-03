@@ -51,6 +51,8 @@ def clean_markdown(text: str) -> str:
     lines = text.split("\n")
     clean_lines: List[str] = []
     for line in lines:
+        # Strip ### headers
+        line = re.sub(r'^#{1,6}\s*', '', line)
         if line.count("*") % 2 != 0:
             line = line.replace("*", "")
         if line.count("_") % 2 != 0:
