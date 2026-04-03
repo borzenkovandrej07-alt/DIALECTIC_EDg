@@ -854,51 +854,57 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         best = candidate
         logger.info(f"check_and_trade: attempting to open {best.get('symbol')} {best.get('direction')} score={best.get('total_score')}")
 
+        support = best.get("support") or 0
         notes = (
             f"Signal-follow (market) | {best['symbol']} {best['direction']} | "
             f"sig {best['signal_direction']}"
             if best.get("signal_follow_only")
             else (
                 f"Digest consensus {consensus.get('consensus_verdict')} | "
-                f"support {best['support']} | signal {best['signal_direction']}"
+                f"support {support} | signal {best['signal_direction']}"
             )
         )
         trade_meta = json.dumps({
             "target": best.get("target") or 0.0,
             "stop": best.get("stop") or 0.0,
             "entry_plan": best.get("entry") or 0.0,
-            "support": best.get("support") or 0,
+            "support": support,
             "context_dates": best.get("context_dates") or [],
             "consensus_verdict": consensus.get("consensus_verdict", "NEUTRAL"),
             "signal_direction": best.get("signal_direction", "NEUTRAL"),
             "signal_reasons": best.get("signal_reasons", []),
         }, ensure_ascii=False)
 
-        result = await add_backtest_signal(
-            symbol=best["symbol"],
-            direction=best["direction"],
-            entry_price=float(best["current_price"]),
-            source="auto_trader",
-            quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 0.15),
-            notes=notes,
-            trade_log=trade_meta,
-        )
+        try:
+            result = await add_backtest_signal(
+                symbol=best["symbol"],
+                direction=best["direction"],
+                entry_price=float(best["current_price"]),
+                source="auto_trader",
+                quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 0.15),
+                notes=notes,
+                trade_log=trade_meta,
+            )
 
-        if result.get("status") == "opened":
-            events.append({
-                "event": "opened",
-                "symbol": best["symbol"],
-                "direction": best["direction"],
-                "entry_price": float(best["current_price"]),
-                "target": float(best.get("target") or 0.0),
-                "stop": float(best.get("stop") or 0.0),
-                "score": float(best.get("total_score") or 0.0),
-            })
-            await _notify_admins(bot, admin_ids, events[-1])
-            logger.info(f"Opened {best['symbol']} {best['direction']} at {best['current_price']}")
-        elif result.get("status") in ("max_positions", "symbol_exists"):
-            logger.info(f"Skipping {best['symbol']}: {result.get('message')}")
-            break
+            if result.get("status") == "opened":
+                events.append({
+                    "event": "opened",
+                    "symbol": best["symbol"],
+                    "direction": best["direction"],
+                    "entry_price": float(best["current_price"]),
+                    "target": float(best.get("target") or 0.0),
+                    "stop": float(best.get("stop") or 0.0),
+                    "support": support,
+                    "score": float(best.get("total_score") or 0.0),
+                })
+                await _notify_admins(bot, admin_ids, events[-1])
+                logger.info(f"Opened {best['symbol']} {best['direction']} at {best['current_price']}")
+            elif result.get("status") in ("max_positions", "symbol_exists"):
+                logger.info(f"Skipping {best['symbol']}: {result.get('message')}")
+                break
+        except Exception as e:
+            logger.error(f"Failed to open position for {best['symbol']}: {e}")
+            continue
 
     if events:
         await _export_backtest_snapshot()
