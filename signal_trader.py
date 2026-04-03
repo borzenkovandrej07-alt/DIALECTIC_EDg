@@ -1038,8 +1038,7 @@ async def get_signal_trader_status() -> dict:
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
     
-    # If local DB has no signals OR capital is different from GitHub, sync with GitHub
-    github_capital = None
+    # ALWAYS sync positions from GitHub BACKTEST.md
     try:
         from github_export import _github_get, BACKTEST_FILE
         backtest_content, _ = await _github_get(BACKTEST_FILE)
@@ -1051,23 +1050,18 @@ async def get_signal_trader_status() -> dict:
             if capital_match:
                 github_capital = float(capital_match.group(1).replace(',', ''))
                 logger.info(f"GitHub capital: ${github_capital}")
-                # Override local config capital with GitHub value
                 config["capital"] = github_capital
             
-            # Parse open positions - load ALL from GitHub to be safe
+            # Parse open positions
             open_section = re.search(r'## 🔵 Открытые позиции\n(.*?)(?=\n## |\Z)', backtest_content, re.DOTALL)
-            logger.info(f"Open section found: {open_section is not None}")
             if open_section:
                 lines = open_section.group(1).strip().split('\n')
-                logger.info(f"Lines count: {len(lines)}")
-                signals = []  # Reset and load fresh from GitHub
+                signals = []  # Reset - use GitHub as source of truth
                 for line in lines:
                     line = line.strip()
-                    logger.info(f"Processing line: {line}")
                     if not line.startswith('- **'):
                         continue
                     match = re.search(r'\*\*(\w+)\*\*\s+(\w+)\s+@\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)', line)
-                    logger.info(f"Match result: {match}")
                     if match:
                         symbol, direction, entry, qty = match.groups()
                         entry = float(entry.replace(',', ''))
@@ -1092,9 +1086,12 @@ async def get_signal_trader_status() -> dict:
                             "status": "open",
                             "trade_log": trade_log,
                         })
-                        logger.info(f"Loaded open position from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
+                        logger.info(f"Loaded from GitHub: {symbol} {direction} @ ${entry} qty={qty}")
+                logger.info(f"Total positions loaded from GitHub: {len(signals)}")
+            else:
+                logger.info("No open positions section found in BACKTEST.md")
     except Exception as e:
-        logger.debug(f"Failed to load from GitHub: {e}")
+        logger.warning(f"Failed to load from GitHub: {e}")
     
     open_positions = [row for row in signals if row.get("status") == "open"]
     
