@@ -9,6 +9,8 @@ import os
 import re
 import aiohttp
 import json
+import base64
+import requests
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -27,6 +29,8 @@ FNG_URL = "https://api.alternative.me/fng/"
 GITHUB_REPO = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_PRICES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/prices.json"
+DIGEST_CACHE_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/DIGEST_CACHE.md"
+AUTO_TRACK_FILE = "AUTO_TRACK.md"
 
 
 def load_prices_from_github() -> dict:
@@ -408,74 +412,189 @@ class ResultChecker:
 
 
 async def main():
-    logger.info("🔄 Запускаю проверку всех прогнозов с историческими ценами...")
+    tracker = AutoTracker()
+    results = await tracker.check_all_forecasts()
+    if results:
+        md = tracker.generate_markdown(results)
+        await tracker.upload_to_github(md, AUTO_TRACK_FILE)
+        logger.info(f"✅ AUTO_TRACK.md обновлён")
+
+
+class AutoTracker:
+    """Класс для авто-проверки прогнозов, совместимый со scheduler.py."""
     
-    db = PriceDB()
-    fetcher = PriceFetcher(db)
-    checker = ResultChecker(fetcher)
+    def __init__(self):
+        self.db = PriceDB()
+        self.fetcher = PriceFetcher(self.db)
+        self.checker = ResultChecker(self.fetcher)
     
-    cache_path = "C:/Users/User/Desktop/DIALECTIC_EDg/DIGEST_CACHE.md"
+    async def _fetch_digest_cache(self) -> str:
+        """Скачать DIGEST_CACHE.md с GitHub."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(DIGEST_CACHE_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        return await resp.text()
+        except Exception as e:
+            logger.warning(f"Failed to fetch DIGEST_CACHE.md: {e}")
+        return ""
     
-    try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cache_text = f.read()
-    except Exception as e:
-        logger.error(f"Не удалось прочитать DIGEST_CACHE.md: {e}")
-        return
+    async def check_all_forecasts(self) -> list:
+        """Проверить все прогнозы из всех дайджестов."""
+        cache_text = await self._fetch_digest_cache()
+        if not cache_text:
+            logger.warning("DIGEST_CACHE.md пуст или недоступен")
+            return []
+        
+        digests = DigestParser.extract_all_digests(cache_text)
+        logger.info(f"Найдено дайджестов: {len(digests)}")
+        
+        all_forecasts = []
+        for digest in digests:
+            forecasts = DigestParser.extract_forecasts(digest)
+            all_forecasts.extend(forecasts)
+        
+        logger.info(f"Найдено прогнозов: {len(all_forecasts)}")
+        
+        results = []
+        for forecast in all_forecasts:
+            check = await self.checker.check_forecast(forecast)
+            results.append({**forecast, **check})
+        
+        results.sort(key=lambda x: x["date"], reverse=True)
+        return results
     
-    digests = DigestParser.extract_all_digests(cache_text)
-    logger.info(f"Найдено дайджестов: {len(digests)}")
+    def generate_markdown(self, results: list) -> str:
+        """Сгенерировать AUTO_TRACK.md в формате 1:1 с FORECASTS.md."""
+        total = len(results)
+        wins = sum(1 for r in results if "✅" in r.get("result", ""))
+        losses = sum(1 for r in results if "❌" in r.get("result", ""))
+        pending = sum(1 for r in results if "⚠" in r.get("result", "") or "Нет" in r.get("result", ""))
+        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        
+        # Open predictions (those with ⚠ or pending)
+        open_preds = [r for r in results if "⚠" in r.get("result", "") or "Нет" in r.get("result", "") or "Неизвестно" in r.get("result", "")]
+        # Closed predictions (✅ or ❌)
+        closed_preds = [r for r in results if "✅" in r.get("result", "") or "❌" in r.get("result", "")]
+        
+        # Accuracy by asset
+        by_asset = {}
+        for r in results:
+            asset = r.get("asset", "Unknown")
+            if asset not in by_asset:
+                by_asset[asset] = {"calls": 0, "wins": 0, "losses": 0}
+            by_asset[asset]["calls"] += 1
+            if "✅" in r.get("result", ""):
+                by_asset[asset]["wins"] += 1
+            elif "❌" in r.get("result", ""):
+                by_asset[asset]["losses"] += 1
+        
+        lines = [
+            "# 📊 Dialectic Edge — Auto Track Record",
+            "",
+            f"> Последнее обновление: {now}",
+            "> Автоматический трекинг точности прогнозов.",
+            "> ⚠️ Не является финансовым советом. DYOR.",
+            "",
+            "---",
+            "## 🎯 Общая статистика",
+            "",
+            "| Метрика | Значение |",
+            "|---------|----------|",
+            f"| Всего прогнозов | {total} |",
+            f"| ✅ Прибыльных | {wins} |",
+            f"| ❌ Убыточных | {losses} |",
+            f"| ⏳ Открытых | {pending} |",
+            f"| 🎯 Точность | **{win_rate:.1f}%** |",
+            "",
+            "---",
+        ]
+        
+        if open_preds:
+            lines += [
+                "## ⏳ Открытые прогнозы",
+                "",
+                "| Актив | Тип | Прогноз | Факт | Результат | Дата |",
+                "|-------|-----|---------|------|-----------|------|",
+            ]
+            for p in open_preds[:20]:
+                fact = p.get("fact", "—") or "—"
+                date = p.get("date", "—")
+                lines.append(
+                    f"| {p['asset']} | {p.get('type', '—')} | {p['forecast']} | {fact} | {p['result']} | {date} |"
+                )
+            lines += ["", "---"]
+        
+        if closed_preds:
+            lines += [
+                "## 📋 Последние закрытые прогнозы",
+                "",
+                "| Дата | Актив | Тип | Прогноз | Факт | Результат | Точность |",
+                "|------|-------|-----|---------|------|-----------|----------|",
+            ]
+            for r in closed_preds[:30]:
+                fact = r.get("fact", "—") or "—"
+                acc = r.get("accuracy", "—") or "—"
+                lines.append(
+                    f"| {r['date']} | {r['asset']} | {r.get('type', '—')} | {r['forecast']} | {fact} | {r['result']} | {acc} |"
+                )
+            lines += ["", "---"]
+        
+        if by_asset:
+            lines += [
+                "## 🏆 Точность по активам",
+                "",
+                "| Актив | Сигналов | Побед | Точность |",
+                "|-------|----------|-------|----------|",
+            ]
+            for asset, stats in sorted(by_asset.items()):
+                wr = (stats['wins'] / max(stats['wins'] + stats['losses'], 1) * 100) if (stats['wins'] + stats['losses']) > 0 else 0
+                lines.append(f"| {asset} | {stats['calls']} | {stats['wins']} | {wr:.0f}% |")
+            lines += ["", "---"]
+        
+        lines += [
+            "## ℹ️ О проекте",
+            "",
+            "**Dialectic Edge** — мультиагентная система финансового анализа.",
+            "4 AI-модели: Bull (Groq/Llama), Bear (Mistral), Verifier, Synth (Mistral Large).",
+            "",
+            "---",
+            "*Прошлая точность не гарантирует будущих результатов.*",
+        ]
+        
+        return "\n".join(lines)
     
-    all_forecasts = []
-    for digest in digests:
-        forecasts = DigestParser.extract_forecasts(digest)
-        all_forecasts.extend(forecasts)
-    
-    logger.info(f"Найдено прогнозов: {len(all_forecasts)}")
-    
-    results = []
-    for forecast in all_forecasts:
-        check = await checker.check_forecast(forecast)
-        results.append({**forecast, **check})
-    
-    results.sort(key=lambda x: x["date"], reverse=True)
-    
-    lines = [
-        "# 📊 Dialectic Edge — Auto Track Record",
-        f"> Автоматическая проверка: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-        "",
-        "## 📝 Проверенные прогнозы",
-        "",
-        "| Дата | Тип | Актив | Прогноз | Факт | Результат | Точность |",
-        "|------|-----|-------|---------|------|-----------|----------|",
-    ]
-    
-    for r in results:
-        lines.append(f"| {r['date']} | {r['type']} | {r['asset']} | {r['forecast']} | {r.get('fact', '—')} | {r['result']} | {r.get('accuracy', '—')} |")
-    
-    total = len(results)
-    correct = sum(1 for r in results if "✅" in r.get("result", ""))
-    accuracy = (correct / total * 100) if total > 0 else 0
-    
-    lines.extend([
-        "",
-        "## 🎯 Статистика",
-        "",
-        f"- Всего прогнозов: **{total}**",
-        f"- Верно: **{correct}**",
-        f"- Точность: **{accuracy:.1f}%**",
-    ])
-    
-    md = "\n".join(lines)
-    
-    output_path = "C:/Users/User/Desktop/AUTO_TRACK.txt"
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(md)
-    
-    save_prices_to_github(db.prices)
-    
-    logger.info(f"✅ Сохранено в: {output_path}")
-    logger.info(f"Прогнозов: {total}, Верно: {correct}, Точность: {accuracy:.1f}%")
+    async def upload_to_github(self, content: str, filename: str) -> bool:
+        """Загрузить файл на GitHub."""
+        if not GITHUB_TOKEN:
+            logger.warning("No GITHUB_TOKEN — не могу загрузить на GitHub")
+            return False
+        
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+        
+        try:
+            # Get current SHA
+            resp = requests.get(url, headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=10)
+            sha = resp.json().get("sha") if resp.status_code == 200 else None
+            
+            data = {
+                "message": f"📊 Update {filename} {datetime.now().strftime('%Y-%m-%d %H:%M')} [skip ci]",
+                "content": base64.b64encode(content.encode()).decode(),
+            }
+            if sha:
+                data["sha"] = sha
+            
+            resp = requests.put(url, headers={"Authorization": f"token {GITHUB_TOKEN}"}, json=data, timeout=10)
+            if resp.status_code in (200, 201):
+                logger.info(f"✅ {filename} обновлён на GitHub")
+                return True
+            else:
+                logger.warning(f"GitHub upload failed: {resp.status_code} {resp.text}")
+                return False
+        except Exception as e:
+            logger.warning(f"GitHub upload error: {e}")
+            return False
 
 
 if __name__ == "__main__":
