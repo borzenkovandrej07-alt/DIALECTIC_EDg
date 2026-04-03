@@ -963,6 +963,19 @@ async def run_signal_trader(bot, admin_ids: list[int]):
 
 async def get_signal_trader_status() -> dict:
     """Return a richer status payload for /signalstatus."""
+    # Load fresh state from GitHub BACKTEST.md
+    if not session_manager._loaded:
+        try:
+            from github_export import _github_get, BACKTEST_FILE
+            backtest_content, _ = await _github_get(BACKTEST_FILE)
+            if backtest_content:
+                session_manager._load_from_backtest(backtest_content)
+                # Also sync to local DB
+                from database import update_backtest_capital
+                await update_backtest_capital(session_manager.current_session.capital)
+        except Exception as e:
+            logger.debug("Failed to load session state from GitHub: %s")
+
     config = await get_backtest_config()
     stats = await get_backtest_stats()
     signals = await get_backtest_signals()
