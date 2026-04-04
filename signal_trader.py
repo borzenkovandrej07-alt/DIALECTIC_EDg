@@ -630,22 +630,43 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     if not reason:
         return None
 
-    result = await close_backtest_signal(position["id"], current_price, reason=reason)
-    if not result:
-        return None
+    signal_id = position.get("id", -1)
+
+    if signal_id and signal_id > 0:
+        # Позиция есть в SQLite — закрываем через БД
+        result = await close_backtest_signal(signal_id, current_price, reason=reason)
+        if not result:
+            return None
+        new_capital = float(result.get("new_capital") or 0.0)
+        pnl = float(result.get("pnl") or 0.0)
+        pnl_pct = float(result.get("pnl_pct") or 0.0)
+    else:
+        # In-memory позиция (после редеплоя) — считаем PnL вручную
+        qty = float(position.get("quantity") or 0.0)
+        if direction == "BUY":
+            pnl_per_unit = current_price - entry_price
+        else:
+            pnl_per_unit = entry_price - current_price
+        pnl_pct = (pnl_per_unit / entry_price * 100) if entry_price > 0 else 0.0
+        pnl = pnl_per_unit * qty
+        config = await get_backtest_config()
+        capital = float(config.get("capital") or 100.0)
+        new_capital = max(capital + pnl, 0.0)
+        await update_backtest_capital(new_capital)
+        logger.info(f"In-memory close: {symbol} pnl={pnl:+.2f} new_capital={new_capital:.2f}")
 
     session_manager.record_trade({
         "symbol": symbol,
         "direction": direction,
         "entry_price": entry_price,
         "exit_price": current_price,
-        "pnl": float(result.get("pnl") or 0.0),
-        "pnl_pct": float(result.get("pnl_pct") or 0.0),
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
         "reason": reason,
     })
-    session_manager.update_capital(float(result.get("new_capital") or 0.0))
+    session_manager.update_capital(new_capital)
 
-    # ФИХ: сразу пишем в BACKTEST.md после каждого закрытия
+    # Сразу пишем в BACKTEST.md после каждого закрытия
     try:
         await _export_backtest_snapshot()
     except Exception as _e:
@@ -658,9 +679,9 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
         "entry_price": entry_price,
         "exit_price": current_price,
         "reason": reason,
-        "pnl": float(result.get("pnl") or 0.0),
-        "pnl_pct": float(result.get("pnl_pct") or 0.0),
-        "capital": float(result.get("new_capital") or 0.0),
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "capital": new_capital,
     }
 
 
@@ -684,19 +705,6 @@ async def _close_on_signal_reversal(position: dict, prices: dict, signal_bias: d
     reversal_threshold = REVERSAL_SCORE_THRESHOLD
     signal = signal_bias.get(symbol, {})
     signal_score = abs(float(signal.get("score") or 0.0))
-    reasons = signal.get("reasons", [])
-    price_change = signal.get("price_change", 0)
-    funding = signal.get("funding_rate", 0)
-    long_pct = signal.get("long", 0)
-    short_pct = signal.get("short", 0)
-    
-    logger.info(
-        f"📊 Signal check: {symbol} {direction} | "
-        f"Signal: {signal_direction} score={signal_score:.1f} (threshold={reversal_threshold}) | "
-        f"Price: ${current_price:,.2f} | 24h: {price_change:+.2f}% | "
-        f"Traders: L{long_pct:.0f}%/S{short_pct:.0f}% | Funding: {funding*100:+.4f}% | "
-        f"Reasons: {reasons}"
-    )
     
     reason = ""
     
@@ -708,22 +716,41 @@ async def _close_on_signal_reversal(position: dict, prices: dict, signal_bias: d
     if not reason:
         return None
     
-    result = await close_backtest_signal(position["id"], current_price, reason=reason)
-    if not result:
-        return None
-    
+    signal_id = position.get("id", -1)
+    entry_price_rev = float(position.get("entry_price") or 0.0)
+    qty_rev = float(position.get("quantity") or 0.0)
+
+    if signal_id and signal_id > 0:
+        result = await close_backtest_signal(signal_id, current_price, reason=reason)
+        if not result:
+            return None
+        new_capital_rev = float(result.get("new_capital") or 0.0)
+        pnl_rev = float(result.get("pnl") or 0.0)
+        pnl_pct_rev = float(result.get("pnl_pct") or 0.0)
+    else:
+        if direction == "BUY":
+            pnl_per_unit_rev = current_price - entry_price_rev
+        else:
+            pnl_per_unit_rev = entry_price_rev - current_price
+        pnl_pct_rev = (pnl_per_unit_rev / entry_price_rev * 100) if entry_price_rev > 0 else 0.0
+        pnl_rev = pnl_per_unit_rev * qty_rev
+        config_rev = await get_backtest_config()
+        capital_rev = float(config_rev.get("capital") or 100.0)
+        new_capital_rev = max(capital_rev + pnl_rev, 0.0)
+        await update_backtest_capital(new_capital_rev)
+        logger.info(f"In-memory reversal close: {symbol} pnl={pnl_rev:+.2f}")
+
     session_manager.record_trade({
         "symbol": symbol,
         "direction": direction,
-        "entry_price": float(position.get("entry_price") or 0.0),
+        "entry_price": entry_price_rev,
         "exit_price": current_price,
-        "pnl": float(result.get("pnl") or 0.0),
-        "pnl_pct": float(result.get("pnl_pct") or 0.0),
+        "pnl": pnl_rev,
+        "pnl_pct": pnl_pct_rev,
         "reason": reason,
     })
-    session_manager.update_capital(float(result.get("new_capital") or 0.0))
+    session_manager.update_capital(new_capital_rev)
 
-    # ФИХ: сразу пишем в BACKTEST.md после закрытия по сигналу разворота
     try:
         await _export_backtest_snapshot()
     except Exception as _e:
@@ -733,12 +760,12 @@ async def _close_on_signal_reversal(position: dict, prices: dict, signal_bias: d
         "event": "closed",
         "symbol": symbol,
         "direction": direction,
-        "entry_price": float(position.get("entry_price") or 0.0),
+        "entry_price": entry_price_rev,
         "exit_price": current_price,
         "reason": reason,
-        "pnl": float(result.get("pnl") or 0.0),
-        "pnl_pct": float(result.get("pnl_pct") or 0.0),
-        "capital": float(result.get("new_capital") or 0.0),
+        "pnl": pnl_rev,
+        "pnl_pct": pnl_pct_rev,
+        "capital": new_capital_rev,
     }
 
 
@@ -838,10 +865,109 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
         return events
 
     current_capital = config.get("capital", 100.0)
+
+    # ═══ ГЛАВНЫЙ ФИХ: загружаем открытые позиции из GitHub как источник правды ═══
+    # SQLite на Railway сбрасывается при каждом редеплое — GitHub всегда актуален
+    import re as _re
+    gh_open_positions = []
+    try:
+        from github_export import _github_get, BACKTEST_FILE
+        bt_content, _ = await _github_get(BACKTEST_FILE)
+        if bt_content:
+            # Капитал из GitHub
+            cap_m = _re.search(r'Текущий:\s*\*\*\$([\d,\.]+)\*\*', bt_content)
+            if cap_m:
+                current_capital = float(cap_m.group(1).replace(',', ''))
+                config["capital"] = current_capital
+                await update_backtest_capital(current_capital)
+
+            # Открытые позиции из секции BACKTEST.md
+            idx = bt_content.find('Открытые позиции')
+            if idx != -1:
+                section = bt_content[idx:]
+                next_h = section.find('\n## ', 10)
+                section = section[:next_h] if next_h != -1 else section
+
+                for line in section.split('\n'):
+                    if '**' in line and 'qty' in line:
+                        m = _re.search(
+                            r'\*\*(\w+)\*\*\s+(\w+)\s+@\s*\$\s*([\d,\.]+)\s+\(qty:\s*([\d\.]+)\)',
+                            line
+                        )
+                        if m:
+                            sym, direction, entry_s, qty_s = m.groups()
+                            entry = float(entry_s.replace(',', ''))
+                            qty   = float(qty_s)
+                            tp_m  = _re.search(r'tp:\s*\$([\d,\.]+)', line)
+                            sl_m  = _re.search(r'sl:\s*\$([\d,\.]+)', line)
+                            target = float(tp_m.group(1).replace(',','')) if tp_m else entry * 1.04
+                            stop   = float(sl_m.group(1).replace(',','')) if sl_m else entry * 0.98
+                            # Ищем id в SQLite, если нет — создаём временную запись
+                            db_signals = await get_backtest_signals()
+                            db_open = [s for s in db_signals
+                                       if s.get("status") == "open"
+                                       and s.get("symbol") == sym
+                                       and s.get("direction","").upper() == direction.upper()]
+                            if db_open:
+                                pos = db_open[0]
+                                # Обновляем target/stop из GitHub если они были дефолтными
+                                pos["trade_log"] = json.dumps({
+                                    "target": target, "stop": stop, "entry_plan": entry
+                                })
+                            else:
+                                # Позиция есть на GitHub но нет в SQLite — восстанавливаем
+                                restore = await add_backtest_signal(
+                                    symbol=sym,
+                                    direction=direction,
+                                    entry_price=entry,
+                                    source="restored_from_github",
+                                    quantity_pct=0.0,  # без списания капитала
+                                    notes="Restored after redeploy",
+                                    trade_log=json.dumps({
+                                        "target": target, "stop": stop, "entry_plan": entry
+                                    }),
+                                )
+                                # Если открылось — берём из БД
+                                db_signals2 = await get_backtest_signals()
+                                db_open2 = [s for s in db_signals2
+                                            if s.get("status") == "open"
+                                            and s.get("symbol") == sym]
+                                if db_open2:
+                                    pos = db_open2[0]
+                                    pos["trade_log"] = json.dumps({
+                                        "target": target, "stop": stop, "entry_plan": entry
+                                    })
+                                else:
+                                    # Создаём in-memory запись для этого цикла
+                                    pos = {
+                                        "id": -1,
+                                        "symbol": sym,
+                                        "direction": direction,
+                                        "entry_price": entry,
+                                        "quantity": qty,
+                                        "status": "open",
+                                        "trade_log": json.dumps({
+                                            "target": target, "stop": stop, "entry_plan": entry
+                                        }),
+                                        "created_at": "",
+                                        "notes": "in-memory",
+                                    }
+                                    logger.warning(f"Position {sym} only in memory this cycle")
+                            gh_open_positions.append(pos)
+                            logger.info(f"Loaded position: {sym} {direction} @ ${entry} tp=${target:.0f} sl=${stop:.0f}")
+
+    except Exception as _e:
+        logger.warning(f"GitHub positions load error: {_e}")
+
     session_manager.update_capital(current_capital)
 
-    # Step 1: Get current open positions
-    open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+    # Step 1: открытые позиции — GitHub как источник правды, SQLite как fallback
+    if gh_open_positions:
+        open_positions = gh_open_positions
+        logger.info(f"Using {len(open_positions)} positions from GitHub")
+    else:
+        open_positions = [row for row in await get_backtest_signals() if row.get("status") == "open"]
+        logger.info(f"Using {len(open_positions)} positions from SQLite")
 
     # Step 2: Build consensus and signals
     contexts = await get_recent_daily_contexts(limit=RECENT_CONTEXT_LIMIT, max_age_hours=None)
