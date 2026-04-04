@@ -2601,13 +2601,22 @@ async def main():
     )
 
     # Start signal trader in background
-    from signal_trader import run_signal_trader
-    signal_trader_task = asyncio.create_task(run_signal_trader(bot, ADMIN_IDS))
+    from signal_trader import run_signal_trader, FEATURE_AUTOTRADE as _AT
 
-    await asyncio.gather(
-        dp.start_polling(bot),
-        scheduler.start()
-    )
+    if _AT:
+        signal_trader_task = asyncio.create_task(run_signal_trader(bot, ADMIN_IDS))
+        logger.info("🤖 Signal trader запущен (FEATURE_AUTOTRADE=1)")
+        await asyncio.gather(
+            dp.start_polling(bot),
+            scheduler.start(),
+            signal_trader_task,   # ← теперь в gather — падение будет видно
+        )
+    else:
+        logger.info("⏸ Signal trader выключен (FEATURE_AUTOTRADE=0)")
+        await asyncio.gather(
+            dp.start_polling(bot),
+            scheduler.start(),
+        )
 
 
 # ─── Портфельный трекер ─────────────────────────────────────────────────────────
