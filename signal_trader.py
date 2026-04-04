@@ -616,6 +616,13 @@ async def _close_position_if_needed(position: dict, prices: dict, signal_bias: d
     entry_price = float(position.get("entry_price") or 0.0)
     reason = ""
 
+    # ИСПРАВЛЕНО: если target/stop не были сохранены — применяем дефолты
+    if entry_price > 0:
+        if not target:
+            target = entry_price * 1.04   # +4% по умолчанию
+        if not stop:
+            stop   = entry_price * 0.98   # -2% по умолчанию
+
     if direction == "BUY":
         if target and current_price >= target:
             reason = "Target hit — фиксация прибыли"
