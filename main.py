@@ -767,6 +767,161 @@ async def cmd_signal_status(message: Message):
         await message.answer(f"Ошибка: {e}")
 
 
+@dp.message(Command("close"))
+async def cmd_close_position(message: Message):
+    """Close a specific position manually: /close BTC"""
+    try:
+        from signal_trader import get_signal_trader_status, fetch_current_prices, _parse_trade_meta
+        from database import close_backtest_signal, get_backtest_signals, get_backtest_config, update_backtest_capital
+        from session_manager import session_manager
+
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.answer("Использование: `/close <SYMBOL>`\nПример: `/close BTC`", parse_mode="Markdown")
+            return
+
+        symbol = args[1].strip().upper()
+
+        signals = await get_backtest_signals()
+        open_positions = [s for s in signals if s.get("status") == "open" and s.get("symbol", "").upper() == symbol]
+
+        if not open_positions:
+            open_list = [s.get("symbol", "") for s in signals if s.get("status") == "open"]
+            await message.answer(
+                f"Нет открытой позиции по {symbol}.\n"
+                f"Открытые: {', '.join(open_list) if open_list else 'нет'}",
+                parse_mode="Markdown"
+            )
+            return
+
+        position = open_positions[0]
+        prices = await fetch_current_prices([symbol])
+        current_price = float(prices.get(symbol) or 0.0)
+
+        if current_price <= 0:
+            await message.answer(f"Не удалось получить цену для {symbol}")
+            return
+
+        meta = _parse_trade_meta(position)
+        direction = position.get("direction", "")
+        entry_price = float(position.get("entry_price") or 0.0)
+        pnl_pct = ((current_price - entry_price) / entry_price * 100) if direction == "BUY" and entry_price > 0 else ((entry_price - current_price) / entry_price * 100) if direction == "SELL" and entry_price > 0 else 0
+
+        result = await close_backtest_signal(position["id"], current_price, reason=f"Manual close by user")
+        if not result:
+            await message.answer("Ошибка при закрытии позиции")
+            return
+
+        session_manager.record_trade({
+            "symbol": symbol,
+            "direction": direction,
+            "entry_price": entry_price,
+            "exit_price": current_price,
+            "pnl": float(result.get("pnl") or 0.0),
+            "pnl_pct": float(result.get("pnl_pct") or 0.0),
+            "reason": "Manual close by user",
+        })
+        session_manager.update_capital(float(result.get("new_capital") or 0.0))
+
+        config = await get_backtest_config()
+        await update_backtest_capital(float(result.get("new_capital") or 0.0))
+
+        emoji = "🟢" if float(result.get("pnl") or 0) >= 0 else "🔴"
+        await message.answer(
+            f"{emoji} *ЗАКРЫТО ВРУЧНУЮ*\n"
+            f"*{symbol}* {direction}\n"
+            f"Вход: `${entry_price:,.2f}`\n"
+            f"Выход: `${current_price:,.2f}`\n"
+            f"PnL: `{float(result.get('pnl') or 0):+,.2f}` (`{pnl_pct:+.1f}%`)\n"
+            f"Баланс: `${float(result.get('new_capital') or 0):,.2f}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"close_position error: {e}", exc_info=True)
+        await message.answer(f"Ошибка: {e}")
+
+
+@dp.message(Command("stop"))
+async def cmd_stop_autotrade(message: Message):
+    """Stop the autotrader: /stop"""
+    try:
+        from database import update_backtest_enabled
+
+        await update_backtest_enabled(False)
+        await message.answer("🛑 *Автотрейдинг ОСТАНОВЛЕН*\n\nБот больше не будет открывать новые позиции.\nВключить: `/starttrade`", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"stop_autotrade error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+
+@dp.message(Command("starttrade"))
+async def cmd_start_autotrade(message: Message):
+    """Start the autotrader: /starttrade"""
+    try:
+        from database import update_backtest_enabled
+
+        await update_backtest_enabled(True)
+        await message.answer("✅ *Автотрейдинг ЗАПУЩЕН*\n\nБот продолжит торговать.", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"start_autotrade error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+
+@dp.message(Command("why"))
+async def cmd_why_position(message: Message):
+    """Explain why a position was opened: /why BTC"""
+    try:
+        from signal_trader import get_signal_trader_status, fetch_current_prices, _parse_trade_meta
+        from database import get_backtest_signals
+
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.answer("Использование: `/why <SYMBOL>`\nПример: `/why BTC`", parse_mode="Markdown")
+            return
+
+        symbol = args[1].strip().upper()
+
+        signals = await get_backtest_signals()
+        open_positions = [s for s in signals if s.get("status") == "open" and s.get("symbol", "").upper() == symbol]
+
+        if not open_positions:
+            await message.answer(f"Нет открытой позиции по {symbol}")
+            return
+
+        position = open_positions[0]
+        meta = _parse_trade_meta(position)
+        direction = position.get("direction", "")
+        entry_price = float(position.get("entry_price") or 0.0)
+        target = float(meta.get("target") or 0.0)
+        stop = float(meta.get("stop") or 0.0)
+        support = meta.get("support", 0)
+        consensus = meta.get("consensus_verdict", "N/A")
+        signal_dir = meta.get("signal_direction", "N/A")
+
+        prices = await fetch_current_prices([symbol])
+        current_price = float(prices.get(symbol) or 0.0)
+        pnl_pct = ((current_price - entry_price) / entry_price * 100) if direction == "BUY" and entry_price > 0 else ((entry_price - current_price) / entry_price * 100) if direction == "SELL" and entry_price > 0 else 0
+
+        emoji = "🟢" if pnl_pct >= 0 else "🔴"
+        await message.answer(
+            f"{emoji} *ПОЧЕМУ {symbol}*\n\n"
+            f"*Направление:* {direction}\n"
+            f"*Вход:* `${entry_price:,.2f}`\n"
+            f"*Текущая:* `${current_price:,.2f}` (`{pnl_pct:+.1f}%`)\n"
+            f"*Тейк:* `${target:,.2f}`\n"
+            f"*Стоп:* `${stop:,.2f}`\n\n"
+            f"*Причина открытия:*\n"
+            f"• Digest consensus: `{consensus}`\n"
+            f"• Поддержка: `{support}` digest(ов)\n"
+            f"• Сигнал рынка: `{signal_dir}`\n"
+            f"• Источник: auto_trader",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"why_position error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
@@ -2364,6 +2519,10 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="status", description="Краткий статус"),
         BotCommand(command="tt", description="🧪 Тест"),
         BotCommand(command="signalstatus", description="📊 Статус трейдера"),
+        BotCommand(command="close", description="Закрыть позицию"),
+        BotCommand(command="why", description="Почему открыта позиция"),
+        BotCommand(command="stop", description="Остановить автотрейд"),
+        BotCommand(command="starttrade", description="Запустить автотрейд"),
         BotCommand(command="russia", description="Анализ РФ 🇷🇺"),
         BotCommand(command="profile", description="Настройки профиля"),
         BotCommand(command="subscribe", description="Авторассылка"),

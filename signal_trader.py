@@ -684,6 +684,19 @@ async def _close_on_signal_reversal(position: dict, prices: dict, signal_bias: d
     reversal_threshold = REVERSAL_SCORE_THRESHOLD
     signal = signal_bias.get(symbol, {})
     signal_score = abs(float(signal.get("score") or 0.0))
+    reasons = signal.get("reasons", [])
+    price_change = signal.get("price_change", 0)
+    funding = signal.get("funding_rate", 0)
+    long_pct = signal.get("long", 0)
+    short_pct = signal.get("short", 0)
+    
+    logger.info(
+        f"📊 Signal check: {symbol} {direction} | "
+        f"Signal: {signal_direction} score={signal_score:.1f} (threshold={reversal_threshold}) | "
+        f"Price: ${current_price:,.2f} | 24h: {price_change:+.2f}% | "
+        f"Traders: L{long_pct:.0f}%/S{short_pct:.0f}% | Funding: {funding*100:+.4f}% | "
+        f"Reasons: {reasons}"
+    )
     
     reason = ""
     
