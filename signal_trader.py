@@ -1041,9 +1041,12 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     for candidate in ranked:
         if len(open_positions) >= 5:
             break
-        if not candidate.get("ready"):
-            continue
         if candidate["symbol"] in held_symbols:
+            logger.info(f"⏭ {candidate['symbol']}: уже в позиции")
+            continue
+        if not candidate.get("ready"):
+            reason = candidate.get("blocked_reason") or f"score={candidate.get('total_score',0):.1f}<{OPEN_SCORE_THRESHOLD}"
+            logger.info(f"⏭ {candidate['symbol']} {candidate['direction']}: не готов — {reason}")
             continue
 
         support = candidate.get("support") or 0
@@ -1110,12 +1113,19 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
 
 async def run_signal_trader(bot, admin_ids: list[int]):
     """Run the paper autotrader forever."""
-    logger.info("Auto trader started, interval=%s sec", INTERVAL_SECONDS)
+    logger.info("🤖 Auto trader started, interval=%s sec", INTERVAL_SECONDS)
+    cycle = 0
     while True:
         try:
-            await check_and_trade(bot, admin_ids)
+            cycle += 1
+            logger.info(f"🔄 Автотрейд цикл #{cycle}")
+            events = await check_and_trade(bot, admin_ids)
+            if events:
+                logger.info(f"✅ Цикл #{cycle}: {len(events)} событий")
+            else:
+                logger.info(f"😴 Цикл #{cycle}: нет событий")
         except Exception as e:
-            logger.error(f"Auto trader error: {e}")
+            logger.error(f"Auto trader error: {e}", exc_info=True)
         await asyncio.sleep(INTERVAL_SECONDS)
 
 
