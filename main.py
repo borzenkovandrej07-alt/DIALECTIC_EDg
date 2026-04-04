@@ -369,32 +369,51 @@ def extract_verdict_from_report(report: str) -> str | None:
 
 
 def extract_symbols_from_report(report: str, prices: dict) -> tuple[dict, dict, dict, dict]:
-    """Extract symbols, entry prices, stop losses, targets from report."""
+    """
+    Extract symbols, entry prices, stop losses, targets from report.
+    ИСПРАВЛЕНО: парсит реальный формат дайджеста:
+    - Актив: BTC
+    - Вход: $73,779
+    - Цель: $80,000
+    - Стоп: $65,000
+    """
     entries = {}
     stop_losses = {}
     targets = {}
     timeframes = {}
-    
-    symbol_pattern = re.compile(r"\$?(BTC|ETH|SOL|SPY|ES)[\s:]*\$?([\d,]+)", re.IGNORECASE)
-    
-    for match in symbol_pattern.finditer(report):
-        sym = match.group(1).upper()
-        try:
-            price_str = match.group(2).replace(",", "")
-            price = float(price_str)
-            if price > 100:
-                if sym not in entries:
-                    entries[sym] = price
-                else:
-                    stop_losses[sym] = price
-        except:
-            pass
-    
+
+    # Парсим блоки "Актив: X ... Вход/Цель/Стоп"
+    asset_blocks = re.split(r'[-•]\s*(?:Актив|Asset)\s*:', report, flags=re.IGNORECASE)
+    for block in asset_blocks[1:]:
+        lines = block.strip().split("\n")
+        sym_raw = lines[0].strip().upper().split()[0] if lines else ""
+        sym = re.sub(r'[^A-Z]', '', sym_raw)
+        if not sym or len(sym) > 5:
+            continue
+        for line in lines:
+            m = re.search(r'(?:Вход|Entry)\s*:\s*\$?([\d,\.]+)', line, re.IGNORECASE)
+            if m and sym not in entries:
+                try: entries[sym] = float(m.group(1).replace(",", ""))
+                except: pass
+            m = re.search(r'(?:Цель|Target|Тейк)\s*:\s*\$?([\d,\.]+)', line, re.IGNORECASE)
+            if m and sym not in targets:
+                try: targets[sym] = float(m.group(1).replace(",", ""))
+                except: pass
+            m = re.search(r'(?:Стоп|Stop)\s*:\s*\$?([\d,\.]+)', line, re.IGNORECASE)
+            if m and sym not in stop_losses:
+                try: stop_losses[sym] = float(m.group(1).replace(",", ""))
+                except: pass
+            m = re.search(r'(?:Горизонт|Horizon)\s*:\s*(.+)', line, re.IGNORECASE)
+            if m and sym not in timeframes:
+                timeframes[sym] = m.group(1).strip()[:20]
+
+    # Fallback: если планов нет — берём текущие цены как entry
     for sym, price in prices.items():
-        if sym not in entries:
+        if sym not in entries and isinstance(price, (int, float)) and price > 0:
             entries[sym] = price
-        timeframes[sym] = "1h"
-    
+        if sym not in timeframes:
+            timeframes[sym] = "1d"
+
     return entries, stop_losses, targets, timeframes
 
 
