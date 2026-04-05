@@ -142,8 +142,14 @@ async def _binance(session, symbol: str, key: str) -> dict | None:
                 d      = await r.json()
                 price  = float(d["lastPrice"])
                 change = float(d["priceChangePercent"])
+                volume = float(d.get("quoteVolume", 0))  # объём в USD
                 if _sane(key, price):
-                    return {"price": price, "change_24h": round(change, 3), "source": "Binance"}
+                    return {
+                        "price": price,
+                        "change_24h": round(change, 3),
+                        "volume_24h_usd": round(volume / 1_000_000, 1),  # в млн $
+                        "source": "Binance"
+                    }
     except Exception as e:
         logger.debug(f"Binance {symbol}: {e}")
     return None
@@ -168,6 +174,100 @@ async def _coingecko_crypto(session) -> dict:
     except Exception as e:
         logger.debug(f"CoinGecko crypto: {e}")
     return out
+
+
+
+
+# ─── Тренд: 7d/30d изменение + MA50 + структура ──────────────────────────────
+
+async def _fetch_trend_data(session, symbol_binance: str, key: str) -> dict:
+    """
+    Получает расширенные данные тренда через Binance klines API (бесплатно):
+    - Изменение за 7 дней и 30 дней
+    - MA50 (скользящая средняя 50 дней)
+    - MA200 (скользящая средняя 200 дней)
+    - Метка тренда: UPTREND / DOWNTREND / SIDEWAYS
+    - Структура: HH/HL (Higher High/Higher Low) или LH/LL
+    """
+    result = {}
+    try:
+        # 200 дневных свечей достаточно для MA50 и MA200
+        url = f"https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol_binance, "interval": "1d", "limit": 200}
+        async with session.get(url, params=params, timeout=TIMEOUT) as r:
+            if r.status != 200:
+                return result
+            klines = await r.json()
+            if not klines or len(klines) < 50:
+                return result
+
+        closes = [float(k[4]) for k in klines]  # индекс 4 = close price
+        current = closes[-1]
+
+        # Изменение за 7 и 30 дней
+        if len(closes) >= 8:
+            price_7d_ago = closes[-8]
+            result["change_7d"] = round((current - price_7d_ago) / price_7d_ago * 100, 2)
+        if len(closes) >= 31:
+            price_30d_ago = closes[-31]
+            result["change_30d"] = round((current - price_30d_ago) / price_30d_ago * 100, 2)
+
+        # MA50 и MA200
+        if len(closes) >= 50:
+            ma50 = sum(closes[-50:]) / 50
+            result["ma50"] = round(ma50, 2)
+            result["above_ma50"] = current > ma50
+        if len(closes) >= 200:
+            ma200 = sum(closes[-200:]) / 200
+            result["ma200"] = round(ma200, 2)
+            result["above_ma200"] = current > ma200
+
+        # Структура тренда — смотрим последние 14 свечей
+        recent = closes[-14:]
+        highs = [float(k[2]) for k in klines[-14:]]  # индекс 2 = high
+        lows  = [float(k[3]) for k in klines[-14:]]  # индекс 3 = low
+
+        # Считаем Higher Highs / Higher Lows
+        hh = sum(1 for i in range(1, len(highs)) if highs[i] > highs[i-1])
+        hl = sum(1 for i in range(1, len(lows))  if lows[i]  > lows[i-1])
+        lh = sum(1 for i in range(1, len(highs)) if highs[i] < highs[i-1])
+        ll = sum(1 for i in range(1, len(lows))  if lows[i]  < lows[i-1])
+
+        # Определяем тренд
+        bull_score = hh + hl
+        bear_score = lh + ll
+        above_ma50  = result.get("above_ma50", True)
+        change_7d   = result.get("change_7d", 0)
+
+        if bull_score > bear_score + 3 and above_ma50 and change_7d > 2:
+            trend = "UPTREND"
+            trend_emoji = "📈"
+        elif bear_score > bull_score + 3 and not above_ma50 and change_7d < -2:
+            trend = "DOWNTREND"
+            trend_emoji = "📉"
+        elif abs(change_7d) < 3 and abs(result.get("change_30d", 0)) < 8:
+            trend = "SIDEWAYS"
+            trend_emoji = "↔️"
+        elif change_7d > 0 and above_ma50:
+            trend = "UPTREND"
+            trend_emoji = "📈"
+        elif change_7d < 0 and not above_ma50:
+            trend = "DOWNTREND"
+            trend_emoji = "📉"
+        else:
+            trend = "SIDEWAYS"
+            trend_emoji = "↔️"
+
+        result["trend"] = trend
+        result["trend_emoji"] = trend_emoji
+        result["hh"] = hh
+        result["hl"] = hl
+        result["lh"] = lh
+        result["ll"] = ll
+
+    except Exception as e:
+        logger.debug(f"Trend data {symbol_binance}: {e}")
+    return result
 
 
 # ─── Yahoo Finance ────────────────────────────────────────────────────────────
@@ -268,12 +368,13 @@ async def fetch_realtime_prices() -> dict:
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         (btc, eth, sol,
          spx, ndx, vix, dxy, oil, gold,
-         fed_rate, cpi_raw, fng) = await asyncio.gather(
+         fed_rate, cpi_raw, fng,
+         trend_btc, trend_eth, trend_sol) = await asyncio.gather(
             _binance(session, "BTCUSDT", "BTC"),
             _binance(session, "ETHUSDT", "ETH"),
             _binance(session, "SOLUSDT", "SOL"),
-            _yahoo(session, "^GSPC",    "SPX"),   # S&P 500 индекс
-            _yahoo(session, "^NDX",     "NDX"),   # Nasdaq 100 индекс
+            _yahoo(session, "^GSPC",    "SPX"),
+            _yahoo(session, "^NDX",     "NDX"),
             _yahoo(session, "^VIX",     "VIX"),
             _yahoo(session, "DX-Y.NYB", "DXY"),
             _oil(session),
@@ -281,6 +382,9 @@ async def fetch_realtime_prices() -> dict:
             _fred(session, "FEDFUNDS"),
             _fred(session, "CPIAUCSL"),
             _fear_greed(session),
+            _fetch_trend_data(session, "BTCUSDT", "BTC"),
+            _fetch_trend_data(session, "ETHUSDT", "ETH"),
+            _fetch_trend_data(session, "SOLUSDT", "SOL"),
             return_exceptions=True,
         )
 
@@ -296,6 +400,11 @@ async def fetch_realtime_prices() -> dict:
             for k in missing:
                 if k in cg:
                     prices[k] = cg[k]
+
+        # Добавляем тренд к крипто данным
+        for key, trend_val in [("BTC", trend_btc), ("ETH", trend_eth), ("SOL", trend_sol)]:
+            if key in prices and trend_val and not isinstance(trend_val, Exception) and trend_val:
+                prices[key].update(trend_val)
 
         for key, val in [("SPX", spx), ("NDX", ndx), ("VIX", vix),
                          ("DXY", dxy), ("OIL_WTI", oil), ("GOLD", gold)]:
@@ -347,8 +456,42 @@ def format_prices_for_agents(prices: dict) -> str:
         if k in prices:
             p  = prices[k]
             ch = p["change_24h"]
-            lines.append(f"  {label} ({k}): ${p['price']:,.2f}  "
-                         f"{'🟢' if ch>=0 else '🔴'} {ch:+.2f}%  [{p['source']}]")
+            ch7  = p.get("change_7d")
+            ch30 = p.get("change_30d")
+            ma50 = p.get("ma50")
+            ma200 = p.get("ma200")
+            above50  = p.get("above_ma50")
+            above200 = p.get("above_ma200")
+            trend    = p.get("trend", "")
+            trend_e  = p.get("trend_emoji", "")
+            vol      = p.get("volume_24h_usd")
+
+            # Базовая строка
+            line = (f"  {label} ({k}): ${p['price']:,.2f}  "
+                    f"{'🟢' if ch>=0 else '🔴'} {ch:+.2f}% (24ч)")
+            if ch7 is not None:
+                line += f"  {'🟢' if ch7>=0 else '🔴'} {ch7:+.1f}% (7д)"
+            if ch30 is not None:
+                line += f"  {'🟢' if ch30>=0 else '🔴'} {ch30:+.1f}% (30д)"
+            line += f"  [{p['source']}]"
+            lines.append(line)
+
+            # Тренд и MA
+            if trend:
+                trend_line = f"    {trend_e} ТРЕНД: {trend}"
+                if ma50 is not None:
+                    pos50 = "выше" if above50 else "ниже"
+                    pct50 = ((p['price'] - ma50) / ma50 * 100)
+                    trend_line += f" | MA50: ${ma50:,.0f} ({pos50}, {pct50:+.1f}%)"
+                if ma200 is not None:
+                    pos200 = "выше" if above200 else "ниже"
+                    pct200 = ((p['price'] - ma200) / ma200 * 100)
+                    trend_line += f" | MA200: ${ma200:,.0f} ({pos200}, {pct200:+.1f}%)"
+                lines.append(trend_line)
+
+            # Объём
+            if vol:
+                lines.append(f"    Объём 24ч: ${vol:,.0f}M USD")
 
     if "MACRO" in prices:
         m   = prices["MACRO"]
