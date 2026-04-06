@@ -420,80 +420,81 @@ def extract_symbols_from_report(report: str, prices: dict) -> tuple[dict, dict, 
 def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     Возвращает СПИСОК сообщений для отправки.
-    Шапка с Bull/Bear кратко — первое сообщение.
-    Затем ВЕСЬ синтез + дисклеймер режется на чанки по 2500 символов.
+    ПЕРВОЕ сообщение — короткое (вердикт + торговый план).
+    ВТОРОЕ — ключевые сценарии.
+    Остальное — если нужно.
+    Полные дебаты — в .txt файле.
     """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    # Вытаскиваем Bull и Bear кратко из раунда 1
-    bull_summary = "Позиция бычья"
-    bear_summary = "Позиция медвежья"
-
-    if parts["rounds"]:
-        round1 = parts["rounds"][0]
-        lines = round1.split("\n")
-        bull_lines, bear_lines = [], []
-        in_bull = in_bear = False
-        for line in lines:
-            if _ROUND_HEADER_RE.search(line):
-                in_bull = in_bear = False
-                continue
-            if "🐂 Bull" in line:
-                in_bull, in_bear = True, False
-                continue
-            if "🐻 Bear" in line:
-                in_bear, in_bull = True, False
-                continue
-            stripped = line.strip()
-            if not stripped or stripped.startswith("──") or re.match(r"^[-_*═─]{3,}\s*$", stripped):
-                continue
-            if stripped.startswith("#") and len(stripped) < 80:
-                continue
-            if in_bull and len(bull_lines) < 3:
-                bull_lines.append(stripped)
-            elif in_bear and len(bear_lines) < 3:
-                bear_lines.append(stripped)
-        if bull_lines:
-            bull_summary = strip_digest_summary_text("\n".join(bull_lines))
-        if bear_lines:
-            bear_summary = strip_digest_summary_text("\n".join(bear_lines))
-
-    # Шапка — первое сообщение
-    header = (
-        f"📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ\n"
-        f"🕐 {now}\n\n"
-        f"4 AI-модели изучили рынок и поспорили. Вот что вышло:\n\n"
-        f"Уровень сигнала: {stars} ({pct}%)\n"
-        f"{SIGNAL_PCT_EXPLAINED}\n\n"
-        f"{'─' * 30}\n\n"
-        f"🐂 Бычья позиция (кратко):\n{bull_summary}\n\n"
-        f"🐻 Медвежья позиция (кратко):\n{bear_summary}\n\n"
-        f"{'─' * 30}"
-    )
-
-    messages = [header]
-
-    # Берём весь контент после шапки из полного отчёта
-    # Ищем начало синтеза в полном отчёте
     full = parts.get("full", "")
-    synth_hit = _find_first_marker(full, _SYNTH_START_MARKERS)
-    synth_start = synth_hit[0] if synth_hit else -1
 
-    if synth_start != -1:
-        synth_and_rest = full[synth_start:]
-    else:
-        synth_and_rest = parts.get("synthesis", "") + "\n\n" + parts.get("disclaimer", "")
+    # ─── Парсим вердикт и торговый план ───
+    verdict = extract_verdict_from_report(full) or "NEUTRAL"
+    verdict_emoji = {"BUY": "🟢", "SELL": "🔴", "NEUTRAL": "⚪️"}.get(verdict, "⚪️")
+    verdict_text = {"BUY": "БЫЧИЙ", "SELL": "МЕДВЕЖИЙ", "NEUTRAL": "НЕЙТРАЛЬНЫЙ"}.get(verdict, "НЕЙТРАЛЬНЫЙ")
 
-    logger.info(f"synth_and_rest size: {len(synth_and_rest)} chars")
+    # Парсим торговые планы
+    entries, stop_losses, targets, timeframes = extract_symbols_from_report(full, {})
 
-    # Режем на чанки по 2500 символов
-    chunks = split_message(synth_and_rest, max_len=2500)
-    logger.info(f"Total chunks: {len(chunks)}, sizes: {[len(c) for c in chunks]}")
-    for chunk in chunks:
-        if chunk.strip():
-            messages.append(chunk)
+    # ─── Краткое первое сообщение ───
+    lines = [
+        f"📊 DIALECTIC EDGE — ЕЖЕДНЕВНЫЙ ДАЙДЖЕСТ",
+        f"🕐 {now}",
+        "",
+        f"🎯 *ВЕРДИКТ:* {verdict_emoji} *{verdict_text}*",
+        f"📊 Сигнал: {stars} ({pct}%)",
+        "",
+        f"{'─' * 30}",
+        "",
+    ]
 
-    logger.info(f"Total messages to send: {len(messages)}")
+    # Добавляем торговые планы если есть
+    if entries:
+        lines.append("📋 *ТОРГОВЫЙ ПЛАН:*")
+        for sym in sorted(entries.keys())[:5]:
+            entry = entries.get(sym, 0)
+            target = targets.get(sym, 0)
+            stop = stop_losses.get(sym, 0)
+            tf = timeframes.get(sym, "—")
+            if entry and target and stop:
+                risk = abs(entry - stop) / entry * 100
+                reward = abs(target - entry) / entry * 100
+                rr = reward / risk if risk > 0 else 0
+                lines.append(f"• {sym}: ${entry:,.0f} → ${target:,.0f} (R/R 1:{rr:.1f})")
+                lines.append(f"  Стоп: ${stop:,.0f} | {tf}")
+        lines.append("")
+
+    # Добавляем ключевые рыночные данные
+    synth_section = parts.get("synthesis", "")[:800]
+    for line in synth_section.split("\n"):
+        if any(x in line.upper() for x in ["VIX:", "FEAR", "RISK-ON", "RISK-OFF", "BTC", "ETH", "НЕФТЬ", "НЕФТЯН"]):
+            if len(line.strip()) > 5 and len(line.strip()) < 100:
+                lines.append(line.strip())
+
+    lines.append(f"{'─' * 30}")
+    lines.append("")
+    lines.append("📎 Полные дебаты — в файле ниже")
+
+    header_msg = "\n".join(lines)
+
+    messages = [header_msg]
+
+    # ─── Второе сообщение — сценарии ───
+    synth_start_idx = full.find("🎯 СЦЕНАРИИ" if "🎯 СЦЕНАРИИ" in full else "СЦЕНАРИИ")
+    if synth_start_idx == -1:
+        synth_start_idx = full.find("🎯 БАЗОВЫЙ" if "🎯 БАЗОВЫЙ" in full else "БАЗОВЫЙ")
+    
+    if synth_start_idx != -1:
+        scenarios = full[synth_start_idx:synth_start_idx+600]
+        if scenarios.strip():
+            messages.append(scenarios.strip()[:2000])
+
+    # ─── Третье — дисклеймер ───
+    if parts.get("disclaimer"):
+        disc = parts["disclaimer"][:300]
+        if disc.strip():
+            messages.append(disc.strip())
+
     return messages
 
 
@@ -938,6 +939,26 @@ async def cmd_why_position(message: Message):
         )
     except Exception as e:
         logger.error(f"why_position error: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+
+@dp.message(Command("eval"))
+async def cmd_eval_pipeline(message: Message):
+    """Run the validation pipeline on recent signals: /eval"""
+    try:
+        from pipeline import run_full_evaluation
+        await message.answer("🔄 Запускаю валидацию сигналов...")
+        metrics = await run_full_evaluation(
+            source="daily_context",
+            limit=10,
+            save_to_file="results.json",
+        )
+        await message.answer(
+            metrics.summary(),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"eval pipeline error: {e}")
         await message.answer(f"Ошибка: {e}")
 
 
@@ -2538,6 +2559,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="status", description="Краткий статус"),
         BotCommand(command="tt", description="🧪 Тест"),
         BotCommand(command="signalstatus", description="📊 Статус трейдера"),
+        BotCommand(command="eval", description="📈 Валидация сигналов"),
         BotCommand(command="close", description="Закрыть позицию"),
         BotCommand(command="why", description="Почему открыта позиция"),
         BotCommand(command="stop", description="Остановить автотрейд"),
