@@ -485,7 +485,7 @@ async def _export_backtest_snapshot():
 
 
 async def fetch_current_prices(symbols: list[str]) -> dict:
-    """Fetch current prices for crypto and stocks used in recent trade plans."""
+    """Fetch current prices + trend data for crypto assets."""
     prices = {}
     symbols = sorted(set(symbols))
     if not symbols:
@@ -499,21 +499,50 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
 
     missing = [symbol for symbol in symbols if symbol not in prices]
     if not missing:
-        return prices
+        pass
+    else:
+        try:
+            from tracker import get_current_price
+            results = await asyncio.gather(*(get_current_price(symbol) for symbol in missing), return_exceptions=True)
+            for symbol, result in zip(missing, results):
+                if isinstance(result, Exception) or result in (None, 0):
+                    continue
+                try:
+                    prices[symbol] = float(result)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Fallback price fetch error: {e}")
 
-    try:
-        from tracker import get_current_price
-
-        results = await asyncio.gather(*(get_current_price(symbol) for symbol in missing), return_exceptions=True)
-        for symbol, result in zip(missing, results):
-            if isinstance(result, Exception) or result in (None, 0):
-                continue
-            try:
-                prices[symbol] = float(result)
-            except Exception:
-                continue
-    except Exception as e:
-        logger.warning(f"Fallback price fetch error: {e}")
+    # Обогащаем signal_bias тренд-данными из Binance klines (MA50/MA200/change_7d)
+    # signal_bias уже используется в _score_candidate — добавляем туда тренд
+    crypto_syms = [s for s in symbols if s in CRYPTO_SIGNAL_SYMBOLS]
+    if crypto_syms:
+        try:
+            import aiohttp as _aiohttp
+            from web_search import _fetch_trend_data, TIMEOUT as _WS_TIMEOUT, HEADERS as _WS_HEADERS
+            async with _aiohttp.ClientSession(headers=_WS_HEADERS) as _session:
+                trend_tasks = [
+                    _fetch_trend_data(_session, f"{sym}USDT", sym)
+                    for sym in crypto_syms
+                ]
+                trend_results = await asyncio.gather(*trend_tasks, return_exceptions=True)
+                for sym, tr in zip(crypto_syms, trend_results):
+                    if isinstance(tr, Exception) or not tr:
+                        continue
+                    # Кладём тренд в signal_bias чтобы _score_candidate его видел
+                    if sym not in _signal_cache:
+                        _signal_cache[sym] = {}
+                    _signal_cache[sym].update(tr)
+                    logger.info(
+                        f"Trend {sym}: {tr.get('trend','?')} | "
+                        f"MA50={'выше' if tr.get('above_ma50') else 'ниже'} | "
+                        f"7d={tr.get('change_7d',0):+.1f}%"
+                    )
+        except ImportError:
+            pass  # web_search.py ещё не обновлён — нормально
+        except Exception as e:
+            logger.debug(f"Trend fetch error: {e}")
 
     return prices
 
@@ -561,7 +590,80 @@ def _score_candidate(candidate: dict, current_price: float, signal_bias: dict) -
     else:
         signal_score = -2.0
 
-    total_score = float(candidate.get("digest_score") or 0.0) + proximity_score + signal_score
+    # ─── ТРЕНД-СКОР: учитываем MA50/MA200 и 7-дневное изменение ─────────────
+    # Данные тренда приходят из web_search.py fetch_trend_data (Binance klines)
+    trend_score = 0.0
+    trend_label = ""
+    trend_blocked = ""
+
+    # Берём тренд из signal_bias (там есть last_price + тренд из web_search)
+    # Или из prices_with_trend если передан
+    sym_bias = signal_bias.get(candidate["symbol"], {})
+    trend = (sym_bias.get("trend") or "").upper()
+    above_ma50 = sym_bias.get("above_ma50")
+    change_7d = float(sym_bias.get("change_7d") or 0.0)
+    change_30d = float(sym_bias.get("change_30d") or 0.0)
+
+    if trend or above_ma50 is not None:
+        if direction == "BUY":
+            if trend == "UPTREND":
+                trend_score += 5.0   # торгуем по тренду — бонус
+                trend_label = "📈 UPTREND подтверждает BUY"
+            elif trend == "DOWNTREND":
+                trend_score -= 8.0   # против тренда — жёсткий штраф
+                trend_label = "📉 DOWNTREND против BUY"
+                if abs(trend_score) >= 8:
+                    trend_blocked = "against_downtrend"
+            elif trend == "SIDEWAYS":
+                trend_score -= 2.0   # боковик — небольшой штраф
+                trend_label = "↔️ SIDEWAYS — осторожно"
+
+            # MA50: выше = хорошо для BUY, ниже = плохо
+            if above_ma50 is True:
+                trend_score += 3.0
+            elif above_ma50 is False:
+                trend_score -= 4.0
+
+            # 7-дневное изменение: против ветра
+            if change_7d < -10:
+                trend_score -= 3.0   # сильное падение за неделю — риск
+            elif change_7d > 5:
+                trend_score += 2.0   # рост за неделю подтверждает
+
+        elif direction == "SELL":
+            if trend == "DOWNTREND":
+                trend_score += 5.0
+                trend_label = "📉 DOWNTREND подтверждает SELL"
+            elif trend == "UPTREND":
+                trend_score -= 8.0
+                trend_label = "📈 UPTREND против SELL"
+                if abs(trend_score) >= 8:
+                    trend_blocked = "against_uptrend"
+            elif trend == "SIDEWAYS":
+                trend_score -= 2.0
+                trend_label = "↔️ SIDEWAYS — осторожно"
+
+            if above_ma50 is False:
+                trend_score += 3.0
+            elif above_ma50 is True:
+                trend_score -= 4.0
+
+            if change_7d > 10:
+                trend_score -= 3.0
+            elif change_7d < -5:
+                trend_score += 2.0
+
+    # В боковике используем меньший размер позиции (через флаг)
+    is_sideways = trend == "SIDEWAYS"
+
+    # Если нет данных о тренде — нейтрально (не штрафуем)
+    if not trend and above_ma50 is None:
+        trend_score = 0.0
+
+    if not blocked_reason and trend_blocked:
+        blocked_reason = trend_blocked
+
+    total_score = float(candidate.get("digest_score") or 0.0) + proximity_score + signal_score + trend_score
     # Use lower threshold for signal-follow mode
     threshold = SIGNAL_FOLLOW_SCORE_THRESHOLD if candidate.get("signal_follow_only") else OPEN_SCORE_THRESHOLD
     ready = not blocked_reason and total_score >= threshold
@@ -573,6 +675,12 @@ def _score_candidate(candidate: dict, current_price: float, signal_bias: dict) -
         "signal_strength": float(signal.get("strength") or 0.0),
         "signal_score_component": round(signal_score, 2),
         "proximity_score": round(proximity_score, 2),
+        "trend_score": round(trend_score, 2),
+        "trend_label": trend_label,
+        "trend": trend,
+        "above_ma50": above_ma50,
+        "change_7d": change_7d,
+        "is_sideways": is_sideways,
         "total_score": round(total_score, 2),
         "ready": ready,
         "blocked_reason": blocked_reason,
@@ -782,12 +890,19 @@ async def _notify_admins(bot, admin_ids: list[int], event: dict):
 
     if event["event"] == "opened":
         emoji = "🟢" if event["direction"] == "BUY" else "🔴"
+        trend_str = ""
+        if event.get("trend"):
+            t = event["trend"]
+            te = "📈" if t == "UPTREND" else "📉" if t == "DOWNTREND" else "↔️"
+            trend_str = f"\nТренд: `{te} {t}`"
+            if event.get("change_7d") is not None:
+                trend_str += f" | 7д: `{event['change_7d']:+.1f}%`"
         msg = (
             f"🎯 *AUTO TRADE OPEN*\n"
             f"{emoji} *{event['symbol']}* {event['direction']}\n"
             f"Вход: `${event['entry_price']:,.2f}`\n"
-            f"План: `{event['support']} digest(s)` | Score `{event['score']}`\n"
-            f"Сигнал: `{event['signal_direction']}`\n"
+            f"План: `{event['support']} digest(s)` | Score `{event['score']:.1f}`\n"
+            f"Сигнал: `{event['signal_direction']}`{trend_str}\n"
             f"Тейк: `${event['target']:,.2f}` | Стоп: `${event['stop']:,.2f}`\n"
             f"Баланс: `${event['capital']:,.2f}`"
         )
@@ -1081,6 +1196,10 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
                     "support": support,
                     "score": float(candidate.get("total_score") or 0.0),
                     "signal_direction": candidate.get("signal_direction", "NEUTRAL"),
+                    "trend": candidate.get("trend", ""),
+                    "trend_label": candidate.get("trend_label", ""),
+                    "change_7d": candidate.get("change_7d"),
+                    "above_ma50": candidate.get("above_ma50"),
                     "capital": float(result.get("capital_after", 0.0)),
                 })
                 held_symbols.add(candidate["symbol"])
