@@ -21,6 +21,7 @@ import re
 import os
 from datetime import datetime, timedelta
 
+from core.digest_context import build_digest_context, format_digest_cache_summary
 from market_data import MarketDataFetcher
 from database import (
     get_pending_predictions,
@@ -615,6 +616,9 @@ async def save_predictions_from_report(
                 verdict = "SELL"
     
     # Save daily context for signal trader — ВСЕГДА, даже при пустых predictions
+    digest_context = build_digest_context(report_text, source_news)
+    verdict = digest_context.get("verdict", verdict)
+    digest_summary = format_digest_cache_summary(digest_context)
     from database import save_daily_context
     symbols = [p["asset"] for p in predictions] if predictions else []
     entries = {p["asset"]: p["entry_price"] for p in predictions if p.get("entry_price")} if predictions else {}
@@ -637,7 +641,8 @@ async def save_predictions_from_report(
         stop_losses=stop_losses,
         targets=targets,
         timeframes=timeframes,
-        news_summary=source_news[:300],
+        news_summary=digest_summary,
+        full_report=report_text,
         prompt_versions=prompt_versions,
         model_inputs_snapshot=model_inputs_snapshot,
     )

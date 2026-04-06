@@ -168,6 +168,7 @@ async def init_db():
 
         await _add_column_if_missing("daily_context", "prompt_versions", "prompt_versions TEXT")
         await _add_column_if_missing("daily_context", "model_inputs_snapshot", "model_inputs_snapshot TEXT")
+        await _add_column_if_missing("daily_context", "full_report", "full_report TEXT")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trade_decision_log (
@@ -892,6 +893,7 @@ async def save_daily_context(
     targets: dict,
     timeframes: dict,
     news_summary: str = "",
+    full_report: str = "",
     prompt_versions: dict | None = None,
     model_inputs_snapshot: dict | None = None,
 ) -> int:
@@ -905,8 +907,8 @@ async def save_daily_context(
         cursor = await db.execute("""
             INSERT INTO daily_context (
                 verdict, symbols, entries, stop_losses, targets, timeframes, news_summary, expires_at,
-                prompt_versions, model_inputs_snapshot
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+72 hours'), ?, ?)
+                prompt_versions, model_inputs_snapshot, full_report
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+72 hours'), ?, ?, ?)
         """, (
             verdict,
             json.dumps(symbols),
@@ -914,9 +916,10 @@ async def save_daily_context(
             json.dumps(stop_losses),
             json.dumps(targets),
             json.dumps(timeframes),
-            news_summary[:500],
+            news_summary[:1500],
             pv_json,
             snap_json,
+            full_report,
         ))
 
         await db.execute("""

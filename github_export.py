@@ -18,6 +18,7 @@ from datetime import datetime
 
 import aiohttp
 
+from core.digest_context import build_digest_context, format_digest_cache_summary
 from database import get_track_record, get_pending_predictions
 
 logger = logging.getLogger(__name__)
@@ -335,12 +336,13 @@ async def push_digest_cache(report: str, date_str: str, full_debates: str = "") 
 
     current_content, sha = await _github_get(DIGEST_CACHE_FILE)
 
-    verdict_block = _extract_verdict(report)
-    trading_plan = _extract_trading_plan(report)
+    digest_context = build_digest_context(report)
+    summary_block = format_digest_cache_summary(digest_context, max_plans=5)
+    trading_plan = ""
 
     new_entry_parts = [
         f"## 📊 {date_str}\n\n",
-        verdict_block,
+        summary_block,
     ]
 
     if trading_plan:

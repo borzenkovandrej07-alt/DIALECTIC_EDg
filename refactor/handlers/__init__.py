@@ -191,6 +191,14 @@ from .profile_handler import (
     show_markets_selection,
 )
 
+from .portfolio_handler import (
+    show_portfolio,
+    handle_portfolio_callback,
+    handle_portfolio_text_input,
+    cmd_add_portfolio,
+    cmd_remove_portfolio,
+)
+
 from .admin_handler import (
     get_admin_handler,
     is_admin,
@@ -239,6 +247,13 @@ __all__ = [
     "show_risk_selection",
     "show_horizon_selection",
     "show_markets_selection",
+
+    # Portfolio Handler
+    "show_portfolio",
+    "handle_portfolio_callback",
+    "handle_portfolio_text_input",
+    "cmd_add_portfolio",
+    "cmd_remove_portfolio",
     
     # Admin Handler
     "get_admin_handler",

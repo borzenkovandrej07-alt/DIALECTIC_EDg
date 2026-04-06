@@ -38,6 +38,7 @@ from config import (
 from web_search import get_full_realtime_context
 from report_sanitizer import sanitize_full_report
 from chart_generator import generate_main_chart, generate_russia_chart
+from core.digest_context import build_digest_context, format_digest_telegram_summary
 from storage import Storage
 from analysis_service import (
     run_full_analysis as analysis_service_run_full_analysis,
@@ -81,11 +82,17 @@ from debate_storage import ping_redis, save_debate_redis
 
 # Phase 3 Handler Imports — Market, Debate, Profile, Admin
 from refactor.handlers import (
+    get_debate_handler,
     handle_market_command,
     store_and_link_debate,
     handle_debate_navigation_callback,
     show_profile_settings,
     handle_profile_callback,
+    show_portfolio as show_portfolio_view,
+    handle_portfolio_callback as handle_portfolio_action,
+    handle_portfolio_text_input as handle_portfolio_input,
+    cmd_add_portfolio as add_portfolio_command,
+    cmd_remove_portfolio as remove_portfolio_command,
     setup_admins,
     handle_stats_command,
     handle_health_command,
@@ -425,6 +432,22 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     full = parts.get("full", "")
+    digest_context = build_digest_context(full)
+    header_msg = format_digest_telegram_summary(
+        digest_context,
+        stars=stars,
+        pct=pct,
+        timestamp=now,
+    )
+    messages = [header_msg]
+    synth_start_idx = full.find("рџЋЇ РЎР¦Р•РќРђР РР" if "рџЋЇ РЎР¦Р•РќРђР РР" in full else "РЎР¦Р•РќРђР РР")
+    if synth_start_idx == -1:
+        synth_start_idx = full.find("рџЋЇ Р‘РђР—РћР’Р«Р™" if "рџЋЇ Р‘РђР—РћР’Р«Р™" in full else "Р‘РђР—РћР’Р«Р™")
+    if synth_start_idx != -1:
+        scenarios = full[synth_start_idx:synth_start_idx + 900]
+        if scenarios.strip():
+            messages.append(scenarios.strip()[:2600])
+    return messages
 
     # ─── Парсим вердикт и торговый план ───
     verdict = extract_verdict_from_report(full) or "NEUTRAL"
@@ -561,6 +584,27 @@ async def send_debates_attachment(chat_id: int, rounds: list[str]) -> None:
         logger.warning("Не удалось отправить файл дебатов: %s", e)
 
 
+async def send_full_report_attachment(chat_id: int, report: str) -> None:
+    """Send the raw full model report as a text attachment."""
+    if not report:
+        return
+    raw = report.encode("utf-8")
+    max_bytes = 48 * 1024 * 1024
+    if len(raw) > max_bytes:
+        raw = raw[:max_bytes]
+        report = raw.decode("utf-8", errors="ignore") + "\n\n...[truncated by Telegram size limit]"
+        raw = report.encode("utf-8")
+    filename = f"dialectic_full_report_{datetime.now().strftime('%Y-%m-%d_%H%M')}.txt"
+    try:
+        await bot.send_document(
+            chat_id,
+            document=BufferedInputFile(raw, filename=filename),
+            caption="📜 Полный raw-ответ модели целиком.",
+        )
+    except Exception as e:
+        logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ РїРѕР»РЅС‹Р№ СЃС‹СЂРѕР№ РѕС‚С‡С‘С‚: %s", e)
+
+
 async def send_digest_chart(
     chat_id: int,
     report: str,
@@ -647,6 +691,12 @@ async def send_daily_digest_bundle(
 def main_report_keyboard(user_id: int, has_debates: bool = True) -> InlineKeyboardMarkup:
     """Клавиатура под основным отчётом."""
     buttons = []
+    buttons.append([
+        InlineKeyboardButton(
+            text="📜 Показать всё",
+            callback_data=f"fullreport:{user_id}"
+        )
+    ])
     if has_debates:
         buttons.append([
             InlineKeyboardButton(
@@ -682,6 +732,31 @@ async def handle_debate_page(callback: CallbackQuery):
         await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
         return
     await handle_debate_navigation_callback(callback, callback.from_user.id, round_idx)
+
+
+@dp.callback_query(F.data.startswith("fullreport:"))
+async def handle_full_report_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        await callback.answer()
+        return
+    try:
+        kb_uid = int(parts[1])
+    except ValueError:
+        await callback.answer()
+        return
+    if kb_uid != callback.from_user.id:
+        await callback.answer("Кнопка не с твоего аккаунта", show_alert=True)
+        return
+
+    debate = await get_debate_handler().get_debate(callback.from_user.id)
+    full_report = (debate or {}).get("full", "")
+    if not full_report:
+        await callback.answer("Полный отчёт не найден", show_alert=True)
+        return
+
+    await callback.answer("Отправляю полный raw-отчёт")
+    await send_full_report_attachment(callback.message.chat.id, full_report)
 
 
 def format_signal_trader_status_message(status: dict) -> str:
@@ -2466,6 +2541,8 @@ async def handle_text_input(message: Message):
     """Handle portfolio input OR time subscription."""
     user_id = message.from_user.id
     text = message.text.strip()
+    if await handle_portfolio_input(message):
+        return
     
     # Check portfolio state first
     state = user_portfolio_state.get(user_id)
@@ -2872,11 +2949,14 @@ async def show_portfolio(event):
 @dp.message(Command("portfolio"))
 async def cmd_portfolio(message: Message):
     await upsert_user(message.from_user.id)
-    await show_portfolio(message)
+    await show_portfolio_view(message)
 
 
 @dp.callback_query(F.data.startswith("portfolio:"))
 async def handle_portfolio_callback(callback: CallbackQuery):
+    await handle_portfolio_action(callback)
+    return
+
     user_id = callback.from_user.id
     parts = callback.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
@@ -2940,6 +3020,8 @@ async def cmd_add_portfolio(message: Message):
     """Add position to portfolio."""
     user_id = message.from_user.id
     await upsert_user(user_id)
+    await add_portfolio_command(message)
+    return
     
     parts = message.text.split()
     
@@ -2976,6 +3058,8 @@ async def cmd_remove_portfolio(message: Message):
     """Remove position from portfolio."""
     user_id = message.from_user.id
     await upsert_user(user_id)
+    await remove_portfolio_command(message)
+    return
     
     parts = message.text.split()
     

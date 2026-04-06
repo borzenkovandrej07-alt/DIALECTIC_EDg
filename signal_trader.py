@@ -140,6 +140,7 @@ def build_digest_consensus(contexts: list[dict]) -> dict:
             "created_at": context.get("created_at", ""),
             "verdict": verdict,
             "symbols": sorted(set(context.get("symbols", []) or [])),
+            "summary": context.get("news_summary", ""),
         })
 
         symbols = sorted(set(context.get("symbols", []) or []))
