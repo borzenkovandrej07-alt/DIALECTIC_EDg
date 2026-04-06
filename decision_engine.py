@@ -13,7 +13,7 @@ Only high-quality signals proceed to backtesting.
 import logging
 from typing import Optional
 
-from signal import Signal, timeframe_to_hours
+from trading_signal import Signal, timeframe_to_hours
 
 logger = logging.getLogger(__name__)
 

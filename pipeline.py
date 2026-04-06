@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from signal import (
+from trading_signal import (
     Signal,
     parse_signals_from_daily_context,
     parse_signals_from_predictions,
