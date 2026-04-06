@@ -995,6 +995,124 @@ async def cmd_eval_pipeline(message: Message):
         await message.answer(f"Ошибка: {e}")
 
 
+def _main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📘 Инструкция", callback_data="cmd:guide")],
+        [
+            InlineKeyboardButton(text="📋 Дайджест", callback_data="cmd:daily"),
+            InlineKeyboardButton(text="📊 Рынки + сигналы", callback_data="cmd:markets"),
+        ],
+        [
+            InlineKeyboardButton(text="💰 Статус", callback_data="cmd:status"),
+            InlineKeyboardButton(text="📡 Сигнал трейдер", callback_data="cmd:signalstatus"),
+        ],
+        [
+            InlineKeyboardButton(text="📈 Профиль", callback_data="cmd:profile"),
+            InlineKeyboardButton(text="📊 Трек-рекорд", callback_data="cmd:trackrecord"),
+        ],
+        [InlineKeyboardButton(text="📊 Портфель", callback_data="portfolio:menu:")],
+        [
+            InlineKeyboardButton(text="🧪 Бэктест", callback_data="cmd:backtest"),
+            InlineKeyboardButton(text="🔔 Подписка", callback_data="cmd:subscribe"),
+        ],
+        [
+            InlineKeyboardButton(text="🌍 Global", callback_data="cmd:trackrecordglobal"),
+            InlineKeyboardButton(text="🇷🇺 Россия", callback_data="cmd:trackrecordrussia"),
+        ],
+        [
+            InlineKeyboardButton(text="🗓 Weekly", callback_data="cmd:weeklyreport"),
+            InlineKeyboardButton(text="❓ Help", callback_data="cmd:help"),
+        ],
+    ])
+
+
+async def _send_bot_guide(chat_id: int) -> None:
+    text = (
+        "📘 *ИНСТРУКЦИЯ: как пользоваться Dialectic Edge*\n"
+        "═" * 25 + "\n\n"
+        "*1) Начни с профиля*\n"
+        "• `/profile` — выбери риск (консерватор/умеренный/агрессивный), горизонт и рынок.\n\n"
+        "*2) Получи дайджест*\n"
+        "• `/daily` — главный отчёт: новости + живые цифры + вердикт и торговый план.\n"
+        "• `/daily force` — принудительно новый прогон (если кэш ещё жив).\n\n"
+        "*3) Рынки и сигналы*\n"
+        "• `/markets` — живой контекст + MARKET SIGNALS + кнопки подписки.\n"
+        "  Там же можно включить/выключить пуши сигналов и посмотреть бэктест.\n"
+        "• `/status` — короткий статус рынков (удобно закрепить).\n\n"
+        "*4) Бумажный трейдинг (PnL в SQLite)*\n"
+        "• `/signalstatus` — статус автотрейдера: кандидаты, открытые позиции, баланс.\n"
+        "• `/starttrade` — запустить цикл автотрейда.\n"
+        "• `/stop` — остановить.\n"
+        "• `/why` — почему открыта позиция.\n"
+        "• `/close` — закрыть позицию вручную (если нужно).\n\n"
+        "*5) Бэктест и капитал*\n"
+        "• `/backtest` — панель/сводка бэктеста.\n"
+        "• `/backtest_toggle` — вкл/выкл бэктест.\n"
+        "• `/backtest_capital 500` — поставить капитал (пример).\n"
+        "• `/backtest_clear` — очистить сделки и сбросить капитал.\n\n"
+        "*6) Анализ текста*\n"
+        "• `/analyze <текст>` — разбор новости/идеи пользователем.\n\n"
+        "*7) Статистика качества*\n"
+        "• `/trackrecord` — вся статистика точности.\n"
+        "• `/trackrecordglobal` — global.\n"
+        "• `/trackrecordrussia` — РФ.\n"
+        "• `/weeklyreport` — отчёт недели.\n\n"
+        "*8) Подписки*\n"
+        "• `/subscribe on 08:00` — авторассылка дайджеста.\n\n"
+        "*9) Портфель*\n"
+        "• `/portfolio` — твои позиции.\n"
+        "• `/add BTC 0.1 65000` — добавить позицию (пример).\n"
+        "• `/remove BTC` — удалить.\n\n"
+        "⚠️ _Это аналитика и симуляция. Не финансовый совет._"
+    )
+    await bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=_main_menu_kb())
+
+
+class _CallbackMessageProxy:
+    """Мини-адаптер, чтобы переиспользовать cmd_* хендлеры из inline-кнопок."""
+
+    def __init__(self, callback: CallbackQuery):
+        self._cb = callback
+        self.from_user = callback.from_user
+        self.chat = callback.message.chat if callback.message else callback
+        self.text = ""
+
+    async def answer(self, text: str, **kwargs):
+        return await bot.send_message(self._cb.from_user.id, text, **kwargs)
+
+
+@dp.callback_query(F.data.startswith("cmd:"))
+async def handle_cmd_shortcuts(callback: CallbackQuery):
+    await callback.answer()
+    cmd = (callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else ""
+    proxy = _CallbackMessageProxy(callback)
+
+    mapping = {
+        "profile": cmd_profile,
+        "daily": cmd_daily,
+        "markets": cmd_markets,
+        "status": cmd_status,
+        "trackrecord": cmd_trackrecord,
+        "trackrecordglobal": lambda m: _cmd_trackrecord(m, report_type="global", title="GLOBAL", filter_type="all"),
+        "trackrecordrussia": lambda m: _cmd_trackrecord(m, report_type="russia", title="РОССИЯ EDGE", filter_type="all"),
+        "weeklyreport": cmd_weekly,
+        "subscribe": cmd_subscribe,
+        "help": cmd_help,
+        "signalstatus": cmd_signal_status,
+        "backtest": cmd_backtest,
+    }
+
+    if cmd == "guide":
+        await _send_bot_guide(callback.from_user.id)
+        return
+
+    fn = mapping.get(cmd)
+    if not fn:
+        await bot.send_message(callback.from_user.id, "Команда не найдена в меню. Открой `/help`.", parse_mode="Markdown")
+        return
+    await fn(proxy)
+
+
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
@@ -1006,11 +1124,7 @@ async def cmd_start(message: Message):
     )
     name = message.from_user.first_name or "трейдер"
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Портфель", callback_data="portfolio:menu:")],
-        [InlineKeyboardButton(text="📈 Профиль", callback_data="cmd:profile"), InlineKeyboardButton(text="📋 Дайджест", callback_data="cmd:daily")],
-        [InlineKeyboardButton(text="💰 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📊 Трек-рекорд", callback_data="cmd:trackrecord")],
-    ])
+    kb = _main_menu_kb()
     
     await message.answer(
         f"👋 Привет, *{name}*!\n\n"
