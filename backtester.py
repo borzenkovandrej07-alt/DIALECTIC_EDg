@@ -1,336 +1,298 @@
 """
-backtester.py — Проверка качества агентов на исторических данных.
+backtester.py — Validate signals against real OHLC candle data.
 
-Как работает:
-1. Берёт реальные новости за выбранный период (из GDELT или файла)
-2. Прогоняет через агентов → они делают прогнозы
-3. Берёт реальные цены через Yahoo Finance
-4. Считает winrate и P&L
-5. Сохраняет в backtest_results.csv
+Rules:
+  1. Price MUST reach entry first — if not, NO TRADE
+  2. Only candles AFTER signal timestamp are checked
+  3. Only candles within timeframe_hours window
+  4. LONG: win if high >= target, loss if low <= stop
+  5. SHORT: win if low <= target, loss if high >= stop
+  6. If nothing happens within timeframe → TIMEOUT
 
-Запуск: python backtester.py
+Fees: 0.1% entry + 0.1% exit = 0.2% total
 """
 
 import asyncio
-import csv
-import json
 import logging
-import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
+from typing import Optional
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from signal import Signal, timeframe_to_hours
 
-import aiohttp
-
-from agents import DebateOrchestrator
-from tracker import extract_predictions_from_report
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ─── Тестовые новости (2021–2024) ─────────────────────────────────────────────
-# Реальные события с известным исходом для валидации агентов
+FEE_PCT = 0.001  # 0.1% per side
 
-HISTORICAL_NEWS = [
-    {
-        "date": "2021-10-20",
-        "news": "SEC одобрила первый Bitcoin Futures ETF (ProShares BITO). Институциональный спрос растёт. BTC торгуется около $62,000.",
-        "asset": "BTC",
-        "price_at_news": 62000,
-        "price_7d_later": 66000,
-        "outcome": "UP +6.4%"
-    },
-    {
-        "date": "2021-11-10",
-        "news": "Инфляция в США достигла 6.2% — максимум за 30 лет. Fed сигнализирует об ускорении сворачивания QE. Рынки нервничают.",
-        "asset": "SPY",
-        "price_at_news": 468,
-        "price_7d_later": 461,
-        "outcome": "DOWN -1.5%"
-    },
-    {
-        "date": "2022-01-05",
-        "news": "Fed опубликовал протоколы: члены обсуждают более быстрое повышение ставок. QT может начаться раньше ожиданий. Nasdaq падает.",
-        "asset": "QQQ",
-        "price_at_news": 385,
-        "price_7d_later": 358,
-        "outcome": "DOWN -7%"
-    },
-    {
-        "date": "2022-05-05",
-        "news": "Fed поднял ставку на 50 базисных пунктов — крупнейшее повышение с 2000 года. Powell заявил что рецессия маловероятна.",
-        "asset": "SPY",
-        "price_at_news": 412,
-        "price_7d_later": 398,
-        "outcome": "DOWN -3.4%"
-    },
-    {
-        "date": "2022-06-13",
-        "news": "Bitcoin рухнул ниже $23,000 — минимум с 2020 года. Celsius Network заморозила вывод средств. Крипто-рынок в панике.",
-        "asset": "BTC",
-        "price_at_news": 23000,
-        "price_7d_later": 20000,
-        "outcome": "DOWN -13%"
-    },
-    {
-        "date": "2022-11-08",
-        "news": "FTX столкнулась с кризисом ликвидности. Binance объявила о продаже FTT токенов. Sam Bankman-Fried просит помощи.",
-        "asset": "BTC",
-        "price_at_news": 20000,
-        "price_7d_later": 16500,
-        "outcome": "DOWN -17.5%"
-    },
-    {
-        "date": "2023-03-10",
-        "news": "Silicon Valley Bank закрыт регуляторами. $209 млрд активов под угрозой. Криптовалютный USDC потерял привязку к доллару.",
-        "asset": "BTC",
-        "price_at_news": 20500,
-        "price_7d_later": 26000,
-        "outcome": "UP +26% (flight to BTC)"
-    },
-    {
-        "date": "2023-06-15",
-        "news": "Fed взял паузу в повышении ставок после 10 последовательных повышений. Ставка остаётся на уровне 5.25%. Рынки растут.",
-        "asset": "SPY",
-        "price_at_news": 435,
-        "price_7d_later": 444,
-        "outcome": "UP +2%"
-    },
-    {
-        "date": "2023-10-23",
-        "news": "BlackRock и Fidelity подали обновлённые заявки на Bitcoin Spot ETF. SEC даёт позитивные сигналы. BTC пробивает $34,000.",
-        "asset": "BTC",
-        "price_at_news": 34000,
-        "price_7d_later": 34500,
-        "outcome": "UP +1.5%"
-    },
-    {
-        "date": "2024-01-10",
-        "news": "SEC одобрила 11 Bitcoin Spot ETF включая BlackRock iShares. Исторический момент. BTC торгуется около $46,000.",
-        "asset": "BTC",
-        "price_at_news": 46000,
-        "price_7d_later": 42800,
-        "outcome": "DOWN -7% (sell the news)"
-    },
-    {
-        "date": "2024-03-05",
-        "news": "Bitcoin обновил исторический максимум выше $69,000 впервые с 2021 года. Приток в ETF превысил $10 млрд. Халвинг через 45 дней.",
-        "asset": "BTC",
-        "price_at_news": 69000,
-        "price_7d_later": 65000,
-        "outcome": "DOWN -5.8%"
-    },
-    {
-        "date": "2024-07-11",
-        "news": "Инфляция США упала до 3.0%. Рынок оценивает вероятность снижения ставки в сентябре в 85%. Доллар слабеет.",
-        "asset": "SPY",
-        "price_at_news": 556,
-        "price_7d_later": 548,
-        "outcome": "DOWN -1.4% (rotation)"
-    },
-]
+
+@dataclass
+class Candle:
+    """Single OHLC candle."""
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+
+
+@dataclass
+class BacktestResult:
+    """Result of backtesting a single signal. Flat structure for JSON."""
+    asset: str
+    direction: str
+    entry: float
+    target: float
+    stop: float
+    timeframe: str
+    result: str            # "WIN", "LOSS", "TIMEOUT", "NO_ENTRY"
+    pnl: float             # net PnL % after fees
+    exit_price: float
+    exit_reason: str       # "target", "stop", "timeout", "no_entry"
+    entry_hit: bool        # did price actually reach entry?
+    candles_checked: int
+    fees_pct: float
+    signal_timestamp: str
+    exit_timestamp: str
+
+    def to_dict(self) -> dict:
+        return {
+            "asset": self.asset,
+            "direction": self.direction.lower(),
+            "entry": self.entry,
+            "target": self.target,
+            "stop": self.stop,
+            "result": self.result.lower(),
+            "pnl": round(self.pnl, 4),
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "entry_hit": self.entry_hit,
+            "candles_checked": self.candles_checked,
+            "fees_pct": self.fees_pct,
+            "signal_timestamp": self.signal_timestamp,
+            "exit_timestamp": self.exit_timestamp,
+        }
 
 
 class Backtester:
-    def __init__(self):
-        self.orchestrator = DebateOrchestrator()
-        self.results = []
+    """Backtest signals against OHLC candle data."""
 
-    async def run(self, news_items: list[dict], max_items: int = 10):
-        """Запускает бэктест на списке исторических новостей."""
-        items_to_test = news_items[:max_items]
-        
-        logger.info(f"🧪 Запускаю бэктест на {len(items_to_test)} новостях...")
-        logger.info("Это займёт несколько минут...\n")
+    def __init__(self, fee_pct: float = FEE_PCT):
+        self.fee_pct = fee_pct
+        self.results: list[BacktestResult] = []
 
-        for i, item in enumerate(items_to_test, 1):
-            logger.info(f"[{i}/{len(items_to_test)}] {item['date']}: {item['news'][:60]}...")
-            
-            try:
-                result = await self._test_one(item)
-                self.results.append(result)
-                
-                status = "✅" if result["agent_correct"] else "❌"
-                logger.info(
-                    f"  {status} Агент: {result['agent_direction']} | "
-                    f"Реально: {result['real_outcome']} | "
-                    f"Совпало: {result['agent_correct']}"
-                )
-                
-                # Небольшая пауза между запросами
-                await asyncio.sleep(3)
-                
-            except Exception as e:
-                logger.error(f"  Ошибка: {e}")
-                continue
+    def test_signal(
+        self,
+        signal: Signal,
+        candles: list[Candle],
+    ) -> BacktestResult:
+        """
+        Test a single signal against OHLC candles.
+        """
+        direction = signal.direction
+        entry = signal.entry
+        target = signal.target
+        stop = signal.stop
+        total_fees = self.fee_pct * 2
 
-        self._print_summary()
-        self._save_csv()
+        # Parse signal timestamp
+        try:
+            signal_ts = datetime.fromisoformat(signal.timestamp.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            signal_ts = datetime.now()
 
-    async def _test_one(self, item: dict) -> dict:
-        """Тестирует одну новость."""
-        # Добавляем контекст цены
-        news_with_price = (
-            f"{item['news']}\n\n"
-            f"Текущая цена {item['asset']}: ${item['price_at_news']:,}"
-        )
-        
-        # Запускаем агентов
-        report = await self.orchestrator.run_debate(
-            news_context=news_with_price,
-            custom_mode=True
-        )
-        
-        # Извлекаем прогнозы из отчёта
-        predictions = extract_predictions_from_report(report)
-        
-        # Ищем прогноз по нужному активу
-        agent_direction = "NEUTRAL"
-        agent_entry = item["price_at_news"]
-        agent_target = None
-        agent_stop = None
-        
-        for pred in predictions:
-            if pred["asset"] == item["asset"]:
-                agent_direction = pred["direction"]
-                agent_entry = pred.get("entry_price", item["price_at_news"])
-                agent_target = pred.get("target_price")
-                agent_stop = pred.get("stop_loss")
+        # Calculate end of timeframe window
+        hours = timeframe_to_hours(signal.timeframe)
+        end_ts = signal_ts + timedelta(hours=hours)
+
+        # Filter candles: only AFTER signal timestamp AND within timeframe window
+        filtered = [c for c in candles if signal_ts <= c.timestamp <= end_ts]
+
+        if not filtered:
+            return BacktestResult(
+                asset=signal.asset, direction=direction, entry=entry,
+                target=target, stop=stop, timeframe=signal.timeframe,
+                result="NO_ENTRY", pnl=0.0, exit_price=0.0,
+                exit_reason="no_candles_after_signal", entry_hit=False,
+                candles_checked=0, fees_pct=0.0,
+                signal_timestamp=signal.timestamp, exit_timestamp="",
+            )
+
+        # Step 1: Find the candle where price reaches entry
+        entry_candle_idx = None
+        for i, candle in enumerate(filtered):
+            if direction == "LONG" and candle.low <= entry:
+                entry_candle_idx = i
                 break
-        
-        # Если паттерн не найден — анализируем текст синтеза
-        if agent_direction == "NEUTRAL":
-            agent_direction = self._extract_direction_from_text(report, item["asset"])
-        
-        # Определяем реальный исход
-        real_direction = "UP" if "UP" in item["outcome"] else "DOWN"
-        
-        # Совпал ли прогноз?
-        agent_correct = (
-            (agent_direction == "LONG" and real_direction == "UP") or
-            (agent_direction == "SHORT" and real_direction == "DOWN")
+            elif direction == "SHORT" and candle.high >= entry:
+                entry_candle_idx = i
+                break
+
+        if entry_candle_idx is None:
+            return BacktestResult(
+                asset=signal.asset, direction=direction, entry=entry,
+                target=target, stop=stop, timeframe=signal.timeframe,
+                result="NO_ENTRY", pnl=0.0, exit_price=0.0,
+                exit_reason="entry_not_reached", entry_hit=False,
+                candles_checked=len(filtered), fees_pct=0.0,
+                signal_timestamp=signal.timestamp, exit_timestamp="",
+            )
+
+        # Step 2: From entry candle onwards, check target/stop
+        post_entry_candles = filtered[entry_candle_idx:]
+        entry_candle = post_entry_candles[0]
+
+        for i, candle in enumerate(post_entry_candles):
+            if direction == "LONG":
+                if candle.high >= target:
+                    pnl = ((target - entry) / entry) - total_fees
+                    return BacktestResult(
+                        asset=signal.asset, direction=direction, entry=entry,
+                        target=target, stop=stop, timeframe=signal.timeframe,
+                        result="WIN", pnl=round(pnl * 100, 4), exit_price=target,
+                        exit_reason="target", entry_hit=True, candles_checked=i + 1,
+                        fees_pct=round(total_fees * 100, 4),
+                        signal_timestamp=signal.timestamp, exit_timestamp=candle.timestamp.isoformat(),
+                    )
+                if candle.low <= stop:
+                    pnl = ((stop - entry) / entry) - total_fees
+                    return BacktestResult(
+                        asset=signal.asset, direction=direction, entry=entry,
+                        target=target, stop=stop, timeframe=signal.timeframe,
+                        result="LOSS", pnl=round(pnl * 100, 4), exit_price=stop,
+                        exit_reason="stop", entry_hit=True, candles_checked=i + 1,
+                        fees_pct=round(total_fees * 100, 4),
+                        signal_timestamp=signal.timestamp, exit_timestamp=candle.timestamp.isoformat(),
+                    )
+            elif direction == "SHORT":
+                if candle.low <= target:
+                    pnl = ((entry - target) / entry) - total_fees
+                    return BacktestResult(
+                        asset=signal.asset, direction=direction, entry=entry,
+                        target=target, stop=stop, timeframe=signal.timeframe,
+                        result="WIN", pnl=round(pnl * 100, 4), exit_price=target,
+                        exit_reason="target", entry_hit=True, candles_checked=i + 1,
+                        fees_pct=round(total_fees * 100, 4),
+                        signal_timestamp=signal.timestamp, exit_timestamp=candle.timestamp.isoformat(),
+                    )
+                if candle.high >= stop:
+                    pnl = ((entry - stop) / entry) - total_fees
+                    return BacktestResult(
+                        asset=signal.asset, direction=direction, entry=entry,
+                        target=target, stop=stop, timeframe=signal.timeframe,
+                        result="LOSS", pnl=round(pnl * 100, 4), exit_price=stop,
+                        exit_reason="stop", entry_hit=True, candles_checked=i + 1,
+                        fees_pct=round(total_fees * 100, 4),
+                        signal_timestamp=signal.timestamp, exit_timestamp=candle.timestamp.isoformat(),
+                    )
+
+        # Timeout
+        last = post_entry_candles[-1]
+        pnl = ((last.close - entry) / entry) - total_fees if direction == "LONG" else ((entry - last.close) / entry) - total_fees
+
+        return BacktestResult(
+            asset=signal.asset, direction=direction, entry=entry,
+            target=target, stop=stop, timeframe=signal.timeframe,
+            result="TIMEOUT", pnl=round(pnl * 100, 4), exit_price=last.close,
+            exit_reason="timeout", entry_hit=True, candles_checked=len(post_entry_candles),
+            fees_pct=round(total_fees * 100, 4),
+            signal_timestamp=signal.timestamp, exit_timestamp=last.timestamp.isoformat(),
         )
-        
-        # Считаем P&L
-        price_change_pct = ((item["price_7d_later"] - item["price_at_news"]) 
-                           / item["price_at_news"] * 100)
-        
-        if agent_direction == "LONG":
-            pnl = price_change_pct
-        elif agent_direction == "SHORT":
-            pnl = -price_change_pct
-        else:
-            pnl = 0
-        
-        return {
-            "date": item["date"],
-            "asset": item["asset"],
-            "news_snippet": item["news"][:80] + "...",
-            "price_at_news": item["price_at_news"],
-            "price_7d_later": item["price_7d_later"],
-            "real_outcome": item["outcome"],
-            "agent_direction": agent_direction,
-            "agent_target": agent_target,
-            "agent_stop": agent_stop,
-            "agent_correct": agent_correct,
-            "pnl_pct": round(pnl, 2),
-            "report_snippet": report[:300] + "..."
-        }
 
-    def _extract_direction_from_text(self, report: str, asset: str) -> str:
-        """Извлекает направление прогноза из текста если паттерн не нашёлся."""
-        report_lower = report.lower()
-        
-        # Ищем бычьи сигналы
-        bull_signals = ["long", "покупк", "рост", "buy", "bullish", "восстановлени"]
-        bear_signals = ["short", "продаж", "падени", "sell", "bearish", "снижени"]
-        
-        bull_count = sum(1 for s in bull_signals if s in report_lower)
-        bear_count = sum(1 for s in bear_signals if s in report_lower)
-        
-        if bull_count > bear_count:
-            return "LONG"
-        elif bear_count > bull_count:
-            return "SHORT"
-        return "NEUTRAL"
+    def test_signals(
+        self,
+        signals: list[Signal],
+        candles_map: dict[str, list[Candle]],
+    ) -> list[BacktestResult]:
+        """Test multiple signals against their respective candle data."""
+        results = []
+        for signal in signals:
+            candles = candles_map.get(signal.asset, [])
+            if not candles:
+                logger.warning(f"No candle data for {signal.asset}, skipping")
+                continue
+            result = self.test_signal(signal, candles)
+            results.append(result)
+            self.results.append(result)
+            logger.info(
+                f"Backtest: {signal.asset} {signal.direction} @ {signal.entry} | "
+                f"Result: {result.result} | PnL: {result.pnl:+.2f}% | "
+                f"Exit: {result.exit_reason} | Entry hit: {result.entry_hit}"
+            )
+        return results
 
-    def _print_summary(self):
-        """Выводит сводку результатов."""
-        if not self.results:
-            print("\n❌ Нет результатов для анализа")
-            return
-        
-        total = len(self.results)
-        correct = sum(1 for r in self.results if r["agent_correct"])
-        winrate = correct / total * 100
-        avg_pnl = sum(r["pnl_pct"] for r in self.results) / total
-        
-        best = max(self.results, key=lambda r: r["pnl_pct"])
-        worst = min(self.results, key=lambda r: r["pnl_pct"])
-        
-        print("\n" + "="*60)
-        print("📊 РЕЗУЛЬТАТЫ БЭКТЕСТА")
-        print("="*60)
-        print(f"Протестировано новостей:  {total}")
-        print(f"Правильных прогнозов:     {correct}/{total}")
-        print(f"Winrate:                  {winrate:.1f}%")
-        print(f"Средний P&L:              {avg_pnl:+.1f}%")
-        print(f"Лучший колл:              {best['asset']} {best['date']} → {best['pnl_pct']:+.1f}%")
-        print(f"Худший колл:              {worst['asset']} {worst['date']} → {worst['pnl_pct']:+.1f}%")
-        print("="*60)
-        
-        if winrate >= 60:
-            print("✅ Отличный результат! Агенты работают хорошо.")
-        elif winrate >= 50:
-            print("🟡 Средний результат. Есть куда улучшать промпты.")
-        else:
-            print("🔴 Слабый результат. Нужно серьёзно переработать промпты.")
-        
-        print("\n💡 Детальный отчёт сохранён в backtest_results.csv")
+    def get_results(self) -> list[BacktestResult]:
+        return list(self.results)
 
-    def _save_csv(self):
-        """Сохраняет результаты в CSV."""
-        if not self.results:
-            return
-        
-        path = Path("backtest_results.csv")
-        fields = [
-            "date", "asset", "news_snippet", "price_at_news",
-            "price_7d_later", "real_outcome", "agent_direction",
-            "agent_correct", "pnl_pct"
-        ]
-        
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fields)
-            writer.writeheader()
-            for r in self.results:
-                writer.writerow({k: r.get(k, "") for k in fields})
-        
-        logger.info(f"✅ Результаты сохранены в {path}")
+    def reset(self):
+        self.results.clear()
 
 
-async def main():
-    print("🧪 DIALECTIC EDGE — BACKTESTER")
-    print("="*40)
-    print(f"Доступно исторических новостей: {len(HISTORICAL_NEWS)}")
-    print()
-    
+async def get_candles(
+    asset: str,
+    timeframe_hours: int = 24,
+    limit: int = 60,
+) -> list[Candle]:
+    """Fetch OHLC candles for an asset from Binance API."""
+    candles = []
+
     try:
-        n = int(input(f"Сколько новостей тестировать? (1-{len(HISTORICAL_NEWS)}, рекомендую 5 для начала): "))
-        n = max(1, min(n, len(HISTORICAL_NEWS)))
-    except (ValueError, EOFError):
-        n = 5
-    
-    print(f"\nЗапускаю бэктест на {n} новостях...\n")
-    
-    tester = Backtester()
-    await tester.run(HISTORICAL_NEWS, max_items=n)
+        symbol = f"{asset}USDT"
+        interval_map = {
+            1: "1m", 2: "1m", 4: "5m", 6: "15m", 8: "15m",
+            12: "1h", 24: "1d", 48: "1d", 72: "1d",
+            168: "1d", 336: "1d", 720: "1d",
+        }
+        interval = interval_map.get(timeframe_hours, "1d")
 
+        import aiohttp
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for k in data:
+                        candles.append(Candle(
+                            timestamp=datetime.fromtimestamp(k[0] / 1000),
+                            open=float(k[1]),
+                            high=float(k[2]),
+                            low=float(k[3]),
+                            close=float(k[4]),
+                            volume=float(k[5]),
+                        ))
+                    logger.info(f"Fetched {len(candles)} candles for {symbol} from Binance")
+                    return candles
+    except Exception as e:
+        logger.warning(f"Binance klines failed for {asset}: {e}")
+
+    # Fallback: CoinGecko
+    try:
+        import aiohttp
+        cg_ids = {"BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin", "SOL": "solana"}
+        cg_id = cg_ids.get(asset.upper())
+        if not cg_id:
+            return candles
+
+        days = max(timeframe_hours * limit // 24, 1)
+        url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
+        params = {"vs_currency": "usd", "days": days, "interval": "daily"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    prices = data.get("prices", [])
+                    for p in prices:
+                        ts = datetime.fromtimestamp(p[0] / 1000)
+                        price = float(p[1])
+                        candles.append(Candle(
+                            timestamp=ts, open=price, high=price * 1.01,
+                            low=price * 0.99, close=price,
+                        ))
+                    logger.info(f"Fetched {len(candles)} candles for {asset} from CoinGecko (approx)")
+    except Exception as e:
+        logger.warning(f"CoinGecko fallback failed for {asset}: {e}")
+
+    return candles
