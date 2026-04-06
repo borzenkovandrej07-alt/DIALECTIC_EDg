@@ -40,6 +40,9 @@ from database import (
     update_backtest_capital,
 )
 from session_manager import session_manager, SESSION_START_CAPITAL
+from core.regime_detector import RegimeDetector, MarketRegime
+from core.dynamic_risk import DynamicRiskManager
+from core.multi_tf import MultiTimeframeAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,10 @@ REVERSAL_SCORE_THRESHOLD = AUTOTRADE_REVERSAL_SCORE_THRESHOLD
 CRYPTO_SIGNAL_SYMBOLS = {"BTC", "ETH", "SOL", "BNB"}
 
 _trade_lock = asyncio.Lock()
+
+_regime_detector = RegimeDetector()
+_risk_manager = DynamicRiskManager()
+_tf_analyzer = MultiTimeframeAnalyzer()
 
 _signal_cache: dict = {}
 _signal_cache_time: datetime | None = None
@@ -486,7 +493,7 @@ async def _export_backtest_snapshot():
 
 
 async def fetch_current_prices(symbols: list[str]) -> dict:
-    """Fetch current prices + trend data for crypto assets."""
+    """Fetch current prices + trend data + regime for crypto assets."""
     prices = {}
     symbols = sorted(set(symbols))
     if not symbols:
@@ -516,7 +523,6 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
             logger.warning(f"Fallback price fetch error: {e}")
 
     # Обогащаем signal_bias тренд-данными из Binance klines (MA50/MA200/change_7d)
-    # signal_bias уже используется в _score_candidate — добавляем туда тренд
     crypto_syms = [s for s in symbols if s in CRYPTO_SIGNAL_SYMBOLS]
     if crypto_syms:
         try:
@@ -531,7 +537,6 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
                 for sym, tr in zip(crypto_syms, trend_results):
                     if isinstance(tr, Exception) or not tr:
                         continue
-                    # Кладём тренд в signal_bias чтобы _score_candidate его видел
                     if sym not in _signal_cache:
                         _signal_cache[sym] = {}
                     _signal_cache[sym].update(tr)
@@ -541,9 +546,35 @@ async def fetch_current_prices(symbols: list[str]) -> dict:
                         f"7d={tr.get('change_7d',0):+.1f}%"
                     )
         except ImportError:
-            pass  # web_search.py ещё не обновлён — нормально
+            pass
         except Exception as e:
             logger.debug(f"Trend fetch error: {e}")
+
+    # ═══ REGIME DETECTION ═══
+    # Определяем режим рынка для каждого крипто-актива
+    for sym in crypto_syms:
+        try:
+            candles = await get_candles(sym, timeframe_hours=24, limit=200)
+            if candles:
+                regime = _regime_detector.detect(candles)
+                if regime:
+                    if sym not in _signal_cache:
+                        _signal_cache[sym] = {}
+                    _signal_cache[sym]["regime"] = regime.regime
+                    _signal_cache[sym]["regime_confidence"] = regime.confidence
+                    _signal_cache[sym]["volatility_pct"] = regime.volatility_pct
+                    _signal_cache[sym]["rsi"] = regime.rsi
+                    _signal_cache[sym]["trend_strength"] = regime.trend_strength
+                    _signal_cache[sym]["regime_recommendation"] = regime.recommendation
+                    logger.info(
+                        f"Regime {sym}: {regime.regime} | "
+                        f"Conf: {regime.confidence:.2f} | "
+                        f"Vol: {regime.volatility_pct:.1f}% | "
+                        f"RSI: {regime.rsi:.0f} | "
+                        f"ADX: {regime.trend_strength:.0f}"
+                    )
+        except Exception as e:
+            logger.debug(f"Regime detection error for {sym}: {e}")
 
     return prices
 
@@ -664,7 +695,64 @@ def _score_candidate(candidate: dict, current_price: float, signal_bias: dict) -
     if not blocked_reason and trend_blocked:
         blocked_reason = trend_blocked
 
-    total_score = float(candidate.get("digest_score") or 0.0) + proximity_score + signal_score + trend_score
+    # ─── REGIME SCORE: учитываем режим рынка ────────────────────────────────
+    regime_score = 0.0
+    regime_label = ""
+    sym_cache = _signal_cache.get(candidate["symbol"], {})
+    regime = (sym_cache.get("regime") or "").upper()
+    regime_conf = float(sym_cache.get("regime_confidence") or 0.5)
+    volatility = float(sym_cache.get("volatility_pct") or 0.0)
+    rsi_val = float(sym_cache.get("rsi") or 50.0)
+
+    if regime:
+        if direction == "BUY":
+            if regime == "UPTREND":
+                regime_score += 6.0 * regime_conf
+                regime_label = f"📈 UPTREND (conf {regime_conf:.1f})"
+            elif regime == "DOWNTREND":
+                regime_score -= 10.0 * regime_conf
+                regime_label = f"📉 DOWNTREND против BUY"
+                if regime_conf > 0.7:
+                    blocked_reason = blocked_reason or "against_downtrend"
+            elif regime == "HIGH_VOL":
+                regime_score -= 3.0
+                regime_label = f"⚡ HIGH VOL ({volatility:.1f}%)"
+            elif regime == "SIDEWAYS":
+                regime_score -= 2.0
+                regime_label = f"↔️ SIDEWAYS"
+
+            # RSI фильтрация
+            if rsi_val > 75:
+                regime_score -= 4.0  # Перекупленность
+            elif rsi_val > 70:
+                regime_score -= 2.0
+            elif rsi_val < 30:
+                regime_score += 2.0  # Перепроданность — хороший вход
+
+        elif direction == "SELL":
+            if regime == "DOWNTREND":
+                regime_score += 6.0 * regime_conf
+                regime_label = f"📉 DOWNTREND (conf {regime_conf:.1f})"
+            elif regime == "UPTREND":
+                regime_score -= 10.0 * regime_conf
+                regime_label = f"📈 UPTREND против SELL"
+                if regime_conf > 0.7:
+                    blocked_reason = blocked_reason or "against_uptrend"
+            elif regime == "HIGH_VOL":
+                regime_score -= 3.0
+                regime_label = f"⚡ HIGH VOL ({volatility:.1f}%)"
+            elif regime == "SIDEWAYS":
+                regime_score -= 2.0
+                regime_label = f"↔️ SIDEWAYS"
+
+            if rsi_val < 25:
+                regime_score -= 4.0  # Перепроданность
+            elif rsi_val < 30:
+                regime_score -= 2.0
+            elif rsi_val > 70:
+                regime_score += 2.0  # Перекупленность — хороший вход для шорта
+
+    total_score = float(candidate.get("digest_score") or 0.0) + proximity_score + signal_score + trend_score + regime_score
     # Use lower threshold for signal-follow mode
     threshold = SIGNAL_FOLLOW_SCORE_THRESHOLD if candidate.get("signal_follow_only") else OPEN_SCORE_THRESHOLD
     ready = not blocked_reason and total_score >= threshold
@@ -677,6 +765,11 @@ def _score_candidate(candidate: dict, current_price: float, signal_bias: dict) -
         "signal_score_component": round(signal_score, 2),
         "proximity_score": round(proximity_score, 2),
         "trend_score": round(trend_score, 2),
+        "regime_score": round(regime_score, 2),
+        "regime_label": regime_label,
+        "regime": regime,
+        "volatility_pct": volatility,
+        "rsi": rsi_val,
         "trend_label": trend_label,
         "trend": trend,
         "above_ma50": above_ma50,
@@ -1165,49 +1258,100 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             logger.info(f"⏭ {candidate['symbol']} {candidate['direction']}: не готов — {reason}")
             continue
 
+        # ═══ DYNAMIC RISK MANAGEMENT ═══
+        sym = candidate["symbol"]
+        entry = float(candidate["current_price"])
+        regime = candidate.get("regime", "")
+        volatility = float(candidate.get("volatility_pct") or 0.0)
+        rsi_val = float(candidate.get("rsi") or 50.0)
+
+        # Проверяем не пора ли остановить торговлю
+        should_stop, stop_reason = _risk_manager.should_stop_trading()
+        if should_stop:
+            logger.warning(f"🛑 Trading halted: {stop_reason}")
+            break
+
+        # Рассчитываем динамические стопы и размер позиции
+        base_stop = candidate.get("stop") or entry * 0.98
+        base_target = candidate.get("target") or entry * 1.04
+
+        risk_calc = _risk_manager.calculate_position_size(
+            capital=current_capital,
+            entry_price=entry,
+            stop_price=base_stop,
+            atr=entry * volatility / 100 if volatility > 0 else 0,
+            regime=regime,
+            correlation_count=len(held_symbols & CRYPTO_SIGNAL_SYMBOLS),
+        )
+
+        # Используем динамические стопы если они лучше базовых
+        final_stop = risk_calc.get("stop_price", base_stop)
+        final_target = risk_calc.get("take_profit", base_target)
+        quantity_pct = risk_calc.get("risk_pct", 0.02) / 100  # Convert to fraction
+
+        # Минимальный R/R 1.5
+        rr = abs(final_target - entry) / abs(entry - final_stop) if entry != final_stop else 0
+        if rr < 1.5:
+            logger.info(f"⏭ {sym}: R/R {rr:.2f} < 1.5 — пропускаем")
+            continue
+
         support = candidate.get("support") or 0
-        notes = f"Signal-follow | {candidate['symbol']} {candidate['direction']}"
+        notes = f"Signal-follow | {candidate['direction']} | {regime or 'N/A'}"
         trade_meta = json.dumps({
-            "target": candidate.get("target") or 0.0,
-            "stop": candidate.get("stop") or 0.0,
-            "entry_plan": candidate.get("entry") or 0.0,
+            "target": final_target,
+            "stop": final_stop,
+            "entry_plan": entry,
             "support": support,
             "consensus_verdict": cv,
             "signal_direction": candidate.get("signal_direction", "NEUTRAL"),
+            "regime": regime,
+            "volatility_pct": volatility,
+            "rsi": rsi_val,
+            "rr_ratio": round(rr, 2),
+            "kelly_pct": risk_calc.get("kelly_pct", 0),
+            "risk_pct": risk_calc.get("risk_pct", 0),
         }, ensure_ascii=False)
 
         try:
             result = await add_backtest_signal(
-                symbol=candidate["symbol"],
+                symbol=sym,
                 direction=candidate["direction"],
-                entry_price=float(candidate["current_price"]),
+                entry_price=entry,
                 source="auto_trader",
-                quantity_pct=session_manager.get_adaptive_params().get("quantity_pct", 0.15),
+                quantity_pct=quantity_pct,
                 notes=notes,
                 trade_log=trade_meta,
             )
             if result.get("status") == "opened":
                 events.append({
                     "event": "opened",
-                    "symbol": candidate["symbol"],
+                    "symbol": sym,
                     "direction": candidate["direction"],
-                    "entry_price": float(candidate["current_price"]),
-                    "target": float(candidate.get("target") or 0.0),
-                    "stop": float(candidate.get("stop") or 0.0),
+                    "entry_price": entry,
+                    "target": final_target,
+                    "stop": final_stop,
                     "support": support,
                     "score": float(candidate.get("total_score") or 0.0),
                     "signal_direction": candidate.get("signal_direction", "NEUTRAL"),
                     "trend": candidate.get("trend", ""),
                     "trend_label": candidate.get("trend_label", ""),
+                    "regime": regime,
+                    "volatility_pct": volatility,
+                    "rsi": rsi_val,
+                    "rr_ratio": round(rr, 2),
                     "change_7d": candidate.get("change_7d"),
                     "above_ma50": candidate.get("above_ma50"),
                     "capital": float(result.get("capital_after", 0.0)),
                 })
-                held_symbols.add(candidate["symbol"])
+                held_symbols.add(sym)
                 open_positions.append(result)
-                logger.info(f"Opened {candidate['symbol']} {candidate['direction']} at {candidate['current_price']}")
+                logger.info(
+                    f"Opened {sym} {candidate['direction']} at {entry} | "
+                    f"TP: {final_target:.0f} SL: {final_stop:.0f} | "
+                    f"R/R: {rr:.2f} | Regime: {regime}"
+                )
         except Exception as e:
-            logger.error(f"Failed to open {candidate['symbol']}: {e}")
+            logger.error(f"Failed to open {sym}: {e}")
             continue
 
     # Send one summary notification if any positions were opened

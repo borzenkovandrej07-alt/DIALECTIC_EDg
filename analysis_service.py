@@ -148,6 +148,18 @@ async def run_full_analysis(
     if predictions_summary and not custom_mode:
         news_context += f"\n\n{predictions_summary}"
 
+    # ═══ ELITE DATA ENRICHMENT ═══
+    # Добавляем данные уровня хедж-фондов: деривативы, макро, Fear&Greed
+    if not custom_mode:
+        try:
+            from core.data_enricher import enrich_context, format_enriched_context
+            elite_context = await enrich_context(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"])
+            elite_block = format_enriched_context(elite_context)
+            news_context += f"\n\n{elite_block}"
+            logger.info("Elite data enrichment: OK")
+        except Exception as e:
+            logger.warning(f"Elite data enrichment failed: {e}")
+
     sentiment_result, confidence_instruction = await analyze_and_filter_async(
         news_context,
         str(live_prices),
