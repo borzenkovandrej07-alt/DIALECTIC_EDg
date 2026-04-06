@@ -5,6 +5,9 @@ from .regime_detector import RegimeDetector, MarketRegime
 from .dynamic_risk import DynamicRiskManager, RiskParams
 from .multi_tf import MultiTimeframeAnalyzer, MultiTFResult, TFSignal
 from .data_enricher import enrich_context, format_enriched_context
+from .whale_detector import WhaleDetector
+from .correlation import CorrelationMatrix
+from .event_defense import EventDefense, RiskEvent
 
 __all__ = [
     "DecisionEngine",
@@ -19,4 +22,8 @@ __all__ = [
     "TFSignal",
     "enrich_context",
     "format_enriched_context",
+    "WhaleDetector",
+    "CorrelationMatrix",
+    "EventDefense",
+    "RiskEvent",
 ]
