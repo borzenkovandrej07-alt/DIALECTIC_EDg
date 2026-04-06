@@ -43,6 +43,9 @@ from session_manager import session_manager, SESSION_START_CAPITAL
 from core.regime_detector import RegimeDetector, MarketRegime
 from core.dynamic_risk import DynamicRiskManager
 from core.multi_tf import MultiTimeframeAnalyzer
+from core.whale_detector import WhaleDetector
+from core.correlation import CorrelationMatrix
+from core.event_defense import EventDefense
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,9 @@ _trade_lock = asyncio.Lock()
 _regime_detector = RegimeDetector()
 _risk_manager = DynamicRiskManager()
 _tf_analyzer = MultiTimeframeAnalyzer()
+_whale_detector = WhaleDetector()
+_correlation = CorrelationMatrix(threshold=0.85)
+_event_defense = EventDefense()
 
 _signal_cache: dict = {}
 _signal_cache_time: datetime | None = None
@@ -1216,6 +1222,31 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
     gh_repo = os.getenv("GITHUB_REPO", "borzenkovandrej07-alt/DIALECTIC_EDg")
     markets_bundle = await fetch_markets_bundle(gh_repo)
 
+    # ═══ EVENT DEFENSE CHECK ═══
+    # Сканируем контекст на красные флаги
+    defense_active = False
+    if contexts:
+        latest_text = contexts[0].get("news_summary", "") + " " + contexts[0].get("verdict_reason", "")
+        defense_events = _event_defense.scan_text(latest_text)
+        if _event_defense.is_defense_mode:
+            defense_active = True
+            logger.warning(f"🚨 DEFENSE MODE: {_event_defense.get_defense_recommendation()}")
+
+    # ═══ WHALE DETECTION ═══
+    # Проверяем китовые сделки для крипто-символов
+    whale_signals = {}
+    crypto_syms_in_candidates = {c["symbol"] for c in consensus.get("candidates", [])} & CRYPTO_SIGNAL_SYMBOLS
+    for sym in crypto_syms_in_candidates:
+        whales = await _whale_detector.check_for_whales(f"{sym}USDT")
+        if whales:
+            whale_signals[sym] = _whale_detector.get_whale_sentiment(f"{sym}USDT")
+            logger.info(f"🐋 Whale sentiment {sym}: {whale_signals[sym]}")
+
+    # ═══ CORRELATION CHECK ═══
+    corr_matrix = {}
+    if len(symbols) >= 2:
+        corr_matrix = await _correlation.calculate(list(symbols), timeframe_hours=24, limit=30)
+
     prices = await fetch_current_prices(list(symbols))
     signal_bias = await _fetch_crypto_signal_bias(
         list(symbols), cv, neutral_follow=use_follow, markets_bundle=markets_bundle,
@@ -1258,8 +1289,34 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             logger.info(f"⏭ {candidate['symbol']} {candidate['direction']}: не готов — {reason}")
             continue
 
-        # ═══ DYNAMIC RISK MANAGEMENT ═══
+        # ═══ DEFENSE MODE BLOCK ═══
+        if defense_active:
+            logger.info(f"⏭ {candidate['symbol']}: blocked by DEFENSE MODE")
+            continue
+
+        # ═══ CORRELATION FILTER ═══
         sym = candidate["symbol"]
+        if corr_matrix:
+            conflict = _correlation.check_conflict(sym, list(held_symbols), corr_matrix)
+            if conflict:
+                logger.info(f"⏭ {sym}: blocked — high correlation with {conflict}")
+                continue
+
+        # ═══ WHALE SENTIMENT BONUS ═══
+        whale_sent = whale_signals.get(sym, "NEUTRAL")
+        whale_bonus = 0.0
+        if whale_sent == "BULLISH" and candidate["direction"] == "BUY":
+            whale_bonus = 3.0
+            logger.info(f"🐋 {sym}: Whale BUY signal confirmed — bonus +3.0")
+        elif whale_sent == "BEARISH" and candidate["direction"] == "SELL":
+            whale_bonus = 3.0
+            logger.info(f"🐋 {sym}: Whale SELL signal confirmed — bonus +3.0")
+        elif (whale_sent == "BEARISH" and candidate["direction"] == "BUY") or \
+             (whale_sent == "BULLISH" and candidate["direction"] == "SELL"):
+            whale_bonus = -5.0
+            logger.info(f"🐋 {sym}: Whale signal AGAINST trade — penalty -5.0")
+
+        # ═══ DYNAMIC RISK MANAGEMENT ═══
         entry = float(candidate["current_price"])
         regime = candidate.get("regime", "")
         volatility = float(candidate.get("volatility_pct") or 0.0)
@@ -1283,6 +1340,11 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             regime=regime,
             correlation_count=len(held_symbols & CRYPTO_SIGNAL_SYMBOLS),
         )
+
+        # Defense mode: уменьшаем размер позиции
+        if defense_active:
+            risk_calc["risk_pct"] = risk_calc.get("risk_pct", 2.0) * 0.3
+            risk_calc["quantity"] = risk_calc.get("quantity", 0) * 0.3
 
         # Используем динамические стопы если они лучше базовых
         final_stop = risk_calc.get("stop_price", base_stop)
@@ -1310,6 +1372,8 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
             "rr_ratio": round(rr, 2),
             "kelly_pct": risk_calc.get("kelly_pct", 0),
             "risk_pct": risk_calc.get("risk_pct", 0),
+            "whale_sentiment": whale_sent,
+            "defense_mode": defense_active,
         }, ensure_ascii=False)
 
         try:
@@ -1339,6 +1403,8 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
                     "volatility_pct": volatility,
                     "rsi": rsi_val,
                     "rr_ratio": round(rr, 2),
+                    "whale_sentiment": whale_sent,
+                    "defense_mode": defense_active,
                     "change_7d": candidate.get("change_7d"),
                     "above_ma50": candidate.get("above_ma50"),
                     "capital": float(result.get("capital_after", 0.0)),
@@ -1348,7 +1414,7 @@ async def _check_and_trade_locked(bot, admin_ids: list[int]) -> list[dict]:
                 logger.info(
                     f"Opened {sym} {candidate['direction']} at {entry} | "
                     f"TP: {final_target:.0f} SL: {final_stop:.0f} | "
-                    f"R/R: {rr:.2f} | Regime: {regime}"
+                    f"R/R: {rr:.2f} | Regime: {regime} | Whale: {whale_sent}"
                 )
         except Exception as e:
             logger.error(f"Failed to open {sym}: {e}")
