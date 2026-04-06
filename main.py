@@ -420,9 +420,7 @@ def extract_symbols_from_report(report: str, prices: dict) -> tuple[dict, dict, 
 def build_short_report(parts: dict, stars: str, pct: int) -> list:
     """
     Возвращает СПИСОК сообщений для отправки.
-    ПЕРВОЕ сообщение — короткое (вердикт + торговый план).
-    ВТОРОЕ — ключевые сценарии.
-    Остальное — если нужно.
+    ПЕРВОЕ сообщение — короткое (вердикт + торговый план + простыми словами + эффекты 2-го порядка).
     Полные дебаты — в .txt файле.
     """
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -464,19 +462,60 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
                 lines.append(f"  Стоп: ${stop:,.0f} | {tf}")
         lines.append("")
 
-    # Добавляем ключевые рыночные данные
-    synth_section = parts.get("synthesis", "")[:800]
-    for line in synth_section.split("\n"):
-        if any(x in line.upper() for x in ["VIX:", "FEAR", "RISK-ON", "RISK-OFF", "BTC", "ETH", "НЕФТЬ", "НЕФТЯН"]):
-            if len(line.strip()) > 5 and len(line.strip()) < 100:
-                lines.append(line.strip())
+    # ─── ПРОСТЫМИ СЛОВАМИ ───
+    simple_block_start = full.find("🗣 ПРОСТЫМИ СЛОВАМИ" if "🗣 ПРОСТЫМИ СЛОВАМИ" in full else "ПРОСТЫМИ СЛОВАМИ")
+    if simple_block_start == -1:
+        simple_block_start = full.find("───\n🗣" if "───\n🗣" in full else "🗣")
+    if simple_block_start != -1:
+        simple_block = full[simple_block_start:simple_block_start+500]
+        # Extract just the summary text
+        simple_lines = []
+        for line in simple_block.split("\n"):
+            if len(line.strip()) > 10 and len(line.strip()) < 200:
+                if not line.startswith("─") and not line.startswith("🗣"):
+                    simple_lines.append(line.strip())
+            if len(simple_lines) >= 3:
+                break
+        if simple_lines:
+            lines.append("💬 *ПРОСТЫМИ СЛОВАМИ:*")
+            for sl in simple_lines[:3]:
+                lines.append(f"▫️ {sl}")
+            lines.append("")
+
+    # ─── ЭФФЕКТЫ 2-ГО ПОРЯДКА ───
+    effects_start = full.find("📌" if "📌" in full else "ЭФФЕКТ")
+    if effects_start != -1:
+        effects_block = full[effects_start:effects_start+800]
+        effect_lines = []
+        for line in effects_block.split("\n"):
+            if "→" in line and len(line.strip()) < 150:
+                effect_lines.append(line.strip())
+            if len(effect_lines) >= 4:
+                break
+        if effect_lines:
+            lines.append("🔗 *ЭФФЕКТЫ 2-ГО ПОРЯДКА:*")
+            for el in effect_lines[:4]:
+                lines.append(f"▫️ {el}")
+            lines.append("")
+
+    # ─── РЕЖИМ РЫНКА ───
+    for marker in ["📡 РЕЖИМ РЫНКА:", "РЕЖИМ РЫНКА:", "VIX"]:
+        idx = full.find(marker)
+        if idx != -1:
+            mode_section = full[idx:idx+300]
+            mode_lines = [l.strip() for l in mode_section.split("\n") if l.strip() and len(l.strip()) < 120][:3]
+            if mode_lines:
+                lines.append("📈 *РЕЖИМ РЫНКА:*")
+                for ml in mode_lines:
+                    if "VIX" in ml or "Fear" in ml or "Risk" in ml:
+                        lines.append(f"▫️ {ml}")
+            break
 
     lines.append(f"{'─' * 30}")
     lines.append("")
     lines.append("📎 Полные дебаты — в файле ниже")
 
     header_msg = "\n".join(lines)
-
     messages = [header_msg]
 
     # ─── Второе сообщение — сценарии ───
@@ -488,12 +527,6 @@ def build_short_report(parts: dict, stars: str, pct: int) -> list:
         scenarios = full[synth_start_idx:synth_start_idx+600]
         if scenarios.strip():
             messages.append(scenarios.strip()[:2000])
-
-    # ─── Третье — дисклеймер ───
-    if parts.get("disclaimer"):
-        disc = parts["disclaimer"][:300]
-        if disc.strip():
-            messages.append(disc.strip())
 
     return messages
 
