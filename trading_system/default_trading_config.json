@@ -1,0 +1,26 @@
+{
+  "mode": "paper",
+  "min_signal_confidence": 0,
+  "risk_per_trade_pct": 2.0,
+  "min_risk_reward": 1.5,
+  "default_timeframe_hours": 168,
+  "candle_limit": 120,
+  "cache_ttl_seconds": 3600,
+  "parallel_max_workers": 8,
+  "assets_default": ["BTC", "ETH", "SOL", "BNB"],
+  "backtest": {
+    "demo_direction": "LONG",
+    "target_pct": 4.0,
+    "stop_pct": 2.0,
+    "timeframe_label": "1w"
+  },
+  "paper": {
+    "use_position_sizing": true,
+    "account_currency": "USD"
+  },
+  "paths": {
+    "config_file": "config/trading_config.json",
+    "cache_subdir": "trading_market_cache",
+    "cli_results_file": "data/cli_backtest_results.json"
+  }
+}

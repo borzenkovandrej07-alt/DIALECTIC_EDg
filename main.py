@@ -3068,4 +3068,10 @@ async def cmd_backtest_clear(message: Message):
 
 
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("analyze", "backtest", "report"):
+        from trading_system.cli_main import run_cli
+
+        raise SystemExit(run_cli(sys.argv[1:]))
     asyncio.run(main())

@@ -28,3 +28,7 @@ matplotlib
 redis>=5.0
 
 # v4
+
+# Trading CLI + dashboard (optional)
+pandas>=2.0
+streamlit>=1.28

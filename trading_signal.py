@@ -127,6 +127,8 @@ def parse_signals_from_predictions(predictions: list[dict]) -> list[Signal]:
         if direction is None:
             continue
 
+        conf = float(pred.get("confidence") or 0.0)
+
         signal = Signal(
             asset=asset,
             direction=direction,
@@ -136,6 +138,7 @@ def parse_signals_from_predictions(predictions: list[dict]) -> list[Signal]:
             timeframe=timeframe,
             source="prediction",
             timestamp=pred.get("created_at", datetime.now().isoformat()),
+            confidence=conf,
         )
 
         if signal.validate():

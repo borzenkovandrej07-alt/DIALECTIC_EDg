@@ -147,3 +147,16 @@ class MarketDataFetcher:
         except Exception as e:
             logger.warning(f"Yahoo Finance error: {e}")
             return ""
+
+
+async def fetch_ohlc_candles(
+    asset: str,
+    timeframe_hours: int = 24,
+    limit: int = 120,
+):
+    """
+    OHLC для бэктеста: единая точка входа → `backtester.get_candles` (Binance / fallback).
+    """
+    from backtester import get_candles
+
+    return await get_candles(asset, timeframe_hours=timeframe_hours, limit=limit)
