@@ -46,6 +46,8 @@ from core.multi_tf import MultiTimeframeAnalyzer
 from core.whale_detector import WhaleDetector
 from core.correlation import CorrelationMatrix
 from core.event_defense import EventDefense
+from core.confluence import ConfluenceEngine
+from core.economic_calendar import EconomicCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,8 @@ _tf_analyzer = MultiTimeframeAnalyzer()
 _whale_detector = WhaleDetector()
 _correlation = CorrelationMatrix(threshold=0.85)
 _event_defense = EventDefense()
+_confluence = ConfluenceEngine()
+_econ_calendar = EconomicCalendar()
 
 _signal_cache: dict = {}
 _signal_cache_time: datetime | None = None

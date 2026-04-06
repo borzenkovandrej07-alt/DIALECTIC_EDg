@@ -1070,6 +1070,37 @@ async def cmd_eval_pipeline(message: Message):
         await message.answer(f"Ошибка: {e}")
 
 
+@dp.message(Command("screener"))
+async def cmd_screener(message: Message):
+    """Scan market for anomalies: /screener"""
+    try:
+        from core.screener import MarketScreener
+        screener = MarketScreener(top_n=15)
+        await message.answer("📡 Сканирую рынок на аномалии...")
+        results = await screener.scan()
+        
+        if not results:
+            await message.answer("📡 Сканер: Аномалий не обнаружено. Рынок спокоен.")
+            return
+
+        lines = ["📡 *РЫНОЧНЫЙ СКРИНЕР*\n"]
+        for r in results:
+            sym = r.get("symbol", "?")
+            signals = r.get("signals", [])
+            if signals:
+                lines.append(f"*{sym}*")
+                for s in signals:
+                    lines.append(f"  ▫️ {s}")
+                lines.append("")
+
+        lines.append(f"Найдено аномалий: {len(results)}")
+        msg = "\n".join(lines)
+        await message.answer(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"screener error: {e}")
+        await message.answer(f"Ошибка сканера: {e}")
+
+
 def _main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📘 Инструкция", callback_data="cmd:guide")],
@@ -2784,6 +2815,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="tt", description="🧪 Тест"),
         BotCommand(command="signalstatus", description="📊 Статус трейдера"),
         BotCommand(command="eval", description="📈 Валидация сигналов"),
+        BotCommand(command="screener", description="📡 Сканер аномалий"),
         BotCommand(command="close", description="Закрыть позицию"),
         BotCommand(command="why", description="Почему открыта позиция"),
         BotCommand(command="stop", description="Остановить автотрейд"),
