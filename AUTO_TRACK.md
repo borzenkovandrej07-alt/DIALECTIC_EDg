@@ -1,6 +1,6 @@
 # 📊 Dialectic Edge — Auto Track Record
 
-> Последнее обновление: 19.04.2026 00:10
+> Последнее обновление: 20.04.2026 00:10
 > Автоматический трекинг точности прогнозов.
 > ⚠️ Не является финансовым советом. DYOR.
 
@@ -29,29 +29,29 @@
 
 | Дата | Актив | Тип | Прогноз | Факт | Результат | Точность |
 |------|-------|-----|---------|------|-----------|----------|
-| 18.04.2026 21:14 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 18.04.2026 21:14 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 18.04.2026 21:14 | BTC | Daily Digest | BEARISH | -1.67% | ✅ Верно | 100% |
-| 18.04.2026 21:14 | ETH | Daily Digest | BEARISH | -2.66% | ✅ Верно | 100% |
-| 17.04.2026 13:58 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 17.04.2026 13:58 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 16.04.2026 14:46 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 16.04.2026 14:46 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 15.04.2026 08:11 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 15.04.2026 08:11 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 14.04.2026 11:00 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 14.04.2026 11:00 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 14.04.2026 11:00 | BTC | Daily Digest | BEARISH | -1.67% | ✅ Верно | 100% |
-| 14.04.2026 11:00 | ETH | Daily Digest | BEARISH | -2.66% | ✅ Верно | 100% |
-| 13.04.2026 11:49 | BTC | Daily Digest | BEARISH | -1.67% | ✅ Верно | 100% |
-| 12.04.2026 11:41 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 12.04.2026 11:41 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 11.04.2026 06:51 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 11.04.2026 06:51 | BTC | Daily Digest | BEARISH | -1.67% | ✅ Верно | 100% |
-| 10.04.2026 05:25 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 10.04.2026 05:25 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
-| 08.04.2026 05:23 | BTC | Daily Digest | BULLISH | -1.67% | ❌ Неверно | 0% |
-| 08.04.2026 05:23 | ETH | Daily Digest | BULLISH | -2.66% | ❌ Неверно | 0% |
+| 18.04.2026 21:14 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 18.04.2026 21:14 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 18.04.2026 21:14 | BTC | Daily Digest | BEARISH | -2.38% | ✅ Верно | 100% |
+| 18.04.2026 21:14 | ETH | Daily Digest | BEARISH | -3.68% | ✅ Верно | 100% |
+| 17.04.2026 13:58 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 17.04.2026 13:58 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 16.04.2026 14:46 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 16.04.2026 14:46 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 15.04.2026 08:11 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 15.04.2026 08:11 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 14.04.2026 11:00 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 14.04.2026 11:00 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 14.04.2026 11:00 | BTC | Daily Digest | BEARISH | -2.38% | ✅ Верно | 100% |
+| 14.04.2026 11:00 | ETH | Daily Digest | BEARISH | -3.68% | ✅ Верно | 100% |
+| 13.04.2026 11:49 | BTC | Daily Digest | BEARISH | -2.38% | ✅ Верно | 100% |
+| 12.04.2026 11:41 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 12.04.2026 11:41 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 11.04.2026 06:51 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 11.04.2026 06:51 | BTC | Daily Digest | BEARISH | -2.38% | ✅ Верно | 100% |
+| 10.04.2026 05:25 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 10.04.2026 05:25 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
+| 08.04.2026 05:23 | BTC | Daily Digest | BULLISH | -2.38% | ❌ Неверно | 0% |
+| 08.04.2026 05:23 | ETH | Daily Digest | BULLISH | -3.68% | ❌ Неверно | 0% |
 
 ---
 ## 🏆 Точность по активам
